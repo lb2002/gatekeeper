@@ -11,6 +11,7 @@ from typing import Callable
 import httpx
 
 from gatekeeper.evidence.bundle import RenderedBundle
+from gatekeeper.guard.core import guard_busy
 from gatekeeper.models.backends import ModelResult, classify_local
 
 
@@ -82,6 +83,9 @@ def run(
 ) -> int:
     done = 0
     while max_items is None or done < max_items:
+        if guard_busy():  # an install check is waiting for the local model
+            time.sleep(2)
+            continue
         item = api.lease(backend)
         if item is None:
             if max_items is not None:

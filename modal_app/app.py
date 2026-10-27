@@ -36,6 +36,8 @@ RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
 PROCESS_BUDGET_S = 75  # after this, unfinished names are deferred to the next run (timeout is 115 s)
 MAX_CHANGES_PER_RUN = 4000
 MAX_PENDING = 8000
+MAX_WINDOW = timedelta(hours=24)
+SEEN_MAX = 60000
 
 
 def _append_jsonl(path: Path, rows: list[dict]) -> None:
@@ -71,13 +73,19 @@ def _run_poll() -> dict:
                     names.setdefault(ch.name)
             since = nxt
         stats["changes"] = len(names)
-        seen_keys = set(state.get("seen_recent", []))
-        last = state.get("last_run", None)
+        seen_list = state.get("seen_recent", [])
+        seen_keys = set(seen_list)
+        # Every change after the last run that reached the head with no backlog is unprocessed, so
+        # the window must reach back to then (plus slack for publish-to-feed delay). Basing it on
+        # the last run alone would skip versions whenever the feed lags or names are deferred.
+        caught_up = state.get("caught_up_at", None) or (state.get("last_run") or {}).get("at")
         window = timedelta(minutes=30)
-        if last and last.get("at"):
-            window = min(timedelta(hours=6), now - datetime.fromisoformat(last["at"]) + timedelta(minutes=10))
-        if pending:  # names deferred by an earlier run may have versions older than this run's window
-            window = timedelta(hours=6)
+        if caught_up:
+            window = now - datetime.fromisoformat(caught_up) + timedelta(minutes=10)
+        if window > MAX_WINDOW:
+            print(f"WARNING: monitor fell {window} behind; versions older than {MAX_WINDOW} are not scanned")
+            window = MAX_WINDOW
+        stats["window_min"] = round(window.total_seconds() / 60)
         todo = list(dict.fromkeys(pending + list(names)))
         records, deferred = process_names(
             client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S
@@ -99,9 +107,13 @@ def _run_poll() -> dict:
     stats["flagged"] = len(flagged)
     stats["errors"] = sum(1 for r in records if r.error)
     # remember recently seen versions (bounded) and the feed position
-    recent = (list(seen_keys) + [r.key for r in records])[-20000:]
+    recent = (seen_list + [r.key for r in records if r.key not in seen_keys])[-SEEN_MAX:]  # oldest dropped first
     state["seen_recent"] = recent
+    if len(deferred) > MAX_PENDING:
+        print(f"WARNING: backlog of {len(deferred)} names truncated to {MAX_PENDING}; the rest are not scanned")
     state["pending_names"] = deferred[:MAX_PENDING]
+    if since >= head and not deferred:
+        state["caught_up_at"] = now.isoformat()
     state["seq"] = since
     state["last_run"] = {"at": now.isoformat(), "head": head, "seq": since, **stats}
     stats["lag_changes"] = head - since

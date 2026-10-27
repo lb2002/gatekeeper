@@ -8,10 +8,14 @@ ask the local Muse Glimmer. Nothing from the package is executed before the deci
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
+import os
 import subprocess
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 
@@ -24,6 +28,27 @@ EXEC_COMMANDS = {"exec", "x"}
 RULES_ALLOW_BELOW = 4  # content score under this: allow without asking the model
 BLOCK_CONFIDENCE = 0.6
 ALLOW_FLAG = "--gk-allow"
+# While this file exists the laptop worker leases no new queue items, so an install check gets
+# the local model next instead of waiting behind the monitor queue.
+BUSY_FILE = Path(os.environ.get("USERPROFILE") or Path.home()) / ".gatekeeper" / "guard.busy"
+BUSY_STALE_S = 15 * 60
+
+
+@contextlib.contextmanager
+def model_priority():
+    BUSY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BUSY_FILE.write_text(str(os.getpid()))
+    try:
+        yield
+    finally:
+        BUSY_FILE.unlink(missing_ok=True)
+
+
+def guard_busy() -> bool:
+    try:
+        return time.time() - BUSY_FILE.stat().st_mtime < BUSY_STALE_S
+    except FileNotFoundError:
+        return False
 
 
 @dataclass
@@ -104,8 +129,6 @@ def verify_integrity(data: bytes, integrity: str | None) -> bool:
 
 
 def check_spec(npm_cmd: list[str], spec: str, classify=None) -> Decision:
-    import time
-
     started = time.monotonic()
     meta = resolve(npm_cmd, spec)
     data = httpx.get(meta["tarball"], timeout=60, follow_redirects=True).content
@@ -120,7 +143,8 @@ def check_spec(npm_cmd: list[str], spec: str, classify=None) -> Decision:
     if classify is None:
         from gatekeeper.models.backends import classify_local as classify
     bundle = build_bundle(meta["name"], meta["version"], pkg, content)
-    result = classify(bundle)
+    with model_priority():
+        result = classify(bundle)
     v = result.verdict
     secs = time.monotonic() - started
     if v is None:
