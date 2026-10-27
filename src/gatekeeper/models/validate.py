@@ -21,4 +21,16 @@ def citation_errors(verdict: Verdict, bundle: Bundle) -> list[str]:
             )
     if verdict.verdict.value != "benign" and not verdict.evidence:
         errors.append("non-benign verdict without evidence")
+    if verdict.verdict.value == "malicious" and verdict.evidence:
+        code_refs = [ev for ev in verdict.evidence if not _is_manifest(bundle, ev.excerpt_id)]
+        if not code_refs:
+            errors.append("weak evidence: malicious verdict cites only package.json")
     return errors
+
+
+def _is_manifest(bundle, excerpt_id: str) -> bool:
+    for ex in getattr(bundle, "excerpts", None) or []:
+        if getattr(ex, "excerpt_id", None) == excerpt_id:
+            return str(getattr(ex, "path", "")).startswith("package.json")
+    refs = getattr(bundle, "refs", None) or []
+    return any(r.excerpt_id == excerpt_id and getattr(r, "path", "").startswith("package.json") for r in refs)

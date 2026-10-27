@@ -56,6 +56,7 @@ class ExcerptRef:
     excerpt_id: str
     first_line: int
     last_line: int
+    path: str = ""
 
 
 @dataclass
@@ -75,12 +76,15 @@ class RenderedBundle:
 
     @classmethod
     def from_record(cls, rec: dict) -> "RenderedBundle":
-        refs = [ExcerptRef(e["excerpt_id"], e["first_line"], e["last_line"]) for e in rec.get("excerpts") or []]
+        refs = [ExcerptRef(e["excerpt_id"], e["first_line"], e["last_line"], e.get("path", "")) for e in rec.get("excerpts") or []]
         return cls(rec["name"], rec["version"], rec["bundle"], refs)
 
 
-def _clip(line: str) -> str:
-    return line if len(line) <= MAX_LINE_CHARS else line[:MAX_LINE_CHARS] + f" …[+{len(line) - MAX_LINE_CHARS} chars]"
+MINIFIED_EXCERPT_CHARS = 600
+
+
+def _clip(line: str, limit: int = MAX_LINE_CHARS) -> str:
+    return line if len(line) <= limit else line[:limit] + f" …[+{len(line) - limit} chars]"
 
 
 def _manifest_excerpt(pkg: PackageFiles) -> list[str]:
@@ -127,10 +131,10 @@ def build_bundle(
     counter = 0
     used = len("\n".join(b.header))
 
-    def add(path: str, first_line: int, lines: list[str]) -> bool:
+    def add(path: str, first_line: int, lines: list[str], clip: int = MAX_LINE_CHARS) -> bool:
         nonlocal counter, used
         counter += 1
-        ex = Excerpt(f"E{counter}", path, first_line, [_clip(line) for line in lines])
+        ex = Excerpt(f"E{counter}", path, first_line, [_clip(line, clip) for line in lines])
         size = len(ex.render()) + 2
         if used + size > max_chars:
             counter -= 1
@@ -155,9 +159,24 @@ def build_bundle(
             continue
         all_lines = text.splitlines()
         if any(len(line) > MINIFIED_LINE_CHARS for line in all_lines[:50]):
+            # Minified/packed: show the code around each rule hit (real line numbers), not just the start.
             longest = max(len(line) for line in all_lines) if all_lines else 0
-            note = f"(minified or packed file: {len(all_lines)} lines, longest {longest} chars; start shown)"
-            add(path, 1, [note, all_lines[0][:200] if all_lines else ""])
+            hit_lines = sorted(set(hits_by_path.get(path, [])))
+            if not hit_lines:
+                note = f"(minified or packed file: {len(all_lines)} lines, longest {longest} chars; no rule hits; start shown)"
+                add(f"{path} {note}", 1, [all_lines[0][:200] if all_lines else ""])
+                continue
+            hits_here = [h for h in content.hits if h.path == path]
+            for ln in hit_lines[:4]:
+                line = all_lines[ln - 1] if ln - 1 < len(all_lines) else ""
+                snippets = []
+                for h in hits_here:
+                    if h.line != ln:
+                        continue
+                    snippets.append(line[max(0, h.col - 200): h.col + 300])
+                shown = " … ".join(dict.fromkeys(s for s in snippets if s)) or line[:400]
+                if not add(f"{path} (minified, excerpt of line {ln})", ln, [shown], clip=MINIFIED_EXCERPT_CHARS):
+                    break
             continue
         spans = _windows(hits_by_path.get(path, []), len(all_lines)) or [(1, min(len(all_lines), 2 * CONTEXT_LINES + 1))]
         for start, end in spans:

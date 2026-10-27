@@ -51,6 +51,7 @@ class Hit:
     path: str
     line: int
     snippet: str
+    col: int = 0  # character offset of the match within the line
 
 
 @dataclass
@@ -125,9 +126,11 @@ def score_content(pkg: PackageFiles, max_hits_per_rule: int = 5) -> ContentScore
             for rule in RULES:
                 if per_rule.get(rule.name, 0) >= max_hits_per_rule:
                     continue
-                if rule.pattern.search(line):
+                m = rule.pattern.search(line)
+                if m:
                     per_rule[rule.name] = per_rule.get(rule.name, 0) + 1
-                    s.hits.append(Hit(rule.name, path, line_no, line.strip()[:200]))
+                    start = m.start()
+                    s.hits.append(Hit(rule.name, path, line_no, line[max(0, start - 80): start + 120].strip(), col=start))
         for m in _LONG_STRING.finditer(text):
             if _entropy(m.group(1)) > 5.0 and per_rule.get("high_entropy_blob", 0) < 3:
                 per_rule["high_entropy_blob"] = per_rule.get("high_entropy_blob", 0) + 1
