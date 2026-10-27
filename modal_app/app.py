@@ -128,6 +128,21 @@ def _enqueue(rows: list[dict]) -> int:
     return added
 
 
+@app.function(image=image, timeout=120)
+def prune_queue(before: str) -> dict:
+    """Drop unjudged, unreviewed queue items first seen before `before` (ISO), e.g. flags produced
+    by an older, noisier rule set."""
+    cutoff = datetime.fromisoformat(before)
+    removed = 0
+    for key, it in list(queue.items()):
+        if it.get("review") or it.get("verdicts"):
+            continue
+        if datetime.fromisoformat(it["seen_at"]) < cutoff:
+            queue.pop(key, None)
+            removed += 1
+    return {"removed": removed, "remaining": len(queue)}
+
+
 @app.function(image=image, volumes={str(DATA): volume}, timeout=300, cpu=0.25, memory=512)
 def backfill_queue() -> dict:
     """Load flagged records from the volume into the queue (recovery and first deployment)."""
@@ -308,8 +323,16 @@ def api():
     def work(backend: str = "glimmer-local") -> dict:
         now = time.time()
         best_key, best = None, None
-        for key, item in queue.items():
+        items = dict(queue.items())
+        judged = {it.get("bundle_sha256"): it["verdicts"][backend] for it in items.values() if backend in it.get("verdicts", {})}
+        for key, item in items.items():
             if backend in item.get("verdicts", {}):
+                continue
+            same = judged.get(item.get("bundle_sha256"))
+            if same is not None:  # identical evidence already judged: reuse instead of recomputing
+                item.setdefault("verdicts", {})[backend] = {**same, "reused": True}
+                item["status"] = "done"
+                queue[key] = item
                 continue
             if item["status"] == "leased" and item.get("leased_until", 0) > now:
                 continue
