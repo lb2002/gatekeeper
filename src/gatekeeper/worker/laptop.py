@@ -40,6 +40,20 @@ class MonitorApi:
         data = r.json()
         return data if data.get("key") else None
 
+    def items(self, limit: int = 50) -> list[dict]:
+        r = self.client.get("/items", params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+
+    def item(self, key: str) -> dict:
+        r = self.client.get("/item", params={"key": key})
+        r.raise_for_status()
+        return r.json()
+
+    def review(self, key: str, decision: str, note: str = "") -> None:
+        r = self.client.post("/review", json={"key": key, "decision": decision, "note": note})
+        r.raise_for_status()
+
     def submit(self, key: str, result: ModelResult) -> None:
         r = self.client.post(
             "/verdict",

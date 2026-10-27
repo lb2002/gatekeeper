@@ -4,9 +4,10 @@ Deploy:  uv run modal deploy modal_app/app.py
 Test:    uv run modal run modal_app/app.py::poll_once
 
 Package archives are only ever downloaded and read (in memory) inside these containers.
-"""
 
-from __future__ import annotations
+No `from __future__ import annotations` here: FastAPI must resolve the request models defined
+inside `api()` at runtime.
+"""
 
 import json
 import time
@@ -175,6 +176,26 @@ def confirm() -> dict:
 
 LEASE_S = 15 * 60
 
+from pydantic import BaseModel  # noqa: E402  (request models must live at module level for FastAPI)
+
+
+class VerdictIn(BaseModel):
+    key: str
+    backend: str
+    model: str
+    verdict: dict | None = None
+    errors: list[str] = []
+    latency_s: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+class ReviewIn(BaseModel):
+    key: str
+    decision: str  # malicious | benign | unsure
+    note: str = ""
+
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[worker_secret], cpu=0.25, memory=512)
 @modal.concurrent(max_inputs=20)
@@ -184,7 +205,6 @@ def api():
     import os
 
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from pydantic import BaseModel
 
     web = FastAPI(title="gatekeeper")
     token = os.environ["GK_WORKER_TOKEN"]
@@ -192,17 +212,6 @@ def api():
     def auth(authorization: str = Header(default="")) -> None:
         if authorization != f"Bearer {token}":
             raise HTTPException(status_code=401, detail="unauthorized")
-
-    class VerdictIn(BaseModel):
-        key: str
-        backend: str
-        model: str
-        verdict: dict | None
-        errors: list[str] = []
-        latency_s: float = 0.0
-        input_tokens: int = 0
-        output_tokens: int = 0
-        cost_usd: float = 0.0
 
     @web.get("/status", dependencies=[Depends(auth)])
     def status() -> dict:
@@ -236,6 +245,43 @@ def api():
         queue[best_key] = best
         return {"key": best_key, **{k: best[k] for k in QUEUE_FIELDS}}
 
+    @web.get("/items", dependencies=[Depends(auth)])
+    def items(limit: int = 50) -> list[dict]:
+        rows = []
+        for key, it in queue.items():
+            rows.append({
+                "key": key,
+                "priority": it["priority"],
+                "published_at": it.get("published_at"),
+                "seen_at": it.get("seen_at"),
+                "rules": it.get("rules"),
+                "meta_reasons": it.get("meta_reasons"),
+                "verdicts": it.get("verdicts", {}),
+                "confirmation": it.get("confirmation"),
+                "review": it.get("review"),
+            })
+        rows.sort(key=lambda r: r["priority"], reverse=True)
+        return rows[:limit]
+
+    @web.get("/item", dependencies=[Depends(auth)])
+    def item(key: str) -> dict:
+        it = queue.get(key, None)
+        if it is None:
+            raise HTTPException(status_code=404, detail="unknown key")
+        return {"key": key, **it}
+
+    @web.post("/review", dependencies=[Depends(auth)])
+    def review(r: ReviewIn) -> dict:
+        now = datetime.now(timezone.utc)
+        it = queue.get(r.key, None)
+        if it is None:
+            raise HTTPException(status_code=404, detail="unknown key")
+        it["review"] = {"decision": r.decision, "note": r.note, "at": now.isoformat()}
+        queue[r.key] = it
+        _append_jsonl(DATA / "reviews" / f"{now:%Y-%m-%d}.jsonl", [{"key": r.key, **it["review"]}])
+        volume.commit()
+        return {"ok": True}
+
     @web.post("/verdict", dependencies=[Depends(auth)])
     def verdict(v: VerdictIn) -> dict:
         now = datetime.now(timezone.utc)
@@ -249,6 +295,7 @@ def api():
                 "confidence": (v.verdict or {}).get("confidence"),
                 "at": now.isoformat(),
                 "errors": v.errors[:3],
+                "full": v.verdict,
             }
             item["status"] = "done" if v.verdict else "pending"
             item["leased_until"] = 0.0

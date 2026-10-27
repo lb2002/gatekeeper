@@ -161,5 +161,62 @@ def worker(
     console.print(f"processed {done} item(s)")
 
 
+@app.command("review")
+def review(
+    limit: int = typer.Option(10, help="How many items to go through."),
+    include_unjudged: bool = typer.Option(False, help="Also show items no model has judged yet."),
+    reports_dir: str = typer.Option("data/reports", help="Where report drafts are written."),
+) -> None:
+    """Go through flagged packages (model verdict malicious/suspicious first) and record your decision."""
+    import os
+
+    from rich.panel import Panel
+
+    from gatekeeper.report.drafts import write_drafts
+    from gatekeeper.worker.laptop import MonitorApi, load_env
+
+    load_env()
+    api = MonitorApi(os.environ["GK_API_URL"], os.environ["GK_WORKER_TOKEN"])
+    rank = {"malicious": 0, "suspicious": 1, "benign": 3, None: 2}
+
+    def worst(row: dict) -> str | None:
+        labels = [v.get("verdict") for v in (row.get("verdicts") or {}).values()]
+        return min(labels, key=lambda lab: rank.get(lab, 2)) if labels else None
+
+    rows = [r for r in api.items(limit=500) if not r.get("review")]
+    if not include_unjudged:
+        rows = [r for r in rows if worst(r) in ("malicious", "suspicious")]
+    rows.sort(key=lambda r: (rank.get(worst(r), 2), -r["priority"]))
+    if not rows:
+        console.print("nothing to review right now")
+        return
+    for row in rows[:limit]:
+        it = api.item(row["key"])
+        console.rule(f"{row['key']}  priority {row['priority']}  published {row.get('published_at')}")
+        console.print(Panel(it["bundle"], title="evidence bundle", expand=False), markup=False, highlight=False)
+        for backend, v in (row.get("verdicts") or {}).items():
+            console.print(f"{backend}: {v.get('verdict')} ({v.get('confidence')})  {v.get('errors') or ''}", markup=False)
+        if row.get("confirmation"):
+            console.print(f"public sources: {row['confirmation']}", markup=False)
+        console.print(f"npm page: https://www.npmjs.com/package/{row['key'].rsplit('@', 1)[0]}", markup=False)
+        choice = typer.prompt("[m]alicious / [b]enign / [u]nsure / [s]kip / [q]uit", default="s").strip().lower()[:1]
+        if choice == "q":
+            break
+        if choice not in ("m", "b", "u"):
+            continue
+        decision = {"m": "malicious", "b": "benign", "u": "unsure"}[choice]
+        note = typer.prompt("note (optional)", default="", show_default=False)
+        api.review(row["key"], decision, note)
+        if decision == "malicious":
+            judged = [v for v in (row.get("verdicts") or {}).values() if v.get("full")]
+            judged.sort(key=lambda v: (rank.get(v.get("verdict"), 2), -(v.get("confidence") or 0)))
+            full = judged[0]["full"] if judged else {}
+            files = write_drafts({"name": it["name"], "version": it["version"]}, full, reports_dir, note)
+            console.print(f"[red]recorded as malicious[/]; report drafts: {files[0].rsplit(os.sep, 1)[0]}")
+            console.print("Submit: npm 'Report malware' button on the package page (npm_report.txt), and a PR to ossf/malicious-packages (osv.json at the path in osv_path.txt).")
+        else:
+            console.print(f"recorded as {decision}")
+
+
 if __name__ == "__main__":
     app()
