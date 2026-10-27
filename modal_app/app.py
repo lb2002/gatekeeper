@@ -79,12 +79,7 @@ def _run_poll() -> dict:
     flagged = [r for r in rows if r["flagged"]]
     if flagged:
         _append_jsonl(DATA / "flagged" / day / f"{run_id}.jsonl", flagged)
-        for r in flagged:
-            key = f"{r['name']}@{r['version']}"
-            if key not in queue:
-                item = {k: r[k] for k in QUEUE_FIELDS}
-                item.update(status="pending", leased_until=0.0, verdicts={})
-                queue[key] = item
+        stats["queued"] = _enqueue(flagged)
     volume.commit()
 
     stats["versions"] = len(records)
@@ -112,6 +107,68 @@ def poll() -> dict:
 def poll_once() -> dict:
     """Manual single run for testing (same code path as the cron)."""
     stats = _run_poll()
+    print(json.dumps(stats))
+    return stats
+
+
+QUEUE_TTL = timedelta(days=7)
+
+
+def _enqueue(rows: list[dict]) -> int:
+    added = 0
+    for r in rows:
+        key = f"{r['name']}@{r['version']}"
+        if key in queue:
+            continue
+        item = {k: r.get(k) for k in QUEUE_FIELDS}
+        item.update(status="pending", leased_until=0.0, verdicts={})
+        queue[key] = item
+        added += 1
+    return added
+
+
+@app.function(image=image, volumes={str(DATA): volume}, timeout=300, cpu=0.25, memory=512)
+def backfill_queue() -> dict:
+    """Load flagged records from the volume into the queue (recovery and first deployment)."""
+    volume.reload()
+    added = total = 0
+    for path in sorted((DATA / "flagged").glob("*/*.jsonl")):
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        total += len(rows)
+        added += _enqueue(rows)
+    print(json.dumps({"flagged_records": total, "added": added}))
+    return {"flagged_records": total, "added": added}
+
+
+@app.function(image=image, volumes={str(DATA): volume}, schedule=modal.Period(hours=1), timeout=900, cpu=0.25, memory=512)
+def confirm() -> dict:
+    """Hourly: check every queued flag against OSV, GitHub malware advisories and npm takedowns."""
+    from gatekeeper.confirm.batch import confirm_many
+    from gatekeeper.npm import feed
+
+    now = datetime.now(timezone.utc)
+    items = dict(queue.items())
+    stale = [k for k, it in items.items() if datetime.fromisoformat(it["seen_at"]) < now - QUEUE_TTL]
+    for k in stale:
+        queue.pop(k, None)
+        items.pop(k, None)
+    pending = {k: it for k, it in items.items() if not (it.get("confirmation") or {}).get("confirmed")}
+    since = (now - QUEUE_TTL).isoformat()
+    with feed.make_client() as client:
+        results, gh_error = confirm_many(client, [(it["name"], it["version"]) for it in pending.values()], since, now=now)
+    newly = 0
+    rows = []
+    for (key, item), conf in zip(pending.items(), results):
+        row = conf.as_dict() | {"key": key, "flagged_at": item["seen_at"], "published_at": item["published_at"]}
+        rows.append(row)
+        if conf.confirmed:
+            newly += 1
+        item["confirmation"] = {k: row[k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at", "checked_at")}
+        queue[key] = item
+    _append_jsonl(DATA / "confirmations" / f"{now:%Y-%m-%d}.jsonl", rows)
+    volume.commit()
+    stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error}
+    state["last_confirm"] = {"at": now.isoformat(), **stats}
     print(json.dumps(stats))
     return stats
 
@@ -150,9 +207,16 @@ def api():
     @web.get("/status", dependencies=[Depends(auth)])
     def status() -> dict:
         counts: dict[str, int] = {}
+        confirmed = 0
         for item in queue.values():
             counts[item["status"]] = counts.get(item["status"], 0) + 1
-        return {"last_run": state.get("last_run", None), "queue": counts}
+            confirmed += bool((item.get("confirmation") or {}).get("confirmed"))
+        return {
+            "last_run": state.get("last_run", None),
+            "last_confirm": state.get("last_confirm", None),
+            "queue": counts,
+            "confirmed": confirmed,
+        }
 
     @web.get("/work", dependencies=[Depends(auth)])
     def work(backend: str = "glimmer-local") -> dict:
