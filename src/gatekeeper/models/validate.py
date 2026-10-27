@@ -29,8 +29,7 @@ def citation_errors(verdict: Verdict, bundle: Bundle) -> list[str]:
 
 
 def _is_manifest(bundle, excerpt_id: str) -> bool:
-    for ex in getattr(bundle, "excerpts", None) or []:
-        if getattr(ex, "excerpt_id", None) == excerpt_id:
-            return str(getattr(ex, "path", "")).startswith("package.json")
-    refs = getattr(bundle, "refs", None) or []
-    return any(r.excerpt_id == excerpt_id and getattr(r, "path", "").startswith("package.json") for r in refs)
+    """True only for the excerpt the bundle builder created from package.json (explicit kind, not a
+    path prefix, so a file named e.g. 'package.json.js' cannot masquerade as the manifest)."""
+    ex = bundle.excerpt(excerpt_id)
+    return ex is not None and getattr(ex, "kind", "code") == "manifest"

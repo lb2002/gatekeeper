@@ -91,10 +91,7 @@ def process_version(
         rec.flagged = True
         rec.bundle = text
         rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
-        rec.excerpts = [
-            {"excerpt_id": e.excerpt_id, "path": e.path, "first_line": e.first_line, "last_line": e.last_line}
-            for e in bundle.excerpts
-        ]
+        rec.excerpts = [e.ref() for e in bundle.excerpts]
     return rec
 
 

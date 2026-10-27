@@ -173,10 +173,7 @@ def _record(meta: dict, pkg, label: str, split: str, extra: dict | None = None) 
         "rules": sorted(content.rules),
         "cluster": _cluster_key(pkg),
         "bundle": bundle.render(),
-        "excerpts": [
-            {"excerpt_id": e.excerpt_id, "path": e.path, "first_line": e.first_line, "last_line": e.last_line}
-            for e in bundle.excerpts
-        ],
+        "excerpts": [e.ref() for e in bundle.excerpts],
         **(extra or {}),
     }
 

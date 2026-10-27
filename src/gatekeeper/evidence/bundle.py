@@ -23,9 +23,11 @@ MANIFEST_KEYS = ("name", "version", "main", "bin", "scripts", "gypfile", "depend
 @dataclass
 class Excerpt:
     excerpt_id: str
-    path: str
+    path: str  # the real file path inside the package (never a display label)
     first_line: int
     lines: list[str]
+    note: str = ""  # display-only remark, e.g. "minified, excerpt of line 3"
+    kind: str = "code"  # "manifest" for the selected package.json fields, "diff", or "code"
 
     @property
     def last_line(self) -> int:
@@ -33,7 +35,12 @@ class Excerpt:
 
     def render(self) -> str:
         body = "\n".join(f"{self.first_line + i:>4}| {line}" for i, line in enumerate(self.lines))
-        return f"[{self.excerpt_id}] {self.path} (lines {self.first_line}-{self.last_line})\n{body}"
+        note = f" ({self.note})" if self.note else ""
+        return f"[{self.excerpt_id}] {self.path}{note} (lines {self.first_line}-{self.last_line})\n{body}"
+
+    def ref(self) -> dict:
+        return {"excerpt_id": self.excerpt_id, "path": self.path, "kind": self.kind,
+                "first_line": self.first_line, "last_line": self.last_line}
 
 
 @dataclass
@@ -57,6 +64,7 @@ class ExcerptRef:
     first_line: int
     last_line: int
     path: str = ""
+    kind: str = "code"
 
 
 @dataclass
@@ -76,7 +84,10 @@ class RenderedBundle:
 
     @classmethod
     def from_record(cls, rec: dict) -> "RenderedBundle":
-        refs = [ExcerptRef(e["excerpt_id"], e["first_line"], e["last_line"], e.get("path", "")) for e in rec.get("excerpts") or []]
+        refs = [
+            ExcerptRef(e["excerpt_id"], e["first_line"], e["last_line"], e.get("path", ""), e.get("kind", "code"))
+            for e in rec.get("excerpts") or []
+        ]
         return cls(rec["name"], rec["version"], rec["bundle"], refs)
 
 
@@ -131,10 +142,12 @@ def build_bundle(
     counter = 0
     used = len("\n".join(b.header))
 
-    def add(path: str, first_line: int, lines: list[str], clip: int = MAX_LINE_CHARS) -> bool:
+    def add(
+        path: str, first_line: int, lines: list[str], clip: int = MAX_LINE_CHARS, note: str = "", kind: str = "code"
+    ) -> bool:
         nonlocal counter, used
         counter += 1
-        ex = Excerpt(f"E{counter}", path, first_line, [_clip(line, clip) for line in lines])
+        ex = Excerpt(f"E{counter}", path, first_line, [_clip(line, clip) for line in lines], note=note, kind=kind)
         size = len(ex.render()) + 2
         if used + size > max_chars:
             counter -= 1
@@ -143,10 +156,10 @@ def build_bundle(
         used += size
         return True
 
-    add("package.json (selected fields)", 1, _manifest_excerpt(pkg))
+    add("package.json", 1, _manifest_excerpt(pkg), note="selected fields", kind="manifest")
 
     for path, lines in diff_excerpts or []:
-        add(f"{path} (diff vs previous version)", 1, lines)
+        add(path, 1, lines, note="diff vs previous version", kind="diff")
 
     # Focus files (install hooks, main, bin, binding.gyp): around rule hits, else the start of the file.
     hits_by_path: dict[str, list[int]] = {}
@@ -163,8 +176,8 @@ def build_bundle(
             longest = max(len(line) for line in all_lines) if all_lines else 0
             hit_lines = sorted(set(hits_by_path.get(path, [])))
             if not hit_lines:
-                note = f"(minified or packed file: {len(all_lines)} lines, longest {longest} chars; no rule hits; start shown)"
-                add(f"{path} {note}", 1, [all_lines[0][:200] if all_lines else ""])
+                note = f"minified or packed file: {len(all_lines)} lines, longest {longest} chars; no rule hits; start shown"
+                add(path, 1, [all_lines[0][:200] if all_lines else ""], note=note)
                 continue
             hits_here = [h for h in content.hits if h.path == path]
             for ln in hit_lines[:4]:
@@ -175,7 +188,7 @@ def build_bundle(
                         continue
                     snippets.append(line[max(0, h.col - 200): h.col + 300])
                 shown = " … ".join(dict.fromkeys(s for s in snippets if s)) or line[:400]
-                if not add(f"{path} (minified, excerpt of line {ln})", ln, [shown], clip=MINIFIED_EXCERPT_CHARS):
+                if not add(path, ln, [shown], clip=MINIFIED_EXCERPT_CHARS, note=f"minified, excerpt of line {ln}"):
                     break
             continue
         spans = _windows(hits_by_path.get(path, []), len(all_lines)) or [(1, min(len(all_lines), 2 * CONTEXT_LINES + 1))]
