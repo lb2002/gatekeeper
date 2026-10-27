@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+dist/
+*.egg-info/
+
+# local runtime state and secrets
+.env
+*.gguf
+data/
+runs/
+
+# never commit package archives or malware samples
+*.tgz
+*.zip
