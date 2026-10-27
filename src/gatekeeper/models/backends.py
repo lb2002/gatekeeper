@@ -109,10 +109,12 @@ def classify_spark(bundle: Bundle, api_key: str | None = None, timeout: float = 
     )
 
 
-def classify_local(bundle: Bundle, url: str = LOCAL_URL, model: str = "muse-glimmer", timeout: float = 600) -> ModelResult:
+def classify_local(
+    bundle: Bundle, url: str = LOCAL_URL, model: str = "muse-glimmer", timeout: float = 600, compact: bool = True
+) -> ModelResult:
     payload = {
         "model": model,
-        "messages": messages(bundle),
+        "messages": messages(bundle, compact=compact),
         # llama-server turns a JSON schema into a grammar, so output is always parseable.
         "response_format": {"type": "json_schema", "json_schema": {"name": "verdict", "schema": verdict_json_schema()}},
         "temperature": 0.2,

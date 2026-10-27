@@ -40,8 +40,14 @@ def user_message(bundle: Bundle) -> str:
     )
 
 
-def messages(bundle: Bundle) -> list[dict]:
+COMPACT_RULES = """
+Be brief: at most 2 evidence items (the strongest ones), `why` under 60 characters, at most 3 iocs, `summary` under 120 characters."""
+
+
+def messages(bundle: Bundle, compact: bool = False) -> list[dict]:
+    """`compact` shortens the answer for slow local inference (fewer output tokens)."""
+    system = SYSTEM_PROMPT + (COMPACT_RULES if compact else "")
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_message(bundle)},
     ]

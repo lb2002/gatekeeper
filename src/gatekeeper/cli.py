@@ -118,7 +118,10 @@ def check(
         console.print(f"[red]model output unusable[/]: {result.errors}")
         raise typer.Exit(2)
     color = {"malicious": "red", "suspicious": "yellow", "benign": "green"}[v.verdict.value]
-    console.print(f"[{color} bold]{v.verdict.value.upper()}[/] ({v.confidence:.2f}) category={v.category.value} trigger={v.trigger.value}  [{result.backend}, {result.latency_s:.1f}s, {result.output_tokens} output tokens]")
+    console.print(
+        f"[{color} bold]{v.verdict.value.upper()}[/] ({v.confidence:.2f}) category={v.category.value} trigger={v.trigger.value}  "
+        f"\\[{result.backend}, {result.latency_s:.1f}s, {result.output_tokens} output tokens]"
+    )
     console.print(v.summary, markup=False)
     for ev in v.evidence:
         console.print(f"  {ev.excerpt_id} lines {ev.line_start}-{ev.line_end}: {ev.why}", markup=False)
