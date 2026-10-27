@@ -174,6 +174,81 @@ def confirm() -> dict:
     return stats
 
 
+SPARK_DAILY_CAP_USD = 10.0
+SPARK_TOTAL_CAP_USD = 130.0
+SPARK_PER_RUN = 20
+SPARK_SECRET = modal.Secret.from_name("meta-api", required_keys=["MODEL_API_KEY"])
+
+
+def _spark_candidates(items: dict, now: datetime) -> list[str]:
+    """Second opinions on local malicious/suspicious verdicts first, then high-priority items the
+    laptop has not reached for 30 minutes."""
+    first, second = [], []
+    for key, it in items.items():
+        verdicts = it.get("verdicts", {})
+        if "spark" in verdicts:
+            continue
+        local = (verdicts.get("glimmer-local") or {}).get("verdict")
+        if local in ("malicious", "suspicious"):
+            first.append((it["priority"], key))
+        elif not verdicts and datetime.fromisoformat(it["seen_at"]) < now - timedelta(minutes=30):
+            second.append((it["priority"], key))
+    return [k for _, k in sorted(first, reverse=True)] + [k for _, k in sorted(second, reverse=True)]
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
+def spark() -> dict:
+    """Classify queued bundles with Muse Spark (Meta Model API) under hard spending caps.
+    Disabled until state['spark_enabled'] is True."""
+    from gatekeeper.evidence.bundle import RenderedBundle
+    from gatekeeper.models.backends import classify_spark
+
+    if not state.get("spark_enabled", False):
+        return {"enabled": False}
+    now = datetime.now(timezone.utc)
+    day = f"{now:%Y-%m-%d}"
+    spend = state.get("spark_spend", {"total": 0.0, "days": {}})
+    done = 0
+    for key in _spark_candidates(dict(queue.items()), now)[:SPARK_PER_RUN]:
+        if spend["total"] >= SPARK_TOTAL_CAP_USD or spend["days"].get(day, 0.0) >= SPARK_DAILY_CAP_USD:
+            break
+        item = queue.get(key, None)
+        if item is None:
+            continue
+        try:
+            result = classify_spark(RenderedBundle.from_record(item))
+        except Exception as exc:  # API errors (restriction, rate limit) must not crash the cron
+            print(f"spark error on {key}: {type(exc).__name__}: {exc}"[:300])
+            break
+        spend["total"] += result.cost_usd
+        spend["days"][day] = spend["days"].get(day, 0.0) + result.cost_usd
+        v = result.verdict
+        row = {
+            "key": key, "backend": "spark", "model": result.model,
+            "verdict": v.model_dump(mode="json") if v else None, "errors": result.errors,
+            "latency_s": result.latency_s, "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens, "cost_usd": result.cost_usd, "received_at": now.isoformat(),
+        }
+        _append_jsonl(DATA / "verdicts" / day / "spark.jsonl", [row])
+        item.setdefault("verdicts", {})["spark"] = {
+            "verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
+            "at": now.isoformat(), "errors": result.errors[:3], "full": row["verdict"],
+        }
+        queue[key] = item
+        done += 1
+    state["spark_spend"] = spend
+    volume.commit()
+    stats = {"enabled": True, "classified": done, "spend_today": round(spend["days"].get(day, 0.0), 4), "spend_total": round(spend["total"], 4)}
+    print(json.dumps(stats))
+    return stats
+
+
+@app.function(image=image, timeout=60)
+def set_spark(enabled: bool) -> dict:
+    state["spark_enabled"] = bool(enabled)
+    return {"spark_enabled": state["spark_enabled"], "spend": state.get("spark_spend", None)}
+
+
 LEASE_S = 15 * 60
 
 from pydantic import BaseModel  # noqa: E402  (request models must live at module level for FastAPI)
@@ -225,6 +300,8 @@ def api():
             "last_confirm": state.get("last_confirm", None),
             "queue": counts,
             "confirmed": confirmed,
+            "spark_enabled": state.get("spark_enabled", False),
+            "spark_spend": state.get("spark_spend", None),
         }
 
     @web.get("/work", dependencies=[Depends(auth)])
