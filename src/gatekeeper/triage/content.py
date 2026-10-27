@@ -33,7 +33,8 @@ RULES: tuple[Rule, ...] = (
     _r("secret_paths", 4, r"\.npmrc|\.ssh[/\\]|id_rsa|\.aws[/\\]credentials|\.git-credentials|\.docker[/\\]config|Local State|Login Data|wallet\.dat|\.config[/\\]solana|metamask", ),
     _r("host_fingerprint", 1, r"os\.(?:userInfo|hostname|homedir|networkInterfaces)\(\)"),
     _r("exfil_service", 4, r"discord(?:app)?\.com/api/webhooks|api\.telegram\.org/bot|webhook\.site|pipedream\.net|requestbin|ngrok\.io|oast\.(?:fun|me|pro|live|online|site)|interact\.sh|burpcollaborator|canarytokens"),
-    _r("raw_ip_url", 3, r"https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?"),
+    # public IPv4 literals only: loopback, private, link-local and 0.0.0.0 are excluded
+    _r("raw_ip_url", 3, r"https?://(?!127\.|10\.|0\.0\.0\.0|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?"),
     _r("eval_decoded", 4, r"(?:eval|Function)\s*\(\s*(?:atob|Buffer\.from|decodeURIComponent|unescape)\s*\("),
     _r("dynamic_eval", 2, r"\beval\s*\(|new\s+Function\s*\("),
     _r("pipe_to_shell", 4, r"(?:curl|wget)[^\n|]{0,200}\|\s*(?:ba)?sh\b|powershell(?:\.exe)?\s+[^\n]{0,40}-e(?:nc|ncodedcommand)?\s"),
@@ -138,13 +139,61 @@ def score_content(pkg: PackageFiles, max_hits_per_rule: int = 5) -> ContentScore
         if in_focus:
             s.notes.append(f"focus:{path}")
 
-    points = {r.name: r.points for r in RULES} | {"high_entropy_blob": 2, "gyp_command": 4}
-    focus_hit_bonus = 0
-    for rule_name in s.rules:
-        s.score += points.get(rule_name, 1)
-    if any(h.path in focus for h in s.hits if h.rule in {"child_process", "network_call", "env_dump", "secret_paths", "exfil_service", "eval_decoded", "pipe_to_shell"}):
-        focus_hit_bonus = 2
-    if {"child_process", "network_call"} <= s.rules or {"secret_paths", "network_call"} <= s.rules or {"host_fingerprint", "network_call"} <= s.rules:
-        s.score += 2  # combinations matter more than single signals
-    s.score += focus_hit_bonus
+    s.score = _weighted_score(s.hits, set(install_time_files(pkg)))
     return s
+
+
+# Signals that are suspicious anywhere in a package. Everything else (spawning processes, network
+# calls, reading the hostname, eval) is normal for CLIs and agent tools at runtime and only counts
+# when it happens in code that runs at install time, or in a suspicious combination in one file.
+STRONG_RULES = {"env_dump", "exfil_service", "eval_decoded", "pipe_to_shell", "obfuscator_names", "hex_dns_label", "injection_phrase", "gyp_command"}
+POINTS = {r.name: r.points for r in RULES} | {"high_entropy_blob": 2, "gyp_command": 4}
+INSTALL_TIME_MULTIPLIER = 2
+
+
+def install_time_files(pkg: PackageFiles) -> list[str]:
+    """Files executed by npm lifecycle hooks or node-gyp during `npm install`."""
+    manifest = {}
+    raw = pkg.text("package.json")
+    if raw:
+        try:
+            manifest = json.loads(raw)
+        except ValueError:
+            manifest = {}
+    out = ["package.json"]
+    scripts = manifest.get("scripts") or {}
+    for hook in ("preinstall", "install", "postinstall"):
+        cmd = scripts.get(hook) if isinstance(scripts, dict) else None
+        if isinstance(cmd, str):
+            out += [m.group(1).lstrip("./") for m in _SCRIPT_FILE.finditer(cmd)]
+    if "binding.gyp" in pkg.files:
+        out.append("binding.gyp")
+    return [p for p in out if p in pkg.files]
+
+
+def _weighted_score(hits: list[Hit], install_files: set[str]) -> int:
+    by_file: dict[str, set[str]] = {}
+    for h in hits:
+        by_file.setdefault(h.path, set()).add(h.rule)
+    score = 0
+    counted: set[tuple[str, bool]] = set()
+    for path, rules in by_file.items():
+        install_time = path in install_files
+        for rule in rules:
+            if install_time:
+                key = (rule, True)
+                if key not in counted:
+                    score += POINTS.get(rule, 1) * INSTALL_TIME_MULTIPLIER
+                    counted.add(key)
+            elif rule in STRONG_RULES or rule == "high_entropy_blob":
+                key = (rule, False)
+                if key not in counted:
+                    score += POINTS.get(rule, 1)
+                    counted.add(key)
+        # suspicious combinations within one runtime file
+        if not install_time:
+            if {"secret_paths", "network_call"} <= rules:
+                score += 6
+            if {"env_dump", "network_call"} <= rules:
+                score += 3
+    return score

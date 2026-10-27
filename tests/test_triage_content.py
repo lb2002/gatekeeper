@@ -45,6 +45,22 @@ def test_injection_comment_is_a_signal():
     assert "injection_phrase" in score_content(p).rules
 
 
+def test_runtime_cli_with_spawn_and_network_is_not_flagged():
+    cli = (
+        "const { spawn } = require('child_process');\n"
+        "const http = require('http');\n"
+        "spawn('git', ['status'], { detached: true }).unref();\n"
+        "http.get('http://127.0.0.1:3000/health');\n"
+    )
+    p = pkg({"package.json": '{"name":"devtool","bin":{"devtool":"cli.js"}}', "cli.js": cli})
+    assert score_content(p).score < 6
+
+
+def test_runtime_secret_read_plus_network_in_same_file_is_flagged():
+    p = pkg({"package.json": '{"name":"x","main":"index.js"}', "index.js": SUSPICIOUS_INSTALL})
+    assert score_content(p).score >= 6
+
+
 def test_binding_gyp_command_is_detected():
     p = pkg({"package.json": '{"name":"x","gypfile":true}', "binding.gyp": "{ 'variables': { 'x': '<!(node index.js)' } }"})
     s = score_content(p)

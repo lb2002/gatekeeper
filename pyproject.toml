@@ -16,7 +16,10 @@ dependencies = [
 gk = "gatekeeper.cli:app"
 
 [dependency-groups]
-dev = ["pytest>=8.2"]
+dev = [
+    "modal>=1.6.2",
+    "pytest>=8.2",
+]
 
 [build-system]
 requires = ["hatchling"]
