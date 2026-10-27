@@ -14,3 +14,7 @@ runs/
 # never commit package archives or malware samples
 *.tgz
 *.zip
+
+# demo registry state
+demo/verdaccio/storage/
+demo/verdaccio/htpasswd

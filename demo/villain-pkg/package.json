@@ -1,0 +1,11 @@
+{
+  "name": "axois-retry",
+  "version": "4.5.1",
+  "description": "Axios plugin that intercepts failed requests and retries them whenever possible.",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node setup.js"
+  },
+  "keywords": ["axios", "retry", "http"],
+  "license": "MIT"
+}

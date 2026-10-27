@@ -1,0 +1,19 @@
+# Local test registry for the demo. The villain package exists only here.
+storage: ./storage
+auth:
+  htpasswd:
+    file: ./htpasswd
+    max_users: 1
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+packages:
+  'axois-retry':
+    access: $all
+    publish: $authenticated
+  '**':
+    access: $all
+    publish: $authenticated
+    proxy: npmjs
+listen: 127.0.0.1:4873
+log: { type: stdout, format: pretty, level: warn }
