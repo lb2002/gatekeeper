@@ -51,6 +51,34 @@ class Bundle:
         return "\n\n".join(p for p in parts if p)
 
 
+@dataclass
+class ExcerptRef:
+    excerpt_id: str
+    first_line: int
+    last_line: int
+
+
+@dataclass
+class RenderedBundle:
+    """A bundle restored from storage: the exact text the model sees plus excerpt line ranges for validation."""
+
+    package: str
+    version: str
+    text: str
+    refs: list[ExcerptRef]
+
+    def render(self) -> str:
+        return self.text
+
+    def excerpt(self, excerpt_id: str) -> ExcerptRef | None:
+        return next((r for r in self.refs if r.excerpt_id == excerpt_id), None)
+
+    @classmethod
+    def from_record(cls, rec: dict) -> "RenderedBundle":
+        refs = [ExcerptRef(e["excerpt_id"], e["first_line"], e["last_line"]) for e in rec.get("excerpts") or []]
+        return cls(rec["name"], rec["version"], rec["bundle"], refs)
+
+
 def _clip(line: str) -> str:
     return line if len(line) <= MAX_LINE_CHARS else line[:MAX_LINE_CHARS] + f" …[+{len(line) - MAX_LINE_CHARS} chars]"
 

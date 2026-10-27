@@ -20,11 +20,14 @@ app = modal.App("gatekeeper")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("httpx>=0.27", "pydantic>=2.7", "typer>=0.12", "rich>=13.7")
+    .pip_install("httpx>=0.27", "pydantic>=2.7", "typer>=0.12", "rich>=13.7", "fastapi[standard]>=0.115")
     .add_local_python_source("gatekeeper")
 )
 volume = modal.Volume.from_name("gatekeeper-data", create_if_missing=True)
 state = modal.Dict.from_name("gatekeeper-state", create_if_missing=True)
+queue = modal.Dict.from_name("gatekeeper-queue", create_if_missing=True)  # key "name@version" -> item
+worker_secret = modal.Secret.from_name("gatekeeper-worker")  # GK_WORKER_TOKEN
+QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts")
 
 DATA = Path("/data")
 RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
@@ -76,6 +79,12 @@ def _run_poll() -> dict:
     flagged = [r for r in rows if r["flagged"]]
     if flagged:
         _append_jsonl(DATA / "flagged" / day / f"{run_id}.jsonl", flagged)
+        for r in flagged:
+            key = f"{r['name']}@{r['version']}"
+            if key not in queue:
+                item = {k: r[k] for k in QUEUE_FIELDS}
+                item.update(status="pending", leased_until=0.0, verdicts={})
+                queue[key] = item
     volume.commit()
 
     stats["versions"] = len(records)
@@ -105,6 +114,84 @@ def poll_once() -> dict:
     stats = _run_poll()
     print(json.dumps(stats))
     return stats
+
+
+LEASE_S = 15 * 60
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[worker_secret], cpu=0.25, memory=512)
+@modal.concurrent(max_inputs=20)
+@modal.asgi_app()
+def api():
+    """Worker API: laptop workers lease flagged bundles and post verdicts back (bearer token)."""
+    import os
+
+    from fastapi import Depends, FastAPI, Header, HTTPException
+    from pydantic import BaseModel
+
+    web = FastAPI(title="gatekeeper")
+    token = os.environ["GK_WORKER_TOKEN"]
+
+    def auth(authorization: str = Header(default="")) -> None:
+        if authorization != f"Bearer {token}":
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    class VerdictIn(BaseModel):
+        key: str
+        backend: str
+        model: str
+        verdict: dict | None
+        errors: list[str] = []
+        latency_s: float = 0.0
+        input_tokens: int = 0
+        output_tokens: int = 0
+        cost_usd: float = 0.0
+
+    @web.get("/status", dependencies=[Depends(auth)])
+    def status() -> dict:
+        counts: dict[str, int] = {}
+        for item in queue.values():
+            counts[item["status"]] = counts.get(item["status"], 0) + 1
+        return {"last_run": state.get("last_run", None), "queue": counts}
+
+    @web.get("/work", dependencies=[Depends(auth)])
+    def work(backend: str = "glimmer-local") -> dict:
+        now = time.time()
+        best_key, best = None, None
+        for key, item in queue.items():
+            if backend in item.get("verdicts", {}):
+                continue
+            if item["status"] == "leased" and item.get("leased_until", 0) > now:
+                continue
+            if best is None or item["priority"] > best["priority"]:
+                best_key, best = key, item
+        if best is None:
+            return {"key": None}
+        best["status"] = "leased"
+        best["leased_until"] = now + LEASE_S
+        queue[best_key] = best
+        return {"key": best_key, **{k: best[k] for k in QUEUE_FIELDS}}
+
+    @web.post("/verdict", dependencies=[Depends(auth)])
+    def verdict(v: VerdictIn) -> dict:
+        now = datetime.now(timezone.utc)
+        row = v.model_dump() | {"received_at": now.isoformat()}
+        _append_jsonl(DATA / "verdicts" / f"{now:%Y-%m-%d}" / f"{v.backend}.jsonl", [row])
+        volume.commit()
+        item = queue.get(v.key, None)
+        if item is not None:
+            item.setdefault("verdicts", {})[v.backend] = {
+                "verdict": (v.verdict or {}).get("verdict"),
+                "confidence": (v.verdict or {}).get("confidence"),
+                "at": now.isoformat(),
+                "errors": v.errors[:3],
+            }
+            item["status"] = "done" if v.verdict else "pending"
+            item["leased_until"] = 0.0
+            queue[v.key] = item
+        return {"ok": True}
+
+    return web
 
 
 @app.local_entrypoint()

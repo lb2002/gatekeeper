@@ -131,5 +131,35 @@ def check(
         console.print(f"[yellow]validation issues:[/] {result.errors}")
 
 
+@app.command("worker")
+def worker(
+    max_items: int = typer.Option(0, help="Stop after this many items (0 = run forever)."),
+    status_only: bool = typer.Option(False, "--status", help="Only print monitor and queue status."),
+) -> None:
+    """Classify flagged packages from the live monitor with the local Muse Glimmer (llama-server on :8080)."""
+    import os
+
+    from gatekeeper.worker.laptop import MonitorApi, load_env, run
+
+    load_env()
+    api = MonitorApi(os.environ["GK_API_URL"], os.environ["GK_WORKER_TOKEN"])
+    if status_only:
+        console.print(api.status())
+        return
+
+    def show(item: dict, result) -> None:
+        v = result.verdict
+        label = v.verdict.value.upper() if v else "NO VERDICT"
+        console.print(
+            f"{item['key']}  priority={item['priority']}  ->  {label}"
+            + (f" ({v.confidence:.2f}, {v.category.value})" if v else f" {result.errors[:1]}")
+            + f"  {result.latency_s:.0f}s",
+            markup=False,
+        )
+
+    done = run(api, max_items=max_items or None, on_result=show)
+    console.print(f"processed {done} item(s)")
+
+
 if __name__ == "__main__":
     app()
