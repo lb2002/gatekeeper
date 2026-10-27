@@ -86,7 +86,12 @@ def run(
         if guard_busy():  # an install check is waiting for the local model
             time.sleep(2)
             continue
-        item = api.lease(backend)
+        try:
+            item = api.lease(backend)
+        except httpx.HTTPError as exc:  # laptop offline or API hiccup: wait and retry
+            print(f"lease failed ({type(exc).__name__}); retrying in 30 s")
+            time.sleep(30)
+            continue
         if item is None:
             if max_items is not None:
                 break
@@ -97,7 +102,13 @@ def run(
             result = classify(bundle)
         except httpx.HTTPError as exc:
             result = ModelResult(backend, "unavailable", None, "", [f"model error: {exc}"[:300]], 0.0)
-        api.submit(item["key"], result)
+        for attempt in range(5):
+            try:
+                api.submit(item["key"], result)
+                break
+            except httpx.HTTPError as exc:
+                print(f"submit failed ({type(exc).__name__}); retry {attempt + 1}/5 in 30 s")
+                time.sleep(30)
         if on_result:
             on_result(item, result)
         done += 1
