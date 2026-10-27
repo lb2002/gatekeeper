@@ -76,5 +76,57 @@ def poll_once(
     console.print(f"score >= 3 (would go to archive scan): {flagged} of {len(scored)}")
 
 
+@app.command("check")
+def check(
+    target: str = typer.Argument(..., help="A package spec 'name' or 'name@version', or a local .tgz file."),
+    backend: str = typer.Option("local", help="'local' (Muse Glimmer via llama-server) or 'spark' (Meta API)."),
+    show_bundle: bool = typer.Option(False, help="Print the evidence bundle sent to the model."),
+) -> None:
+    """Statically check one package: rules first, then a Meta model. Nothing is executed."""
+    from pathlib import Path
+
+    from gatekeeper.evidence.bundle import build_bundle
+    from gatekeeper.models.backends import classify_local, classify_spark
+    from gatekeeper.npm.tarball import read_tarball
+    from gatekeeper.triage.content import score_content
+
+    meta_reasons: list[str] = []
+    if target.endswith(".tgz") and Path(target).exists():
+        data = Path(target).read_bytes()
+        name, version = Path(target).stem, "local"
+    else:
+        name, _, version = target.rpartition("@") if target.rfind("@") > 0 else (target, "", "")
+        with feed.make_client() as client:
+            doc = packument.fetch_packument(client, name)
+            if not doc:
+                raise typer.BadParameter(f"package {name} not found")
+            version = version or (doc.get("dist-tags") or {}).get("latest", "")
+            info = packument.version_info(doc, version)
+            meta_reasons = score_metadata(info, load_popular()).reasons
+            resp = client.get(info.tarball_url)
+            resp.raise_for_status()
+            data = resp.content
+    pkg = read_tarball(data)
+    content = score_content(pkg)
+    bundle = build_bundle(name, version, pkg, content, meta_reasons=meta_reasons)
+    console.print(f"[bold]{name}@{version}[/]  rules score {content.score}  ({', '.join(sorted(content.rules)) or 'no rule hits'})")
+    if show_bundle:
+        console.print(bundle.render(), markup=False, highlight=False)
+    result = classify_spark(bundle) if backend == "spark" else classify_local(bundle)
+    v = result.verdict
+    if v is None:
+        console.print(f"[red]model output unusable[/]: {result.errors}")
+        raise typer.Exit(2)
+    color = {"malicious": "red", "suspicious": "yellow", "benign": "green"}[v.verdict.value]
+    console.print(f"[{color} bold]{v.verdict.value.upper()}[/] ({v.confidence:.2f}) category={v.category.value} trigger={v.trigger.value}  [{result.backend}, {result.latency_s:.1f}s, {result.output_tokens} output tokens]")
+    console.print(v.summary, markup=False)
+    for ev in v.evidence:
+        console.print(f"  {ev.excerpt_id} lines {ev.line_start}-{ev.line_end}: {ev.why}", markup=False)
+    if v.injection_attempt_observed:
+        console.print("[magenta]prompt-injection attempt observed in package data[/]")
+    if result.errors:
+        console.print(f"[yellow]validation issues:[/] {result.errors}")
+
+
 if __name__ == "__main__":
     app()
