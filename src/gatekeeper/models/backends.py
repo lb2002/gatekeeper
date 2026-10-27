@@ -75,11 +75,16 @@ def _chat(
     resp = httpx.post(f"{url}/chat/completions", headers=headers, json=payload, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
-    content = data["choices"][0]["message"].get("content") or ""
+    choice = data["choices"][0]
+    content = choice["message"].get("content") or ""
+    if not content:
+        content = f"<empty content, finish_reason={choice.get('finish_reason')}, message keys={sorted(choice['message'])}>"
     return content, data.get("usage") or {}, time.monotonic() - start
 
 
-def classify_spark(bundle: Bundle, api_key: str | None = None, timeout: float = 120) -> ModelResult:
+def classify_spark(
+    bundle: Bundle, api_key: str | None = None, timeout: float = 120, reasoning_effort: str = "low"
+) -> ModelResult:
     key = api_key or os.environ["MODEL_API_KEY"]
     payload = {
         "model": SPARK_MODEL,
@@ -89,7 +94,9 @@ def classify_spark(bundle: Bundle, api_key: str | None = None, timeout: float = 
             "json_schema": {"name": "verdict", "schema": verdict_json_schema(), "strict": True},
         },
         "prompt_cache_key": PROMPT_VERSION,
-        "max_tokens": 1200,
+        # Spark always reasons ("none" is a 400) and max_tokens caps reasoning plus the answer.
+        "reasoning_effort": reasoning_effort,
+        "max_tokens": 4000,
     }
     raw, usage, latency = _chat(META_API_URL, {"Authorization": f"Bearer {key}"}, payload, timeout)
     verdict, errors = _parse(raw)

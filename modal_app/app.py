@@ -10,6 +10,7 @@ inside `api()` at runtime.
 """
 
 import json
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -211,13 +212,37 @@ def _spark_candidates(items: dict, now: datetime) -> list[str]:
     return [k for _, k in sorted(first, reverse=True)] + [k for _, k in sorted(second, reverse=True)]
 
 
+def _spark_one(key: str, item: dict, spend: dict, now: datetime) -> dict:
+    """Classify one queued item with Spark, book the cost and store the verdict. Raises on API errors."""
+    from gatekeeper.evidence.bundle import RenderedBundle
+    from gatekeeper.models.backends import classify_spark
+
+    day = f"{now:%Y-%m-%d}"
+    result = classify_spark(RenderedBundle.from_record(item))
+    spend["total"] += result.cost_usd
+    spend["days"][day] = spend["days"].get(day, 0.0) + result.cost_usd
+    v = result.verdict
+    row = {
+        "key": key, "backend": "spark", "model": result.model,
+        "verdict": v.model_dump(mode="json") if v else None, "errors": result.errors,
+        "latency_s": result.latency_s, "input_tokens": result.input_tokens, "cached_tokens": result.cached_tokens,
+        "output_tokens": result.output_tokens, "cost_usd": result.cost_usd, "received_at": now.isoformat(),
+    }
+    if not v:
+        row["raw"] = result.raw[:4000]
+    _append_jsonl(DATA / "verdicts" / day / "spark.jsonl", [row])
+    item.setdefault("verdicts", {})["spark"] = {
+        "verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
+        "at": now.isoformat(), "errors": result.errors[:3], "full": row["verdict"],
+    }
+    queue[key] = item
+    return row
+
+
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark() -> dict:
     """Classify queued bundles with Muse Spark (Meta Model API) under hard spending caps.
     Disabled until state['spark_enabled'] is True."""
-    from gatekeeper.evidence.bundle import RenderedBundle
-    from gatekeeper.models.backends import classify_spark
-
     if not state.get("spark_enabled", False):
         return {"enabled": False}
     now = datetime.now(timezone.utc)
@@ -231,31 +256,58 @@ def spark() -> dict:
         if item is None:
             continue
         try:
-            result = classify_spark(RenderedBundle.from_record(item))
+            _spark_one(key, item, spend, now)
         except Exception as exc:  # API errors (restriction, rate limit) must not crash the cron
             print(f"spark error on {key}: {type(exc).__name__}: {exc}"[:300])
             break
-        spend["total"] += result.cost_usd
-        spend["days"][day] = spend["days"].get(day, 0.0) + result.cost_usd
-        v = result.verdict
-        row = {
-            "key": key, "backend": "spark", "model": result.model,
-            "verdict": v.model_dump(mode="json") if v else None, "errors": result.errors,
-            "latency_s": result.latency_s, "input_tokens": result.input_tokens,
-            "output_tokens": result.output_tokens, "cost_usd": result.cost_usd, "received_at": now.isoformat(),
-        }
-        _append_jsonl(DATA / "verdicts" / day / "spark.jsonl", [row])
-        item.setdefault("verdicts", {})["spark"] = {
-            "verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
-            "at": now.isoformat(), "errors": result.errors[:3], "full": row["verdict"],
-        }
-        queue[key] = item
         done += 1
     state["spark_spend"] = spend
     volume.commit()
     stats = {"enabled": True, "classified": done, "spend_today": round(spend["days"].get(day, 0.0), 4), "spend_total": round(spend["total"], 4)}
     print(json.dumps(stats))
     return stats
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], timeout=180, cpu=0.25, memory=512)
+def spark_probe(key: str = "") -> dict:
+    """One Spark call on one queued item (the top candidate unless a key is given), to check that
+    the key, the schema mode and the cost accounting work before the cron is switched on."""
+    now = datetime.now(timezone.utc)
+    key = key or next(iter(_spark_candidates(dict(queue.items()), now)), "")
+    item = queue.get(key, None) if key else None
+    if item is None:
+        return {"error": f"no queued item {key!r}"}
+    spend = state.get("spark_spend", {"total": 0.0, "days": {}})
+    try:
+        row = _spark_one(key, item, spend, now)
+    except Exception as exc:
+        body = getattr(getattr(exc, "response", None), "text", "")
+        return {"error": f"{type(exc).__name__}: {exc}"[:300], "body": body[:500]}
+    state["spark_spend"] = spend
+    volume.commit()
+    v = row["verdict"] or {}
+    return {
+        "key": key, "verdict": v.get("verdict"), "confidence": v.get("confidence"), "summary": v.get("summary"),
+        "errors": row["errors"], "latency_s": round(row["latency_s"], 1), "input_tokens": row["input_tokens"],
+        "cached_tokens": row["cached_tokens"], "output_tokens": row["output_tokens"],
+        "cost_usd": round(row["cost_usd"], 5), "spend_total": round(spend["total"], 5),
+        "raw": row.get("raw", "")[:1500],
+    }
+
+
+@app.function(image=image, secrets=[SPARK_SECRET], timeout=120)
+def spark_params_probe(extra: dict) -> dict:
+    """Tiny request (a few tokens) to see how the API treats request parameters."""
+    import httpx
+
+    payload = {"model": "muse-spark-1.3", "messages": [{"role": "user", "content": 'Reply with the JSON {"ok": true} only.'}]} | extra
+    r = httpx.post("https://api.meta.ai/v1/chat/completions", json=payload, timeout=90,
+                   headers={"Authorization": f"Bearer {os.environ['MODEL_API_KEY']}"})
+    if r.status_code != 200:
+        return {"status": r.status_code, "body": r.text[:500]}
+    d = r.json()
+    c = d["choices"][0]
+    return {"finish": c.get("finish_reason"), "content": (c["message"].get("content") or "")[:200], "usage": d.get("usage")}
 
 
 @app.function(image=image, timeout=60)

@@ -10,7 +10,7 @@ uplinks:
 packages:
   'axois-retry':
     access: $all
-    publish: $authenticated
+    publish: $all  # local-only demo registry (listens on 127.0.0.1), no account needed
   '**':
     access: $all
     publish: $authenticated
