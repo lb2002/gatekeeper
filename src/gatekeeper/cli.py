@@ -161,6 +161,87 @@ def worker(
     console.print(f"processed {done} item(s)")
 
 
+guard_app = typer.Typer(help="Install guard for npm/npx (humans and AI coding agents).")
+app.add_typer(guard_app, name="guard")
+
+
+@guard_app.command("enable")
+def guard_enable() -> None:
+    """Write npm/npx shims to ~/.gatekeeper/bin (put that directory first on PATH, or use `gk guard shell`)."""
+    import shutil
+    import sys
+
+    from gatekeeper.guard import shim
+
+    gk_exe = shutil.which("gk") or sys.argv[0]
+    cfg = shim.enable(gk_exe)
+    console.print(f"shims written to {shim.BIN}", markup=False)
+    console.print(f"real npm: {cfg['npm']}", markup=False)
+    console.print("Start a guarded shell with: gk guard shell")
+
+
+@guard_app.command("shell")
+def guard_shell() -> None:
+    """Open a PowerShell with the guard shims first on PATH (start AI coding agents from here)."""
+    import os
+    import subprocess
+
+    from gatekeeper.guard import shim
+
+    env = dict(os.environ)
+    env["PATH"] = str(shim.BIN) + os.pathsep + env.get("PATH", "")
+    env["GK_GUARD"] = "1"
+    console.print("[green]Gatekeeper guard active in this shell[/] (exit to leave)")
+    subprocess.run(["powershell", "-NoLogo"], env=env)
+
+
+@guard_app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or npx")) -> None:
+    """Called by the shims: check the packages, then run the real npm/npx with the same arguments."""
+    import subprocess
+
+    from rich.panel import Panel
+
+    from gatekeeper.guard import shim
+    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, package_specs
+
+    args = [a for a in ctx.args if a != "--"]
+    cfg = shim.config()
+    real = shim.npm_command(cfg, tool)
+    allow = ALLOW_FLAG in args
+    specs = package_specs(tool, args)
+    if specs and not allow:
+        for spec in specs:
+            console.print(f"[cyan]gatekeeper[/] checking {spec} ...", highlight=False)
+            try:
+                d = check_spec(shim.npm_command(cfg, "npm"), spec)
+            except Exception as exc:
+                # Fail closed: a package must not get through just because checking it failed
+                # (an attacker could craft an archive that makes the check error out).
+                console.print(f"[red]gatekeeper could not check {spec}: {exc}; blocked[/]", highlight=False)
+                console.print(f"If you are sure the package is safe, re-run with {ALLOW_FLAG}.", markup=False)
+                typer.echo("Gatekeeper could not verify this package, so nothing was installed. Do not retry with other flags; ask the user.", err=True)
+                raise typer.Exit(1)
+            if d.allowed:
+                console.print(f"[green]allowed[/] {d.name}@{d.version}: {d.reason} ({d.seconds:.1f}s)", highlight=False)
+                continue
+            lines = [f"{d.reason}", ""]
+            for ev in (d.verdict or {}).get("evidence", []):
+                lines.append(f"{ev['excerpt_id']} lines {ev['line_start']}-{ev['line_end']}: {ev['why']}")
+            iocs = [i["value"] for i in (d.verdict or {}).get("iocs", [])]
+            if iocs:
+                lines.append("indicators: " + ", ".join(iocs))
+            if (d.verdict or {}).get("injection_attempt_observed"):
+                lines.append("the package contains text trying to talk the AI reviewer out of blocking it")
+            lines += ["", f"Nothing was installed. Override (only if you are sure): add {ALLOW_FLAG}"]
+            console.print(Panel("\n".join(lines), title=f"BLOCKED by Gatekeeper: {d.name}@{d.version}", border_style="red"), markup=False)
+            # message for AI coding agents reading stderr
+            typer.echo("Gatekeeper blocked this install because the package looks malicious. Do not retry with other flags or names; ask the user.", err=True)
+            raise typer.Exit(1)
+    result = subprocess.run(real + [a for a in args if a != ALLOW_FLAG])
+    raise typer.Exit(result.returncode)
+
+
 @app.command("review")
 def review(
     limit: int = typer.Option(10, help="How many items to go through."),
