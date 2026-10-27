@@ -6,7 +6,8 @@ Runs inside a Modal container. Archives are read in memory only and never execut
 from __future__ import annotations
 
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -103,11 +104,17 @@ def process_names(
     now: datetime | None = None,
     workers: int = 16,
     window: timedelta = RECENT_WINDOW,
-) -> list[Record]:
-    """Score every version of the changed packages published within `window`, unless already seen."""
+    deadline: float | None = None,
+) -> tuple[list[Record], list[str]]:
+    """Score every version of the changed packages published within `window`, unless already seen.
+
+    With a `deadline` (time.monotonic()), names not finished by then are returned as deferred
+    instead of blocking, so a scheduled run never overruns its timeout."""
     now = now or datetime.now(timezone.utc)
 
-    def one(name: str) -> list[Record]:
+    def one(name: str) -> list[Record] | None:
+        if deadline is not None and time.monotonic() > deadline:
+            return None
         try:
             doc = packument.fetch_packument(client, name)
         except Exception as exc:
@@ -121,5 +128,21 @@ def process_names(
             out.append(process_version(client, info, popular, now))
         return out
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return [r for rs in pool.map(one, names) for r in rs]
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures = {pool.submit(one, n): n for n in names}
+    remaining = None if deadline is None else max(0.0, deadline - time.monotonic()) + 5
+    done, _ = wait(futures, timeout=remaining)
+    pool.shutdown(wait=False, cancel_futures=True)  # stragglers are abandoned and retried next run
+    records: list[Record] = []
+    deferred: list[str] = []
+    for fut, name in futures.items():
+        if fut in done and fut.exception() is not None:
+            exc = fut.exception()
+            records.append(Record(name, "?", None, now.isoformat(), 0, [], error=f"process: {type(exc).__name__}"))
+            continue
+        rs = fut.result() if fut in done else None
+        if rs is None:
+            deferred.append(name)
+        else:
+            records.extend(rs)
+    return records, deferred

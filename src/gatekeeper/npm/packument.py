@@ -105,11 +105,13 @@ def versions_by_time(packument: dict) -> list[tuple[str, datetime]]:
     return out
 
 
-def version_info(packument: dict, version: str) -> VersionInfo:
+def version_info(packument: dict, version: str, ordered: list[tuple[str, datetime]] | None = None) -> VersionInfo:
+    """`ordered` is versions_by_time(packument); pass it when calling this for many versions."""
     name = packument.get("name", "")
     manifest = (packument.get("versions") or {}).get(version, {})
     times = packument.get("time") or {}
-    ordered = versions_by_time(packument)
+    if ordered is None:
+        ordered = versions_by_time(packument)
     previous = None
     for i, (ver, _) in enumerate(ordered):
         if ver == version and i > 0:
@@ -144,8 +146,5 @@ def version_info(packument: dict, version: str) -> VersionInfo:
 def recent_versions(packument: dict, window: timedelta, now: datetime | None = None) -> list[VersionInfo]:
     """Versions published within `window` before `now` (the releases a change most likely refers to)."""
     now = now or datetime.now(timezone.utc)
-    return [
-        version_info(packument, ver)
-        for ver, ts in versions_by_time(packument)
-        if now - ts <= window
-    ]
+    ordered = versions_by_time(packument)
+    return [version_info(packument, ver, ordered) for ver, ts in ordered if now - ts <= window]

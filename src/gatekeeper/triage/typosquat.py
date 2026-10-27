@@ -42,6 +42,36 @@ def _similar(a: str, b: str) -> bool:
     return damerau_levenshtein(a, b, limit) <= limit
 
 
+class _Index:
+    """Popular names prepared once: canonical forms, scopes, and unscoped names bucketed by length."""
+
+    def __init__(self, popular: set[str]):
+        self.popular = popular
+        unscoped = [t.lower() for t in popular if not t.startswith("@")]
+        self.canonical = {}
+        for t in unscoped:
+            if len(t) >= MIN_TARGET_LEN:
+                self.canonical.setdefault(_canonical(t), t)
+        self.targets = [t for t in unscoped if len(t) >= MIN_TARGET_LEN]
+        self.grams: dict[str, list[int]] = {}  # bigram -> indexes into targets
+        for i, t in enumerate(self.targets):
+            for g in _bigrams(t):
+                self.grams.setdefault(g, []).append(i)
+        self.scopes = sorted({t[1:].split("/", 1)[0].lower() for t in popular if t.startswith("@") and "/" in t})
+        self.scope_set = set(self.scopes)
+        self.cache: dict[str, str | None] = {}
+
+
+_INDEXES: dict[int, _Index] = {}
+
+
+def _index(popular: set[str]) -> _Index:
+    idx = _INDEXES.get(id(popular))
+    if idx is None or idx.popular is not popular:
+        idx = _INDEXES[id(popular)] = _Index(popular)
+    return idx
+
+
 def typosquat_target(name: str, popular: set[str]) -> str | None:
     """Return the popular package that `name` likely imitates, or None.
 
@@ -51,19 +81,40 @@ def typosquat_target(name: str, popular: set[str]) -> str | None:
     """
     if name in popular:
         return None
+    idx = _index(popular)
+    if name not in idx.cache:
+        idx.cache[name] = _lookup(name, idx)
+    return idx.cache[name]
+
+
+def _lookup(name: str, idx: _Index) -> str | None:
     if name.startswith("@") and "/" in name:
         scope = name[1:].split("/", 1)[0].lower()
-        popular_scopes = {t[1:].split("/", 1)[0].lower() for t in popular if t.startswith("@") and "/" in t}
-        if scope in popular_scopes:
+        if scope in idx.scope_set:
             return None
-        for target_scope in popular_scopes:
+        for target_scope in idx.scopes:
             if _similar(scope, target_scope):
                 return f"@{target_scope}/*"
         return None
     base = name.lower()
-    for target in popular:
-        if target.startswith("@"):
+    target = idx.canonical.get(_canonical(base))
+    if target and target != base:
+        return target  # separator or homoglyph swap
+    # q-gram filter: each edit destroys at most 3 of the query's distinct bigrams
+    grams = _bigrams(base)
+    shared: dict[int, int] = {}
+    for g in grams:
+        for i in idx.grams.get(g, ()):
+            shared[i] = shared.get(i, 0) + 1
+    for i, count in sorted(shared.items(), key=lambda kv: -kv[1]):
+        target = idx.targets[i]
+        limit = 1 if len(target) < 9 else 2
+        if count < len(grams) - 3 * limit or abs(len(target) - len(base)) > limit or target == base:
             continue
-        if _similar(base, target.lower()):
+        if damerau_levenshtein(base, target, limit) <= limit:
             return target
     return None
+
+
+def _bigrams(s: str) -> set[str]:
+    return {s[i : i + 2] for i in range(len(s) - 1)}

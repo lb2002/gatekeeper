@@ -33,7 +33,9 @@ QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "met
 
 DATA = Path("/data")
 RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
+PROCESS_BUDGET_S = 75  # after this, unfinished names are deferred to the next run (timeout is 115 s)
 MAX_CHANGES_PER_RUN = 4000
+MAX_PENDING = 8000
 
 
 def _append_jsonl(path: Path, rows: list[dict]) -> None:
@@ -57,8 +59,10 @@ def _run_poll() -> dict:
         since = state.get("seq", None)
         if since is None:
             since = max(0, head - 1000)  # first run: start shortly before the head
+        pending = state.get("pending_names", [])
         names: dict[str, None] = {}
-        while since < head and len(names) < MAX_CHANGES_PER_RUN and time.monotonic() - started < RUN_BUDGET_S / 3:
+        # read less of the feed while a backlog is pending, so the backlog cannot grow without bound
+        while since < head and len(names) + len(pending) < MAX_CHANGES_PER_RUN and time.monotonic() - started < RUN_BUDGET_S / 3:
             batch, nxt = feed.fetch_changes(client, since, limit=1000)
             if not batch or nxt <= since:
                 break
@@ -72,7 +76,13 @@ def _run_poll() -> dict:
         window = timedelta(minutes=30)
         if last and last.get("at"):
             window = min(timedelta(hours=6), now - datetime.fromisoformat(last["at"]) + timedelta(minutes=10))
-        records = process_names(client, list(names), popular, seen_keys, now=now, window=window)
+        if pending:  # names deferred by an earlier run may have versions older than this run's window
+            window = timedelta(hours=6)
+        todo = list(dict.fromkeys(pending + list(names)))
+        records, deferred = process_names(
+            client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S
+        )
+        stats["deferred"] = len(deferred)
 
     run_id = f"{now:%H%M%S}-{uuid.uuid4().hex[:6]}"
     day = f"{now:%Y-%m-%d}"
@@ -91,6 +101,7 @@ def _run_poll() -> dict:
     # remember recently seen versions (bounded) and the feed position
     recent = (list(seen_keys) + [r.key for r in records])[-20000:]
     state["seen_recent"] = recent
+    state["pending_names"] = deferred[:MAX_PENDING]
     state["seq"] = since
     state["last_run"] = {"at": now.isoformat(), "head": head, "seq": since, **stats}
     stats["lag_changes"] = head - since
@@ -98,14 +109,14 @@ def _run_poll() -> dict:
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, schedule=modal.Period(minutes=2), timeout=115, cpu=0.5, memory=1024)
+@app.function(image=image, volumes={str(DATA): volume}, schedule=modal.Period(minutes=2), timeout=115, cpu=1.0, memory=2048)
 def poll() -> dict:
     stats = _run_poll()
     print(json.dumps(stats))
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, timeout=115, cpu=0.5, memory=1024)
+@app.function(image=image, volumes={str(DATA): volume}, timeout=600, cpu=1.0, memory=2048)
 def poll_once() -> dict:
     """Manual single run for testing (same code path as the cron)."""
     stats = _run_poll()

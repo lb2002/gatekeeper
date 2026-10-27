@@ -40,7 +40,8 @@ RULES: tuple[Rule, ...] = (
     _r("dynamic_eval", 2, r"\beval\s*\(|new\s+Function\s*\("),
     _r("pipe_to_shell", 4, r"(?:curl|wget)[^\n|]{0,200}\|\s*(?:ba)?sh\b|powershell(?:\.exe)?\s+[^\n]{0,40}-e(?:nc|ncodedcommand)?\s"),
     _r("obfuscator_names", 3, r"_0x[0-9a-f]{4,}"),
-    _r("hex_dns_label", 3, r"[0-9a-f]{20,}\.[a-z0-9-]+\.(?:com|net|org|io|xyz|fun|site|live|me)\b"),
+    # the lookbehind keeps this linear: without it every offset inside a long hex run restarts the match
+    _r("hex_dns_label", 3, r"(?<![0-9a-f])[0-9a-f]{20,}\.[a-z0-9-]+\.(?:com|net|org|io|xyz|fun|site|live|me)\b"),
     _r("detached_spawn", 2, r"detached\s*:\s*true|\.unref\(\)"),
     _r("injection_phrase", 3, r"(?:note|attention|message|instructions?)\s+(?:to|for)\s+(?:the\s+|any\s+)?(?:ai|llm|automated|security|code)(?:\s+\w+)?\s+(?:reviewers?|scanners?|analy[sz]ers?|auditors?)|ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions|(?:this\s+)?package\s+(?:is|has\s+been)\s+(?:audited|verified|reviewed)(?:\s+and)?(?:\s+is)?\s+safe|classify\s+(?:this\s+)?(?:package\s+)?as\s+(?:benign|safe)"),
 )

