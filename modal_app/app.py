@@ -143,6 +143,11 @@ def _run_poll() -> dict:
         state["caught_up_at"] = now.isoformat()
     state["seq"] = since
     state["last_run"] = {"at": now.isoformat(), "head": head, "seq": since, **stats}
+    daily = state.get("daily", {})
+    d = daily.setdefault(day, {"versions": 0, "scanned": 0, "flagged": 0})
+    for k in ("versions", "scanned", "flagged"):
+        d[k] += stats[k]
+    state["daily"] = daily
     stats["ledger_committed"] = _flush_ledger()
     stats["lag_changes"] = head - since
     stats["seconds"] = round(time.monotonic() - started, 1)
@@ -191,6 +196,28 @@ def _enqueue(rows: list[dict]) -> int:
         added += 1
     state["ledger_pending"] = pending
     return added
+
+
+def _record_catches() -> None:
+    """Confirmed detections, kept beyond the queue TTL: the public numbers are built from these."""
+    from gatekeeper.confirm.tracker import flag_lead_minutes, publish_to_flag_minutes
+
+    catches = state.get("catches", {})
+    for key, it in queue.items():
+        conf = it.get("confirmation") or {}
+        if not conf.get("confirmed"):
+            continue
+        verdicts = {b: v.get("verdict") for b, v in (it.get("verdicts") or {}).items()}
+        catches[key] = {
+            "name": it["name"], "version": it["version"], "published_at": it.get("published_at"),
+            "flagged_at": it["seen_at"], "earliest_public": conf.get("earliest_public"),
+            "osv_ids": conf.get("osv_ids"), "ghsa_ids": conf.get("ghsa_ids"), "npm_takedown_at": conf.get("npm_takedown_at"),
+            "publish_to_flag_min": publish_to_flag_minutes(it.get("published_at"), it["seen_at"]),
+            "lead_over_public_min": flag_lead_minutes(it["seen_at"], conf.get("earliest_public")),
+            "model_verdicts": verdicts, "review": (it.get("review") or {}).get("decision"),
+            "ledger_digest": (it.get("ledger") or {}).get("digest"),
+        }
+    state["catches"] = catches
 
 
 def _reveal_confirmed() -> int:
@@ -295,6 +322,7 @@ def confirm() -> dict:
         item["confirmation"] = {k: row[k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at", "checked_at")}
         queue[key] = item
     _append_jsonl(DATA / "confirmations" / f"{now:%Y-%m-%d}.jsonl", rows)
+    _record_catches()
     revealed = _reveal_confirmed()
     volume.commit()
     stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error,
@@ -519,6 +547,112 @@ def set_fireworks(enabled: bool) -> dict:
     return {"fireworks_enabled": state["fireworks_enabled"], "spend": state.get("fireworks_spend", None)}
 
 
+
+@app.function(image=image, volumes={str(DATA): volume}, timeout=900, cpu=1.0, memory=2048)
+def rebuild_public_stats() -> dict:
+    """Recount the daily totals from the per-run event logs and refresh the confirmed-catch record."""
+    volume.reload()
+    daily: dict[str, dict] = {}
+    for day_dir in sorted((DATA / "events").iterdir()):
+        d = {"versions": 0, "scanned": 0, "flagged": 0}
+        for path in day_dir.glob("*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                d["versions"] += 1
+                d["scanned"] += bool(r.get("scanned"))
+                d["flagged"] += bool(r.get("flagged"))
+        daily[day_dir.name] = d
+    state["daily"] = daily
+    _record_catches()
+    return {"daily": daily, "catches": len(state.get("catches", {}))}
+
+
+REPO_URL = "https://github.com/lb2002/gatekeeper"
+LEDGER_URL = "https://github.com/lb2002/gatekeeper-ledger"
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def _public_stats() -> dict:
+    daily = state.get("daily", {})
+    catches = sorted(state.get("catches", {}).values(), key=lambda c: c["flagged_at"])
+    packages = sorted({c["name"] for c in catches})
+    first = [min((c for c in catches if c["name"] == n), key=lambda c: c["flagged_at"]) for n in packages]
+    totals = {k: sum(d.get(k, 0) for d in daily.values()) for k in ("versions", "scanned", "flagged")}
+    return {
+        "since": min(daily) if daily else None,
+        "updated_at": (state.get("last_run") or {}).get("at"),
+        "totals": totals,
+        "daily": [{"day": d, **daily[d]} for d in sorted(daily)],
+        "confirmed_packages": len(packages),
+        "confirmed_versions": len(catches),
+        "median_publish_to_flag_min": _median([c["publish_to_flag_min"] for c in first]),
+        "flagged_before_public_report": sum(1 for c in first if (c.get("lead_over_public_min") or 0) > 0),
+        "median_lead_over_public_min": _median([c["lead_over_public_min"] for c in first if (c.get("lead_over_public_min") or 0) > 0]),
+        "catches": catches,
+        "repo": REPO_URL,
+        "ledger": LEDGER_URL,
+    }
+
+
+def _fmt_minutes(m: float | None) -> str:
+    if m is None:
+        return "-"
+    return f"{m:.1f} min" if abs(m) < 120 else f"{m / 60:.1f} h"
+
+
+def _public_html(st: dict) -> str:
+    from html import escape
+
+    rows = "".join(
+        f"<tr><td><code>{escape(c['name'])}@{escape(c['version'])}</code></td><td>{escape((c['published_at'] or '')[:16])}</td>"
+        f"<td>{_fmt_minutes(c['publish_to_flag_min'])}</td><td>{_fmt_minutes(c['lead_over_public_min'])}</td>"
+        f"<td>{' '.join(escape(i) for i in (c.get('osv_ids') or []) + (c.get('ghsa_ids') or []))}</td></tr>"
+        for c in st["catches"]
+    ) or '<tr><td colspan="5">none yet</td></tr>'
+    days = "".join(
+        f"<tr><td>{escape(d['day'])}</td><td>{d['versions']:,}</td><td>{d['scanned']:,}</td><td>{d['flagged']:,}</td></tr>"
+        for d in reversed(st["daily"])
+    )
+    t = st["totals"]
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gatekeeper live</title><style>
+:root{{--bg:#fbfbf9;--fg:#1d1d1b;--muted:#6b6b66;--line:#e3e3dd;--accent:#b4232c}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#151514;--fg:#ececea;--muted:#9a9a94;--line:#2c2c2a;--accent:#ef6b6b}}}}
+body{{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;max-width:880px;margin:0 auto;padding:24px 16px}}
+h1{{font-size:22px;margin:0}} .sub{{color:var(--muted);margin:4px 0 24px}}
+.kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:28px}}
+.kpi{{border:1px solid var(--line);border-radius:8px;padding:12px}} .kpi b{{display:block;font-size:24px}} .kpi span{{color:var(--muted);font-size:13px}}
+table{{border-collapse:collapse;width:100%;margin:8px 0 28px;font-size:14px}} th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}}
+th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(--accent)}} code{{font-size:13px}}
+</style></head><body>
+<h1>Gatekeeper: live npm malware monitor</h1>
+<p class="sub">Every new npm release, checked statically by rules, a fast classifier and Meta models (Muse Spark, Muse Glimmer). Running since {escape(st['since'] or '-')}; last run {escape((st['updated_at'] or '-')[:16])} UTC.</p>
+<div class="kpis">
+<div class="kpi"><b>{t['versions']:,}</b><span>versions checked</span></div>
+<div class="kpi"><b>{t['scanned']:,}</b><span>archives scanned</span></div>
+<div class="kpi"><b>{t['flagged']:,}</b><span>flagged for model review</span></div>
+<div class="kpi"><b>{st['confirmed_packages']}</b><span>independently confirmed malicious packages</span></div>
+<div class="kpi"><b>{_fmt_minutes(st['median_publish_to_flag_min'])}</b><span>median publish to flag</span></div>
+<div class="kpi"><b>{st['flagged_before_public_report']}</b><span>flagged before the public report (median lead {_fmt_minutes(st['median_lead_over_public_min'])})</span></div>
+</div>
+<h2>Confirmed catches</h2>
+<p class="sub">Only detections confirmed by OSV / OpenSSF, GitHub advisories or an npm takedown are named. Flag times are committed as salted hashes to the <a href="{st['ledger']}">public ledger</a> when they happen.</p>
+<div class="wrap"><table><tr><th>package</th><th>published (UTC)</th><th>publish to flag</th><th>lead over public report</th><th>public records</th></tr>{rows}</table></div>
+<h2>Daily volume</h2>
+<div class="wrap"><table><tr><th>day (UTC)</th><th>versions</th><th>scanned</th><th>flagged</th></tr>{days}</table></div>
+<p class="sub">Open source: <a href="{st['repo']}">{st['repo']}</a> · JSON: <a href="stats.json">stats.json</a></p>
+</body></html>"""
+
+
 LEASE_S = 15 * 60
 
 from pydantic import BaseModel  # noqa: E402  (request models must live at module level for FastAPI)
@@ -550,6 +684,7 @@ def api():
     import os
 
     from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi.responses import HTMLResponse
 
     web = FastAPI(title="gatekeeper")
     token = os.environ["GK_WORKER_TOKEN"]
@@ -557,6 +692,16 @@ def api():
     def auth(authorization: str = Header(default="")) -> None:
         if authorization != f"Bearer {token}":
             raise HTTPException(status_code=401, detail="unauthorized")
+
+    @web.get("/stats.json")
+    def public_stats() -> dict:
+        """Public, no auth: daily counts and independently confirmed catches only. Unconfirmed
+        flags are never named here (they appear only as salted hashes in the ledger)."""
+        return _public_stats()
+
+    @web.get("/", response_class=HTMLResponse)
+    def public_page() -> str:
+        return _public_html(_public_stats())
 
     @web.get("/status", dependencies=[Depends(auth)])
     def status() -> dict:
