@@ -9,7 +9,7 @@ import httpx
 
 from gatekeeper.confirm import earliest, parse_ts, to_iso
 from gatekeeper.confirm.ghsa import malware_advisories
-from gatekeeper.confirm.osv import malicious_hits
+from gatekeeper.confirm.osv import malicious_hits, report_commit_time
 from gatekeeper.confirm.takedown import check_takedown
 
 
@@ -52,6 +52,8 @@ def check(
         hits = malicious_hits(client, name, version)
         conf.osv_ids = [h.id for h in hits]
         conf.osv_first_public = earliest(h.first_public for h in hits)
+        if hits and conf.osv_first_public is None:
+            conf.osv_first_public = report_commit_time(client, name, github_token)
     except Exception as exc:  # noqa: BLE001 - one source must not break the others
         conf.errors.append(f"osv: {exc!r}")
     try:

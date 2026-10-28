@@ -102,9 +102,10 @@ def test_osv_mal_entry_uses_earliest_import_time_and_ignores_non_mal():
     assert hits[0].first_public == "2026-10-25T23:05:47.912345Z"
 
 
-def test_osv_published_is_fallback_and_rangeonly_entry_affects_all():
+def test_osv_published_is_not_a_public_time_and_rangeonly_entry_affects_all():
+    # `published` is submitter-set and often backdated to the package's own publish time
     hits = malicious_hits(make_client(osv_pages=[{"vulns": [OSV_ALL_VERSIONS]}]), NAME, "5.5.5")
-    assert [(h.id, h.first_public) for h in hits] == [("MAL-2026-7777", "2026-10-27T13:30:00Z")]
+    assert [(h.id, h.first_public) for h in hits] == [("MAL-2026-7777", None)]
 
 
 def test_osv_entry_for_other_versions_does_not_confirm():

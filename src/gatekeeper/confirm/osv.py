@@ -51,11 +51,24 @@ def affects(vuln: dict, name: str, version: str) -> bool:
     return False
 
 
+OSSF_COMMITS_URL = "https://api.github.com/repos/ossf/malicious-packages/commits"
+
+
 def first_public(vuln: dict) -> str | None:
-    """Earliest origin `import_time`; `published` is submitter-set (can be backdated) so it is only a fallback."""
+    """Earliest origin `import_time`, or None. `published` is submitter-set and often backdated to
+    the package's own publish time, so it never counts as the moment the report became public."""
     origins = (vuln.get("database_specific") or {}).get("malicious-packages-origins") or []
-    imported = earliest(o.get("import_time") for o in origins if isinstance(o, dict))
-    return imported or earliest([vuln.get("published")])
+    return earliest(o.get("import_time") for o in origins if isinstance(o, dict))
+
+
+def report_commit_time(client: httpx.Client, name: str, github_token: str | None = None) -> str | None:
+    """When the report first landed in ossf/malicious-packages (git commit time), the real public moment."""
+    headers = {"Accept": "application/vnd.github+json"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    resp = client.get(OSSF_COMMITS_URL, params={"path": f"osv/malicious/npm/{name}", "per_page": 100}, headers=headers)
+    resp.raise_for_status()
+    return earliest(((c.get("commit") or {}).get("committer") or {}).get("date") for c in resp.json() or [])
 
 
 def malicious_hits(client: httpx.Client, name: str, version: str) -> list[OsvHit]:
