@@ -29,5 +29,4 @@ def test_untrusted_package_content_cannot_inject_markdown():
     block = _code_block(evil)
     assert len(block[0]) - len("text") > 3 and block[2] == block[0][: -len("text")]
     line = _inline("a|b\n## heading [link](u) <b>")
-    assert "
-" not in line and r"|" in line and r"[" in line and r"<" in line
+    assert "\n" not in line and r"\|" in line and r"\[" in line and r"\<" in line
