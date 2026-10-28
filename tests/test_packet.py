@@ -16,7 +16,18 @@ INSPECTION = {"publisher": "someone", "tarball_sha256": "ab" * 32, "still_on_reg
 
 def test_packet_maps_evidence_to_files_and_shows_disagreement():
     md = build_packet(ITEM, INSPECTION)
-    assert "`setup.js` lines 12-14" in md
+    assert "setup.js lines 12-14" in md
     assert "1 of 2 model verdicts malicious/suspicious" in md
     assert "collector.example.invalid" in md and "   2| line two" in md
     assert consensus({}) == "no model verdict yet"
+
+
+def test_untrusted_package_content_cannot_inject_markdown():
+    from gatekeeper.report.packet import _code_block, _inline
+
+    evil = "x```\n[approved](https://evil.invalid) <img src=x>\n```"
+    block = _code_block(evil)
+    assert len(block[0]) - len("text") > 3 and block[2] == block[0][: -len("text")]
+    line = _inline("a|b\n## heading [link](u) <b>")
+    assert "
+" not in line and r"|" in line and r"[" in line and r"<" in line

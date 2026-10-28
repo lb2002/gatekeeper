@@ -6,7 +6,25 @@ published archive (file hashes, full install-time sources; read in memory on Mod
 
 from __future__ import annotations
 
+import re
+
 from gatekeeper.report.drafts import excerpt_paths
+
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]<>()#+!|~])")
+
+
+def _inline(value: object) -> str:
+    """Untrusted text (paths, model summaries, IOCs, npm user names) as one inert Markdown line:
+    newlines flattened and every Markdown/HTML control character backslash-escaped."""
+    return _MD_SPECIAL.sub(r"\\\1", " ".join(str(value).split()))
+
+
+def _code_block(text: str) -> list[str]:
+    """Fence longer than any backtick run inside, so package code cannot close the block."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [fence + "text", text, fence]
+
 
 RANK = {"malicious": 2, "suspicious": 1, "benign": 0}
 
@@ -33,7 +51,7 @@ def build_packet(item: dict, inspection: dict) -> str:
     paths = excerpt_paths(item)
     conf = item.get("confirmation") or {}
     out = [
-        f"# Review packet: {item['name']}@{item['version']}",
+        f"# Review packet: {_inline(item['name'])}@{_inline(item['version'])}",
         "",
         f"**Models:** {consensus(verdicts)}. **Public reports:** "
         + (", ".join((conf.get("osv_ids") or []) + (conf.get("ghsa_ids") or [])) or "none yet")
@@ -41,7 +59,7 @@ def build_packet(item: dict, inspection: dict) -> str:
         "",
         "## Timeline (UTC)",
         "",
-        f"- published: {inspection.get('published_at') or item.get('published_at')} by `{inspection.get('publisher')}`",
+        f"- published: {_inline(inspection.get('published_at') or item.get('published_at'))} by {_inline(inspection.get('publisher'))}",
         f"- flagged by Gatekeeper: {item.get('seen_at')}",
         f"- earliest public report: {conf.get('earliest_public') or 'none yet'}",
         f"- still on the registry: {inspection.get('still_on_registry')}",
@@ -52,24 +70,24 @@ def build_packet(item: dict, inspection: dict) -> str:
         "|---|---|---|---|",
     ]
     for backend, v in sorted(verdicts.items(), key=lambda kv: -RANK.get(kv[1].get("verdict"), -1)):
-        summary = ((v.get("full") or {}).get("summary") or "").replace("|", "/")
+        summary = (v.get("full") or {}).get("summary") or ""
         if not v.get("verdict"):
-            summary = "no usable verdict: " + "; ".join(v.get("errors") or ["unknown"]).replace("|", "/")
-        out.append(f"| {backend} | {v.get('verdict')} | {v.get('confidence')} | {summary} |")
+            summary = "no usable verdict: " + "; ".join(v.get("errors") or ["unknown"])
+        out.append(f"| {_inline(backend)} | {_inline(v.get('verdict'))} | {_inline(v.get('confidence'))} | {_inline(summary)} |")
     out += ["", "## Cited evidence (file and line in the published package)", ""]
     for backend, v in verdicts.items():
         for ev in ((v.get("full") or {}).get("evidence") or []):
             where = paths.get(ev.get("excerpt_id"), ev.get("excerpt_id"))
-            out.append(f"- {backend}: `{where}` lines {ev.get('line_start')}-{ev.get('line_end')}: {ev.get('why')}")
+            out.append(f"- {_inline(backend)}: {_inline(where)} lines {_inline(ev.get('line_start'))}-{_inline(ev.get('line_end'))}: {_inline(ev.get('why'))}")
     iocs = _iocs(verdicts)
-    out += ["", "## Indicators", ""] + ([f"- `{i}`" for i in iocs] or ["- none extracted"])
-    out += ["", "## Fingerprints", "", f"- tarball SHA-256 `{inspection.get('tarball_sha256')}`"]
+    out += ["", "## Indicators", ""] + ([f"- {_inline(i)}" for i in iocs] or ["- none extracted"])
+    out += ["", "## Fingerprints", "", f"- tarball SHA-256 {_inline(inspection.get('tarball_sha256'))}"]
     for path, meta in sorted((inspection.get("files") or {}).items()):
-        out.append(f"- `{path}` ({meta['size']} B) SHA-256 `{meta['sha256']}`")
+        out.append(f"- {_inline(path)} ({_inline(meta['size'])} B) SHA-256 {_inline(meta['sha256'])}")
     out += ["", "## Install-time code (read statically, never executed)", ""]
     for path, text in (inspection.get("text") or {}).items():
         numbered = "\n".join(f"{i:>4}| {line}" for i, line in enumerate(text.splitlines(), start=1))
-        out += [f"### `{path}`", "", "```", numbered, "```", ""]
+        out += [f"### {_inline(path)}", "", *_code_block(numbered), ""]
     out += [
         "## Checklist",
         "",
