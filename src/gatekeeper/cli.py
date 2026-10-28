@@ -293,11 +293,41 @@ def review(
             judged = [v for v in (row.get("verdicts") or {}).values() if v.get("full")]
             judged.sort(key=lambda v: (rank.get(v.get("verdict"), 2), -(v.get("confidence") or 0)))
             full = judged[0]["full"] if judged else {}
-            files = write_drafts({"name": it["name"], "version": it["version"]}, full, reports_dir, note)
+            files = write_drafts({"name": it["name"], "version": it["version"], "excerpts": it.get("excerpts")}, full, reports_dir, note)
             console.print(f"[red]recorded as malicious[/]; report drafts: {files[0].rsplit(os.sep, 1)[0]}")
             console.print("Submit: npm 'Report malware' button on the package page (npm_report.txt), and a PR to ossf/malicious-packages (osv.json at the path in osv_path.txt).")
         else:
             console.print(f"recorded as {decision}")
+
+
+@app.command()
+def packet(
+    key: str = typer.Argument(..., help="name@version of a queued flag"),
+    reports_dir: str = typer.Option("data/reports", help="Where the packet and report drafts are written."),
+) -> None:
+    """Write a review packet (timeline, model verdicts, cited lines, hashes, install code, checklist)
+    plus OSV and npm report drafts for one flagged version."""
+    import os
+    from pathlib import Path
+
+    import modal
+
+    from gatekeeper.report.drafts import write_drafts
+    from gatekeeper.report.packet import RANK, build_packet
+    from gatekeeper.worker.laptop import MonitorApi, load_env
+
+    load_env()
+    api = MonitorApi(os.environ["GK_API_URL"], os.environ["GK_WORKER_TOKEN"])
+    it = api.item(key)
+    inspection = modal.Function.from_name("gatekeeper", "inspect_package").remote(it["name"], it["version"])
+    folder = Path(reports_dir) / f"{it['name'].replace('/', '__')}@{it['version']}"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "PACKET.md").write_text(build_packet(it, inspection), encoding="utf-8")
+    judged = sorted((v for v in (it.get("verdicts") or {}).values() if v.get("full")),
+                    key=lambda v: (-RANK.get(v.get("verdict"), -1), -(v.get("confidence") or 0)))
+    if judged and not (folder / "osv.json").exists():  # never overwrite drafts a reviewer may have edited
+        write_drafts({"name": it["name"], "version": it["version"], "excerpts": it.get("excerpts")}, judged[0]["full"], reports_dir)
+    console.print(f"review packet: {folder / 'PACKET.md'}", markup=False)
 
 
 if __name__ == "__main__":

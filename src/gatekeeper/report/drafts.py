@@ -20,11 +20,18 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _verdict_lines(verdict: dict) -> list[str]:
+def _verdict_lines(verdict: dict, paths: dict[str, str] | None = None) -> list[str]:
+    """Evidence as `file lines a-b: why`. Excerpts keep the real line numbers of their file, so an
+    excerpt id maps directly to a path in the published package."""
     lines = []
     for ev in verdict.get("evidence") or []:
-        lines.append(f"- {ev.get('excerpt_id')} lines {ev.get('line_start')}-{ev.get('line_end')}: {ev.get('why')}")
+        where = (paths or {}).get(ev.get("excerpt_id"), ev.get("excerpt_id"))
+        lines.append(f"- {where} lines {ev.get('line_start')}-{ev.get('line_end')}: {ev.get('why')}")
     return lines
+
+
+def excerpt_paths(item: dict) -> dict[str, str]:
+    return {e["excerpt_id"]: e.get("path") or e["excerpt_id"] for e in item.get("excerpts") or []}
 
 
 def osv_draft(item: dict, verdict: dict, note: str = "") -> dict:
@@ -36,7 +43,7 @@ def osv_draft(item: dict, verdict: dict, note: str = "") -> dict:
         verdict.get("summary", ""),
         "",
         "Evidence:",
-        *_verdict_lines(verdict),
+        *_verdict_lines(verdict, excerpt_paths(item)),
     ]
     if iocs:
         details += ["", "Indicators: " + ", ".join(iocs)]
@@ -71,7 +78,7 @@ def npm_report_text(item: dict, verdict: dict, note: str = "") -> str:
         f"Trigger: {verdict.get('trigger', 'unknown')}",
         "",
         "Evidence (lines in the published package):",
-        *_verdict_lines(verdict),
+        *_verdict_lines(verdict, excerpt_paths(item)),
     ]
     iocs = [i.get("value") for i in verdict.get("iocs") or [] if i.get("value")]
     if iocs:
