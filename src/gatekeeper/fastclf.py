@@ -42,3 +42,47 @@ def build_pipeline():
 def risk(model, records: list[dict]) -> list[float]:
     texts = [clean_text(r["bundle"], r["name"], r["version"], r.get("rules", [])) for r in records]
     return [float(p) for p in model.predict_proba(texts)[:, 1]]
+
+
+def export_model(pipeline, threshold: float) -> dict:
+    """The fitted TF-IDF + logistic regression as plain numbers (no pickle), for local scoring."""
+    vec, lr = pipeline.steps[0][1], pipeline.steps[1][1]
+    terms = [""] * len(vec.vocabulary_)
+    for term, idx in vec.vocabulary_.items():
+        terms[idx] = term
+    return {
+        "format": "gatekeeper-fastclf-1", "token_pattern": TOKEN_PATTERN, "ngram_max": vec.ngram_range[1],
+        "terms": terms, "idf": [float(x) for x in vec.idf_], "coef": [float(x) for x in lr.coef_[0]],
+        "intercept": float(lr.intercept_[0]), "threshold": float(threshold),
+    }
+
+
+class PortableModel:
+    """Scores like the exported scikit-learn pipeline (sublinear TF, IDF, L2 norm, logistic) in pure Python."""
+
+    def __init__(self, data: dict):
+        if data.get("format") != "gatekeeper-fastclf-1":
+            raise ValueError("unknown model format")
+        self.pattern = re.compile(data["token_pattern"])
+        self.ngram_max = int(data["ngram_max"])
+        self.index = {t: i for i, t in enumerate(data["terms"])}
+        self.idf, self.coef = data["idf"], data["coef"]
+        self.intercept, self.threshold = data["intercept"], data["threshold"]
+
+    def risk_text(self, text: str) -> float:
+        import math
+
+        tokens = self.pattern.findall(text)
+        counts: dict[int, int] = {}
+        for n in range(1, self.ngram_max + 1):
+            for i in range(len(tokens) - n + 1):
+                idx = self.index.get(" ".join(tokens[i : i + n]))
+                if idx is not None:
+                    counts[idx] = counts.get(idx, 0) + 1
+        weights = {i: (1 + math.log(c)) * self.idf[i] for i, c in counts.items()}
+        norm = math.sqrt(sum(w * w for w in weights.values())) or 1.0
+        z = self.intercept + sum(w / norm * self.coef[i] for i, w in weights.items())
+        return 1 / (1 + math.exp(-max(-60.0, min(60.0, z))))
+
+    def risk(self, bundle_text: str, name: str, version: str, rules: list[str]) -> float:
+        return self.risk_text(clean_text(bundle_text, name, version, rules))

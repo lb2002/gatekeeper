@@ -196,6 +196,19 @@ def guard_shell() -> None:
     subprocess.run(["powershell", "-NoLogo"], env=env)
 
 
+@guard_app.command("update-model")
+def guard_update_model() -> None:
+    """Download the local first-stage classifier (plain JSON, ~6 MB) from the Modal volume."""
+    import subprocess
+
+    from gatekeeper.guard.core import FAST_MODEL_FILE, load_fast_model
+
+    FAST_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["modal", "volume", "get", "--force", "gatekeeper-data", "models/fastclf.json", str(FAST_MODEL_FILE)], check=True)
+    model = load_fast_model()
+    console.print(f"local classifier: {len(model.index):,} terms, threshold {model.threshold:.3f}", markup=False)
+
+
 @guard_app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or npx")) -> None:
     """Called by the shims: check the packages, then run the real npm/npx with the same arguments."""
@@ -204,7 +217,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, package_specs
+    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, load_fast_model, package_specs
 
     args = [a for a in ctx.args if a != "--"]
     cfg = shim.config()
@@ -212,10 +225,11 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     allow = ALLOW_FLAG in args
     specs = package_specs(tool, args)
     if specs and not allow:
+        fast_model = load_fast_model()
         for spec in specs:
             console.print(f"[cyan]gatekeeper[/] checking {spec} ...", highlight=False)
             try:
-                d = check_spec(shim.npm_command(cfg, "npm"), spec)
+                d = check_spec(shim.npm_command(cfg, "npm"), spec, fast_model=fast_model)
             except Exception as exc:
                 # Fail closed: a package must not get through just because checking it failed
                 # (an attacker could craft an archive that makes the check error out).

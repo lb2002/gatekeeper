@@ -31,6 +31,16 @@ ALLOW_FLAG = "--gk-allow"
 # While this file exists the laptop worker leases no new queue items, so an install check gets
 # the local model next instead of waiting behind the monitor queue.
 BUSY_FILE = Path(os.environ.get("USERPROFILE") or Path.home()) / ".gatekeeper" / "guard.busy"
+FAST_MODEL_FILE = BUSY_FILE.parent / "fastclf.json"  # exported by modal_app/fastclf.py::export
+
+
+def load_fast_model():
+    """The local first-stage classifier (plain JSON, no pickle), or None if not downloaded."""
+    from gatekeeper.fastclf import PortableModel
+
+    if not FAST_MODEL_FILE.exists():
+        return None
+    return PortableModel(json.loads(FAST_MODEL_FILE.read_text(encoding="utf-8")))
 BUSY_STALE_S = 15 * 60
 
 
@@ -128,7 +138,7 @@ def verify_integrity(data: bytes, integrity: str | None) -> bool:
     return digest == integrity.split("-", 1)[1]
 
 
-def check_spec(npm_cmd: list[str], spec: str, classify=None) -> Decision:
+def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None) -> Decision:
     started = time.monotonic()
     meta = resolve(npm_cmd, spec)
     data = httpx.get(meta["tarball"], timeout=60, follow_redirects=True).content
@@ -137,12 +147,17 @@ def check_spec(npm_cmd: list[str], spec: str, classify=None) -> Decision:
     pkg = read_tarball(data)
     content = score_content(pkg)
     rules = sorted(content.rules)
-    if content.score < RULES_ALLOW_BELOW:
-        return Decision(spec, True, f"static rules clean (score {content.score})", meta["name"], meta["version"],
-                        rules=rules, seconds=time.monotonic() - started)
+    bundle = build_bundle(meta["name"], meta["version"], pkg, content)
+    # Fast path only when both cheap stages are clean: the rules alone miss most malware that has
+    # no obvious pattern, the classifier catches much of that in milliseconds.
+    fast_risk = fast_model.risk(bundle.render(), meta["name"], meta["version"], rules) if fast_model else None
+    fast_clean = fast_risk is not None and fast_risk < fast_model.threshold
+    if content.score < RULES_ALLOW_BELOW and (fast_clean or fast_model is None):
+        why = f"static rules clean (score {content.score})"
+        why += f", classifier clean (risk {fast_risk:.2f})" if fast_risk is not None else ", no local classifier installed"
+        return Decision(spec, True, why, meta["name"], meta["version"], rules=rules, seconds=time.monotonic() - started)
     if classify is None:
         from gatekeeper.models.backends import classify_local as classify
-    bundle = build_bundle(meta["name"], meta["version"], pkg, content)
     with model_priority():
         result = classify(bundle)
     v = result.verdict

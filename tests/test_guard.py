@@ -30,3 +30,34 @@ def test_integrity_check():
     assert verify_integrity(data, good)
     assert not verify_integrity(b"tampered", good)
     assert verify_integrity(data, "sha1-abc")  # only sha512 is checked here
+
+
+def test_rules_clean_but_classifier_suspicious_goes_to_the_model(monkeypatch):
+    import gatekeeper.guard.core as core
+
+    class Model:
+        threshold = 0.5
+
+        def risk(self, *a):
+            return 0.9
+
+    monkeypatch.setattr(core, "resolve", lambda cmd, spec: {"name": "quiet", "version": "1.0.0", "tarball": "x", "integrity": None})
+    monkeypatch.setattr(core.httpx, "get", lambda *a, **k: type("R", (), {"content": b""})())
+    monkeypatch.setattr(core, "verify_integrity", lambda data, integrity: True)
+    from gatekeeper.npm.tarball import PackageFiles
+
+    pkg = PackageFiles()
+    pkg.files["package.json"] = b'{"name":"quiet"}'
+    pkg.sizes["package.json"] = 16
+    monkeypatch.setattr(core, "read_tarball", lambda data: pkg)
+    asked = []
+
+    def classify(bundle):
+        asked.append(bundle)
+        raise RuntimeError("model called")
+
+    try:
+        core.check_spec(["npm"], "quiet", classify=classify, fast_model=Model())
+    except RuntimeError:
+        pass
+    assert asked, "a package the classifier flags must not take the rules-only fast path"

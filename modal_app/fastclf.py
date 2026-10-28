@@ -30,7 +30,7 @@ def _rows(split: str) -> list[dict]:
 
 @app.function(image=image, volumes={str(DATA): data_volume}, timeout=3600, cpu=4.0, memory=16384)
 def train() -> dict:
-    from gatekeeper.fastclf import build_pipeline, clean_text, risk
+    from gatekeeper.fastclf import build_pipeline, clean_text, export_model, risk
 
     data_volume.reload()
     from sklearn.model_selection import cross_val_predict
@@ -58,6 +58,7 @@ def train() -> dict:
                                  "kind": r["kind"], "risk": s}) + "\n")
     (DATA / "models").mkdir(exist_ok=True)
     (DATA / "models" / "fastclf.pkl").write_bytes(pickle.dumps({"model": model, "threshold": threshold}))
+    (DATA / "models" / "fastclf.json").write_text(json.dumps(export_model(model, threshold)))
     labels = [1 if r["label"] == "malicious" else 0 for r in te]
     tp = sum(s >= threshold and l for s, l in zip(scores, labels))
     fp = sum(s >= threshold and not l for s, l in zip(scores, labels))
@@ -76,3 +77,24 @@ def train() -> dict:
     data_volume.commit()
     print(json.dumps(stats, indent=1))
     return stats
+
+
+@app.function(image=image, volumes={str(DATA): data_volume}, timeout=1800, cpu=2.0, memory=8192)
+def export() -> dict:
+    """Export the trained pipeline to JSON and check the pure-Python scorer agrees with scikit-learn."""
+    from gatekeeper.fastclf import PortableModel, export_model, risk
+
+    data_volume.reload()
+    saved = pickle.loads((DATA / "models" / "fastclf.pkl").read_bytes())
+    data = export_model(saved["model"], saved["threshold"])
+    (DATA / "models" / "fastclf.json").write_text(json.dumps(data))
+    portable = PortableModel(data)
+    rows = _rows("test")[:300]
+    ref = risk(saved["model"], rows)
+    mine = [portable.risk(r["bundle"], r["name"], r["version"], r.get("rules", [])) for r in rows]
+    worst = max(abs(a - b) for a, b in zip(ref, mine))
+    data_volume.commit()
+    out = {"terms": len(data["terms"]), "max_abs_diff": worst, "threshold": data["threshold"],
+           "size_mb": round(len(json.dumps(data)) / 1e6, 1)}
+    print(json.dumps(out))
+    return out
