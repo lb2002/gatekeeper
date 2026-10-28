@@ -503,7 +503,7 @@ def llamaguard() -> dict:
             break
         candidates += [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
         used.append(path)
-    queued = [(k, it) for k, it in queue.items() if BACKEND not in it.get("verdicts", {}) and it.get("bundle")]
+    queued = [(k, it) for k, it in queue.items() if it.get("lg_risk") is None and it.get("bundle")]
     if not candidates and not queued:
         return {"scored": 0}
     scorer = LlamaGuardScorer(DATA / "models" / "llamaguard1b-gatekeeper")
@@ -528,8 +528,11 @@ def llamaguard() -> dict:
         fresh = queue.get(key, None)
         if fresh is None:
             continue
-        verdict = "malicious" if risk >= scorer.threshold else "benign"
-        fresh.setdefault("verdicts", {})[BACKEND] = {"verdict": verdict, "confidence": round(risk, 4), "at": now.isoformat(), "full": None}
+        # Llama Guard may only raise concern: a low score is kept as a number, never as a "benign"
+        # verdict that would make a flag look judged and drop it from Spark or the review list.
+        fresh["lg_risk"] = round(risk, 4)
+        if risk >= scorer.threshold:
+            fresh.setdefault("verdicts", {})[BACKEND] = {"verdict": "malicious", "confidence": round(risk, 4), "at": now.isoformat(), "full": None}
         queue[key] = fresh
     if new_flags:
         _append_jsonl(DATA / "flagged" / f"{now:%Y-%m-%d}" / f"llamaguard-{now:%H%M%S}.jsonl", new_flags)
