@@ -15,7 +15,7 @@ Work in progress for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 202
 npm replication feed (every 2 min, on Modal)
   -> metadata triage (install hooks, typosquats, maintainer changes, new packages)
   -> in-memory tarball scan: static rules + a fast first-stage classifier
-  -> every 15 min: fine-tuned Llama Guard 3 1B over everything the cheap stages let through
+  -> (being retrained) fine-tuned Llama Guard 3 1B over everything the cheap stages let through
   -> evidence bundle: numbered excerpts of the code that matters (max 8000 chars)
   -> Muse Spark Open (Fireworks) judges every flag; Muse Spark (Meta API) gives second opinions;
      Muse Glimmer 30B runs locally (laptop worker, install guard)
@@ -54,7 +54,9 @@ Time-split evaluation: train on samples discovered up to May 2026, test on sampl
 | TF-IDF + logistic regression | 0.93 (0.90-0.95) | 75% | 1 ms on a laptop CPU, ships as plain JSON |
 | **Llama Guard 3 1B, fine-tuned** (LoRA + classification head) | **0.97 (0.95-0.98)** | **87%** | 89% recall at 1.4% false positives at its fixed threshold; 101 of the 125 samples the rules miss |
 
-The fine-tuned Llama Guard was trained only on dataset ground truth (never on Muse Spark outputs). In the live monitor it runs every 15 minutes on a GPU over every scanned version the cheaper stages let through; what it flags is judged by the Muse models and reviewed by a human like any other flag. Caveat: the benign test set comes from popular packages, so live precision is measured separately on the monitor.
+The fine-tuned Llama Guard was trained only on dataset ground truth (never on Muse Spark outputs).
+
+**Lesson from going live (2026-10-28):** on real new npm releases the same Llama Guard flagged 29 of 79 scanned packages (37%), mostly small new CLIs and MCP tools that Muse Spark and Muse Spark Open judged benign. The benign training data came from popular, well-maintained packages, so the model partly learned "unpolished = malicious". The test set shares that bias, which is why it looked excellent offline. It is switched off in the monitor; the monitor now collects a capped sample of everyday npm releases to retrain it with realistic negatives and to measure false positives on live data from later days.
 
 ## Safety
 

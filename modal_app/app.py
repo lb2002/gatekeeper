@@ -43,6 +43,7 @@ RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
 PROCESS_BUDGET_S = 75  # after this, unfinished names are deferred to the next run (timeout is 115 s)
 MAX_CHANGES_PER_RUN = 4000
 MAX_PENDING = 8000
+LIVE_SAMPLE_CAP = 40_000
 MAX_WINDOW = timedelta(hours=24)
 SEEN_MAX = 60000
 
@@ -130,8 +131,16 @@ def _run_poll() -> dict:
     rows = [r.to_json() for r in records]
     # scanned but not flagged: bundles wait for the batched Llama Guard pass
     candidates = [r for r in rows if r["scanned"] and not r["flagged"] and r.get("bundle")]
-    if candidates:
+    if candidates and state.get("lg_enabled", False):
         _append_jsonl(DATA / "lg_pending" / f"{day}-{run_id}.jsonl", candidates)
+    # live npm sample (capped): everyday packages as realistic negatives for training and for an
+    # honest live false-positive measurement; anything later flagged or confirmed is excluded then
+    collected = state.get("live_samples", 0)
+    if candidates and collected < LIVE_SAMPLE_CAP:
+        keep = [{k: r[k] for k in ("name", "version", "published_at", "seen_at", "content_score", "rules", "bundle")}
+                for r in candidates[: LIVE_SAMPLE_CAP - collected]]
+        _append_jsonl(DATA / "live_samples" / f"{day}.jsonl", keep)
+        state["live_samples"] = collected + len(keep)
     events = [r if r["flagged"] else {k: v for k, v in r.items() if k not in ("bundle", "excerpts")} for r in rows]
     _append_jsonl(DATA / "events" / day / f"{run_id}.jsonl", events)
     flagged = [r for r in rows if r["flagged"]]
@@ -359,7 +368,7 @@ FIREWORKS_DAILY_CAP_USD = 5.0
 FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine-tuning tests
 FIREWORKS_PER_RUN = 60
 FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
-FIRST_OPINION_BACKENDS = ("glimmer-local", "spark-open-fireworks", "llamaguard-1b")
+FIRST_OPINION_BACKENDS = ("glimmer-local", "spark-open-fireworks")
 
 
 def _spark_candidates(items: dict, now: datetime) -> list[str]:
@@ -493,6 +502,8 @@ def llamaguard() -> dict:
     where the Muse models judge them with cited lines and a human reviews them."""
     from gatekeeper.models.llamaguard import BACKEND, LlamaGuardScorer, prepare
 
+    if not state.get("lg_enabled", False):
+        return {"enabled": False}  # off until it is retrained on live npm negatives (37% live false positives)
     volume.reload()
     now = datetime.now(timezone.utc)
     files = sorted((DATA / "lg_pending").glob("*.jsonl")) if (DATA / "lg_pending").exists() else []
