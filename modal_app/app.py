@@ -25,11 +25,18 @@ image = (
     .pip_install("httpx>=0.27", "pydantic>=2.7", "typer>=0.12", "rich>=13.7", "fastapi[standard]>=0.115", "scikit-learn==1.5.2")
     .add_local_python_source("gatekeeper")
 )
+lg_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("torch==2.5.1", "transformers==4.46.3", "peft==0.13.2", "accelerate==1.1.1", "httpx>=0.27", "pydantic>=2.7")
+    .env({"HF_HOME": "/models/hf"})
+    .add_local_python_source("gatekeeper")
+)
 volume = modal.Volume.from_name("gatekeeper-data", create_if_missing=True)
+model_volume = modal.Volume.from_name("gatekeeper-models", create_if_missing=True)
 state = modal.Dict.from_name("gatekeeper-state", create_if_missing=True)
 queue = modal.Dict.from_name("gatekeeper-queue", create_if_missing=True)  # key "name@version" -> item
 worker_secret = modal.Secret.from_name("gatekeeper-worker")  # GK_WORKER_TOKEN
-QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk")
+QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk")
 
 DATA = Path("/data")
 RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
@@ -121,7 +128,12 @@ def _run_poll() -> dict:
     run_id = f"{now:%H%M%S}-{uuid.uuid4().hex[:6]}"
     day = f"{now:%Y-%m-%d}"
     rows = [r.to_json() for r in records]
-    _append_jsonl(DATA / "events" / day / f"{run_id}.jsonl", rows)
+    # scanned but not flagged: bundles wait for the batched Llama Guard pass
+    candidates = [r for r in rows if r["scanned"] and not r["flagged"] and r.get("bundle")]
+    if candidates:
+        _append_jsonl(DATA / "lg_pending" / f"{day}-{run_id}.jsonl", candidates)
+    events = [r if r["flagged"] else {k: v for k, v in r.items() if k not in ("bundle", "excerpts")} for r in rows]
+    _append_jsonl(DATA / "events" / day / f"{run_id}.jsonl", events)
     flagged = [r for r in rows if r["flagged"]]
     if flagged:
         _append_jsonl(DATA / "flagged" / day / f"{run_id}.jsonl", flagged)
@@ -347,7 +359,7 @@ FIREWORKS_DAILY_CAP_USD = 5.0
 FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine-tuning tests
 FIREWORKS_PER_RUN = 60
 FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
-FIRST_OPINION_BACKENDS = ("glimmer-local", "spark-open-fireworks")
+FIRST_OPINION_BACKENDS = ("glimmer-local", "spark-open-fireworks", "llamaguard-1b")
 
 
 def _spark_candidates(items: dict, now: datetime) -> list[str]:
@@ -467,6 +479,73 @@ def spark_open() -> dict:
         return {"enabled": False}
     keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]
     return _run_cloud("spark-open-fireworks", keys, "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD, workers=8, budget_s=140)
+
+
+LG_MAX_PER_RUN = 3000
+
+
+@app.function(image=lg_image, gpu="L4", volumes={str(DATA): volume, "/models": model_volume},
+              secrets=[modal.Secret.from_name("huggingface")], schedule=modal.Period(minutes=15), timeout=900,
+              cpu=2.0, memory=16384)
+def llamaguard() -> dict:
+    """Batched pass of the fine-tuned Llama Guard 3 1B over every scanned version the rules and the
+    classifier let through, plus a score for each queued flag. Its flags enter the normal queue,
+    where the Muse models judge them with cited lines and a human reviews them."""
+    from gatekeeper.models.llamaguard import BACKEND, LlamaGuardScorer, prepare
+
+    volume.reload()
+    now = datetime.now(timezone.utc)
+    files = sorted((DATA / "lg_pending").glob("*.jsonl")) if (DATA / "lg_pending").exists() else []
+    candidates: list[dict] = []
+    used: list[Path] = []
+    for path in files:
+        if len(candidates) >= LG_MAX_PER_RUN:
+            break
+        candidates += [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        used.append(path)
+    queued = [(k, it) for k, it in queue.items() if BACKEND not in it.get("verdicts", {}) and it.get("bundle")]
+    if not candidates and not queued:
+        return {"scored": 0}
+    scorer = LlamaGuardScorer(DATA / "models" / "llamaguard1b-gatekeeper")
+    texts = [prepare(r["bundle"], r["name"], r["version"], r.get("rules") or []) for r in candidates]
+    texts += [prepare(it["bundle"], it["name"], it["version"], it.get("rules") or []) for _, it in queued]
+    risks = scorer.risk(texts)
+    cand_risks, queue_risks = risks[: len(candidates)], risks[len(candidates):]
+
+    new_flags = []
+    for r, risk in zip(candidates, cand_risks):
+        if risk >= scorer.threshold:
+            r["flagged"], r["lg_risk"] = True, round(risk, 4)
+            new_flags.append(r)
+    added = _enqueue(new_flags) if new_flags else 0
+    for r in new_flags:  # record the score as a verdict on the new queue items
+        key = f"{r['name']}@{r['version']}"
+        it = queue.get(key, None)
+        if it is not None:
+            it.setdefault("verdicts", {})[BACKEND] = {"verdict": "malicious", "confidence": r["lg_risk"], "at": now.isoformat(), "full": None}
+            queue[key] = it
+    for (key, _), risk in zip(queued, queue_risks):
+        fresh = queue.get(key, None)
+        if fresh is None:
+            continue
+        verdict = "malicious" if risk >= scorer.threshold else "benign"
+        fresh.setdefault("verdicts", {})[BACKEND] = {"verdict": verdict, "confidence": round(risk, 4), "at": now.isoformat(), "full": None}
+        queue[key] = fresh
+    if new_flags:
+        _append_jsonl(DATA / "flagged" / f"{now:%Y-%m-%d}" / f"llamaguard-{now:%H%M%S}.jsonl", new_flags)
+    for path in used:
+        path.unlink()
+    daily = state.get("daily", {})
+    d = daily.setdefault(f"{now:%Y-%m-%d}", {"versions": 0, "scanned": 0, "flagged": 0})
+    d["lg_scored"] = d.get("lg_scored", 0) + len(candidates)
+    d["lg_flagged"] = d.get("lg_flagged", 0) + len(new_flags)
+    d["flagged"] += added
+    state["daily"] = daily
+    volume.commit()
+    stats = {"scored": len(candidates), "flagged": len(new_flags), "queued": added, "queue_scored": len(queued),
+             "threshold": round(scorer.threshold, 4)}
+    print(json.dumps(stats))
+    return stats
 
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, FIREWORKS_SECRET], timeout=180, cpu=0.25, memory=512)

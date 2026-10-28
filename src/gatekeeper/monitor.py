@@ -100,13 +100,14 @@ def process_version(
         plain = build_bundle(info.name, info.version, pkg, content).render()
         rec.fast_risk, fast_flag = fast(info.name, info.version, plain, rec.rules)
         rec.priority += round(10 * rec.fast_risk)  # ordering only; the flag decision is made above
-    if rules_flag or fast_flag:
-        bundle = build_bundle(info.name, info.version, pkg, content, meta_reasons=meta.reasons)
-        text = bundle.render()
-        rec.flagged = True
-        rec.bundle = text
-        rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
-        rec.excerpts = [e.ref() for e in bundle.excerpts]
+    # Every scanned version keeps its bundle: flagged ones go to the queue, the rest to the batched
+    # Llama Guard pass, which catches malware the rules and the classifier both miss.
+    bundle = build_bundle(info.name, info.version, pkg, content, meta_reasons=meta.reasons)
+    text = bundle.render()
+    rec.flagged = rules_flag or fast_flag
+    rec.bundle = text
+    rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
+    rec.excerpts = [e.ref() for e in bundle.excerpts]
     return rec
 
 
