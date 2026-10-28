@@ -9,6 +9,7 @@ import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
+from typing import Callable
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -42,6 +43,7 @@ class Record:
     bundle: str | None = None
     bundle_sha256: str | None = None
     excerpts: list[dict] | None = None
+    fast_risk: float | None = None
     error: str | None = None
 
     @property
@@ -57,8 +59,13 @@ def should_scan(info: packument.VersionInfo, meta_score: int, popular: set[str],
     return is_new_package or meta_score >= SCAN_META_THRESHOLD or info.name in popular
 
 
+# (name, version, bundle text, rules) -> (risk in [0, 1], flag?) from the fast first-stage classifier
+FastScorer = Callable[[str, str, str, list[str]], tuple[float, bool]]
+
+
 def process_version(
-    client: httpx.Client, info: packument.VersionInfo, popular: set[str], now: datetime
+    client: httpx.Client, info: packument.VersionInfo, popular: set[str], now: datetime,
+    fast: FastScorer | None = None,
 ) -> Record:
     meta = score_metadata(info, popular, now=now)
     rec = Record(
@@ -86,7 +93,13 @@ def process_version(
     rec.content_score = content.score
     rec.rules = sorted(content.rules)
     rec.priority = meta.score + content.score
-    if content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD:
+    fast_flag = False
+    if fast is not None:
+        # scored on the bundle without metadata notes, the format the classifier was trained on
+        plain = build_bundle(info.name, info.version, pkg, content).render()
+        rec.fast_risk, fast_flag = fast(info.name, info.version, plain, rec.rules)
+        rec.priority += round(10 * rec.fast_risk)
+    if content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD or fast_flag:
         bundle = build_bundle(info.name, info.version, pkg, content, meta_reasons=meta.reasons)
         text = bundle.render()
         rec.flagged = True
@@ -105,6 +118,7 @@ def process_names(
     workers: int = 16,
     window: timedelta = RECENT_WINDOW,
     deadline: float | None = None,
+    fast: FastScorer | None = None,
 ) -> tuple[list[Record], list[str]]:
     """Score every version of the changed packages published within `window`, unless already seen.
 
@@ -125,7 +139,7 @@ def process_names(
         for info in packument.recent_versions(doc, window, now=now):
             if info.is_security_holder or f"{info.name}@{info.version}" in seen:
                 continue
-            out.append(process_version(client, info, popular, now))
+            out.append(process_version(client, info, popular, now, fast))
         return out
 
     pool = ThreadPoolExecutor(max_workers=workers)

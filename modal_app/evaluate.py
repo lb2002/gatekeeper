@@ -130,7 +130,7 @@ def eval_glimmer(split: str = "test", limit: int = 0, parallel: int = 8, tag: st
 @app.function(image=cpu_image, volumes={str(DATA): data_volume}, timeout=600)
 def report(split: str = "test") -> dict:
     """Metrics for every prediction file of this split plus the rules baseline."""
-    from gatekeeper.eval.metrics import at_threshold, bootstrap, pr_auc, recall_at_fpr, verdict_risk
+    from gatekeeper.eval.metrics import at_threshold, bootstrap, curve, pr_auc, recall_at_fpr, verdict_risk
 
     data_volume.reload()
     rows = _load(split, None)
@@ -144,7 +144,7 @@ def report(split: str = "test") -> dict:
             p = json.loads(line)
             i = key.get((p["name"], p["version"], p["label"]))
             if i is not None:
-                scores[i] = verdict_risk(p["verdict"], p["confidence"])
+                scores[i] = p["risk"] if "risk" in p else verdict_risk(p["verdict"], p["confidence"])
                 seen += 1
         if seen:
             systems[path.stem] = scores
@@ -154,7 +154,11 @@ def report(split: str = "test") -> dict:
         p1 = recall_at_fpr(scores, labels, 0.01)
         ap = bootstrap(scores, labels, pr_auc, n=500)
         res = {"pr_auc": [round(x, 3) for x in ap], "recall_at_1pct_fpr": round(p1.recall, 3) if p1 else None}
-        if name != "rules (content score)":
+        # as a filter: share of benign packages still passed on when keeping 95% / 99% of malware
+        for target in (0.95, 0.99):
+            ok = [pt for pt in curve(scores, labels) if pt.recall >= target]
+            res[f"benign_passed_at_{int(target * 100)}pct_recall"] = round(min(pt.fpr for pt in ok), 3) if ok else None
+        if name not in ("rules (content score)", "fastclf-test"):
             flag = at_threshold(scores, labels, 0.5)  # "malicious or suspicious" blocks
             res["block_recall"] = round(flag.recall, 3)
             res["block_fpr"] = round(flag.fpr, 3)

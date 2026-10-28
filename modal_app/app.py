@@ -22,14 +22,14 @@ app = modal.App("gatekeeper")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("httpx>=0.27", "pydantic>=2.7", "typer>=0.12", "rich>=13.7", "fastapi[standard]>=0.115")
+    .pip_install("httpx>=0.27", "pydantic>=2.7", "typer>=0.12", "rich>=13.7", "fastapi[standard]>=0.115", "scikit-learn==1.5.2")
     .add_local_python_source("gatekeeper")
 )
 volume = modal.Volume.from_name("gatekeeper-data", create_if_missing=True)
 state = modal.Dict.from_name("gatekeeper-state", create_if_missing=True)
 queue = modal.Dict.from_name("gatekeeper-queue", create_if_missing=True)  # key "name@version" -> item
 worker_secret = modal.Secret.from_name("gatekeeper-worker")  # GK_WORKER_TOKEN
-QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts")
+QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk")
 
 DATA = Path("/data")
 RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
@@ -47,8 +47,33 @@ def _append_jsonl(path: Path, rows: list[dict]) -> None:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+_FAST: dict = {}
+
+
+def _fast_scorer():
+    """The fast first-stage classifier trained by modal_app/fastclf.py, or None if not trained yet."""
+    import pickle
+    import threading
+
+    from gatekeeper.fastclf import clean_text
+
+    path = DATA / "models" / "fastclf.pkl"
+    if not path.exists():
+        return None
+    if _FAST.get("mtime") != path.stat().st_mtime:
+        _FAST.update(pickle.loads(path.read_bytes()), mtime=path.stat().st_mtime, lock=threading.Lock())
+    model, threshold, lock = _FAST["model"], _FAST["threshold"], _FAST["lock"]
+
+    def score(name: str, version: str, text: str, rules: list[str]) -> tuple[float, bool]:
+        with lock:
+            risk = float(model.predict_proba([clean_text(text, name, version, rules)])[0, 1])
+        return round(risk, 4), risk >= threshold
+
+    return score
+
+
 def _run_poll() -> dict:
-    from gatekeeper.monitor import process_names
+    from gatekeeper.monitor import FLAG_CONTENT_THRESHOLD, FLAG_TOTAL_THRESHOLD, process_names
     from gatekeeper.npm import feed
     from gatekeeper.popular import load_popular
 
@@ -88,7 +113,8 @@ def _run_poll() -> dict:
         stats["window_min"] = round(window.total_seconds() / 60)
         todo = list(dict.fromkeys(pending + list(names)))
         records, deferred = process_names(
-            client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S
+            client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S,
+            fast=_fast_scorer(),
         )
         stats["deferred"] = len(deferred)
 
@@ -105,6 +131,7 @@ def _run_poll() -> dict:
     stats["versions"] = len(records)
     stats["scanned"] = sum(r.scanned for r in records)
     stats["flagged"] = len(flagged)
+    stats["fast_flagged"] = sum(1 for r in records if r.fast_risk is not None and r.flagged and r.content_score < FLAG_CONTENT_THRESHOLD and r.meta_score + r.content_score < FLAG_TOTAL_THRESHOLD)
     stats["errors"] = sum(1 for r in records if r.error)
     # remember recently seen versions (bounded) and the feed position
     recent = (seen_list + [r.key for r in records if r.key not in seen_keys])[-SEEN_MAX:]  # oldest dropped first
