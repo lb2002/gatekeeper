@@ -131,7 +131,7 @@ def _run_poll() -> dict:
     stats["versions"] = len(records)
     stats["scanned"] = sum(r.scanned for r in records)
     stats["flagged"] = len(flagged)
-    stats["fast_flagged"] = sum(1 for r in records if r.fast_risk is not None and r.flagged and r.content_score < FLAG_CONTENT_THRESHOLD and r.meta_score + r.content_score < FLAG_TOTAL_THRESHOLD)
+    stats["fast_flagged"] = sum(1 for r in records if r.flagged and r.content_score < FLAG_CONTENT_THRESHOLD and r.meta_score + r.content_score < FLAG_TOTAL_THRESHOLD)
     stats["errors"] = sum(1 for r in records if r.error)
     # remember recently seen versions (bounded) and the feed position
     recent = (seen_list + [r.key for r in records if r.key not in seen_keys])[-SEEN_MAX:]  # oldest dropped first
@@ -244,96 +244,128 @@ SPARK_DAILY_CAP_USD = 10.0
 SPARK_TOTAL_CAP_USD = 130.0
 SPARK_PER_RUN = 20
 SPARK_SECRET = modal.Secret.from_name("meta-api", required_keys=["MODEL_API_KEY"])
+# Muse Glimmer on Fireworks serverless: judges every flag; ~$0.0015 per package
+FIREWORKS_DAILY_CAP_USD = 5.0
+FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine-tuning tests
+FIREWORKS_PER_RUN = 60
+FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
+GLIMMER_BACKENDS = ("glimmer-local", "glimmer-fireworks")
 
 
 def _spark_candidates(items: dict, now: datetime) -> list[str]:
-    """Second opinions on local malicious/suspicious verdicts first, then high-priority items the
-    laptop has not reached for 30 minutes."""
+    """Second opinions on Glimmer malicious/suspicious verdicts first, then high-priority items no
+    model has judged for 30 minutes."""
     first, second = [], []
     for key, it in items.items():
         verdicts = it.get("verdicts", {})
         if "spark" in verdicts:
             continue
-        local = (verdicts.get("glimmer-local") or {}).get("verdict")
-        if local in ("malicious", "suspicious"):
+        if any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in GLIMMER_BACKENDS):
             first.append((it["priority"], key))
         elif not verdicts and datetime.fromisoformat(it["seen_at"]) < now - timedelta(minutes=30):
             second.append((it["priority"], key))
     return [k for _, k in sorted(first, reverse=True)] + [k for _, k in sorted(second, reverse=True)]
 
 
-def _spark_one(key: str, item: dict, spend: dict, now: datetime) -> dict:
-    """Classify one queued item with Spark, book the cost and store the verdict. Raises on API errors."""
-    from gatekeeper.evidence.bundle import RenderedBundle
-    from gatekeeper.models.backends import classify_spark
+def _fireworks_candidates(items: dict) -> list[str]:
+    """Every queued item without a cloud Glimmer verdict, newest first."""
+    todo = [(it["seen_at"], key) for key, it in items.items() if "glimmer-fireworks" not in it.get("verdicts", {})]
+    return [k for _, k in sorted(todo, reverse=True)]
 
+
+def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -> dict:
+    """Classify one queued item with a cloud model, book the cost and store the verdict. Raises on API errors."""
+    from gatekeeper.evidence.bundle import RenderedBundle
+    from gatekeeper.models.backends import classify_glimmer_fireworks, classify_spark
+
+    classify = {"spark": classify_spark, "glimmer-fireworks": classify_glimmer_fireworks}[backend]
     day = f"{now:%Y-%m-%d}"
-    result = classify_spark(RenderedBundle.from_record(item))
+    result = classify(RenderedBundle.from_record(item))
     spend["total"] += result.cost_usd
     spend["days"][day] = spend["days"].get(day, 0.0) + result.cost_usd
     v = result.verdict
     row = {
-        "key": key, "backend": "spark", "model": result.model,
+        "key": key, "backend": backend, "model": result.model,
         "verdict": v.model_dump(mode="json") if v else None, "errors": result.errors,
         "latency_s": result.latency_s, "input_tokens": result.input_tokens, "cached_tokens": result.cached_tokens,
         "output_tokens": result.output_tokens, "cost_usd": result.cost_usd, "received_at": now.isoformat(),
     }
     if not v:
         row["raw"] = result.raw[:4000]
-    _append_jsonl(DATA / "verdicts" / day / "spark.jsonl", [row])
-    item.setdefault("verdicts", {})["spark"] = {
+    _append_jsonl(DATA / "verdicts" / day / f"{backend}.jsonl", [row])
+    # re-read just before writing so verdicts stored meanwhile by other crons or the laptop survive
+    fresh = queue.get(key, None) or item
+    fresh.setdefault("verdicts", {})[backend] = {
         "verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
         "at": now.isoformat(), "errors": result.errors[:3], "full": row["verdict"],
     }
-    queue[key] = item
+    queue[key] = fresh
     return row
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
-def spark() -> dict:
-    """Classify queued bundles with Muse Spark (Meta Model API) under hard spending caps.
-    Disabled until state['spark_enabled'] is True."""
-    if not state.get("spark_enabled", False):
-        return {"enabled": False}
+def _run_cloud(backend: str, keys: list[str], spend_key: str, daily_cap: float, total_cap: float) -> dict:
     now = datetime.now(timezone.utc)
     day = f"{now:%Y-%m-%d}"
-    spend = state.get("spark_spend", {"total": 0.0, "days": {}})
+    spend = state.get(spend_key, {"total": 0.0, "days": {}})
     done = 0
-    for key in _spark_candidates(dict(queue.items()), now)[:SPARK_PER_RUN]:
-        if spend["total"] >= SPARK_TOTAL_CAP_USD or spend["days"].get(day, 0.0) >= SPARK_DAILY_CAP_USD:
+    for key in keys:
+        if spend["total"] >= total_cap or spend["days"].get(day, 0.0) >= daily_cap:
             break
         item = queue.get(key, None)
         if item is None:
             continue
         try:
-            _spark_one(key, item, spend, now)
+            _cloud_one(backend, key, item, spend, now)
         except Exception as exc:  # API errors (restriction, rate limit) must not crash the cron
-            print(f"spark error on {key}: {type(exc).__name__}: {exc}"[:300])
+            print(f"{backend} error on {key}: {type(exc).__name__}: {exc}"[:300])
             break
         done += 1
-    state["spark_spend"] = spend
+        state[spend_key] = spend  # save as we go, so a timeout cannot lose booked spend
     volume.commit()
-    stats = {"enabled": True, "classified": done, "spend_today": round(spend["days"].get(day, 0.0), 4), "spend_total": round(spend["total"], 4)}
+    stats = {"backend": backend, "classified": done, "spend_today": round(spend["days"].get(day, 0.0), 4), "spend_total": round(spend["total"], 4)}
     print(json.dumps(stats))
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], timeout=180, cpu=0.25, memory=512)
-def spark_probe(key: str = "") -> dict:
-    """One Spark call on one queued item (the top candidate unless a key is given), to check that
-    the key, the schema mode and the cost accounting work before the cron is switched on."""
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
+def spark() -> dict:
+    """Second opinions from Muse Spark (Meta Model API) under hard spending caps.
+    Disabled until state['spark_enabled'] is True."""
+    if not state.get("spark_enabled", False):
+        return {"enabled": False}
+    keys = _spark_candidates(dict(queue.items()), datetime.now(timezone.utc))[:SPARK_PER_RUN]
+    return _run_cloud("spark", keys, "spark_spend", SPARK_DAILY_CAP_USD, SPARK_TOTAL_CAP_USD)
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET], schedule=modal.Period(minutes=3), timeout=170, cpu=0.25, memory=512)
+def glimmer_cloud() -> dict:
+    """Muse Glimmer on Fireworks judges every flag under hard spending caps.
+    Disabled until state['fireworks_enabled'] is True."""
+    if not state.get("fireworks_enabled", False):
+        return {"enabled": False}
+    keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]
+    return _run_cloud("glimmer-fireworks", keys, "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD)
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, FIREWORKS_SECRET], timeout=180, cpu=0.25, memory=512)
+def cloud_probe(backend: str = "spark", key: str = "") -> dict:
+    """One call on one queued item (the top candidate unless a key is given), to check the key,
+    the schema mode and the cost accounting before a cron is switched on."""
     now = datetime.now(timezone.utc)
-    key = key or next(iter(_spark_candidates(dict(queue.items()), now)), "")
+    items = dict(queue.items())
+    candidates = _spark_candidates(items, now) if backend == "spark" else _fireworks_candidates(items)
+    key = key or next(iter(candidates), "")
     item = queue.get(key, None) if key else None
     if item is None:
         return {"error": f"no queued item {key!r}"}
-    spend = state.get("spark_spend", {"total": 0.0, "days": {}})
+    spend_key = {"spark": "spark_spend", "glimmer-fireworks": "fireworks_spend"}[backend]
+    spend = state.get(spend_key, {"total": 0.0, "days": {}})
     try:
-        row = _spark_one(key, item, spend, now)
+        row = _cloud_one(backend, key, item, spend, now)
     except Exception as exc:
         body = getattr(getattr(exc, "response", None), "text", "")
         return {"error": f"{type(exc).__name__}: {exc}"[:300], "body": body[:500]}
-    state["spark_spend"] = spend
+    state[spend_key] = spend
     volume.commit()
     v = row["verdict"] or {}
     return {
@@ -364,6 +396,12 @@ def spark_params_probe(extra: dict) -> dict:
 def set_spark(enabled: bool) -> dict:
     state["spark_enabled"] = bool(enabled)
     return {"spark_enabled": state["spark_enabled"], "spend": state.get("spark_spend", None)}
+
+
+@app.function(image=image, timeout=60)
+def set_fireworks(enabled: bool) -> dict:
+    state["fireworks_enabled"] = bool(enabled)
+    return {"fireworks_enabled": state["fireworks_enabled"], "spend": state.get("fireworks_spend", None)}
 
 
 LEASE_S = 15 * 60
@@ -419,6 +457,8 @@ def api():
             "confirmed": confirmed,
             "spark_enabled": state.get("spark_enabled", False),
             "spark_spend": state.get("spark_spend", None),
+            "fireworks_enabled": state.get("fireworks_enabled", False),
+            "fireworks_spend": state.get("fireworks_spend", None),
         }
 
     @web.get("/work", dependencies=[Depends(auth)])

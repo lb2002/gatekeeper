@@ -22,9 +22,14 @@ from gatekeeper.schema import Verdict, verdict_json_schema
 META_API_URL = "https://api.meta.ai/v1"
 SPARK_MODEL = "muse-spark-1.3"  # Standard mode; never the "-contributor" variants
 LOCAL_URL = os.environ.get("GK_LOCAL_URL", "http://127.0.0.1:8080/v1")
+FIREWORKS_URL = "https://api.fireworks.ai/inference/v1"
+GLIMMER_FIREWORKS_MODEL = "accounts/fireworks/models/muse-glimmer-30b"
 
 # USD per 1M tokens (dev.meta.ai/docs/pricing-rate-limits, Oct 2026)
 SPARK_PRICE = {"input": 1.25, "cached_input": 0.15, "output": 4.25}
+# USD per 1M tokens, Fireworks serverless (fireworks.ai/models/fireworks/muse-glimmer-30b, Oct 2026)
+GLIMMER_FIREWORKS_PRICE = {"input": 0.35, "cached_input": 0.04, "output": 1.50}
+PRICES = {"spark": SPARK_PRICE, "glimmer-fireworks": GLIMMER_FIREWORKS_PRICE}
 
 
 @dataclass
@@ -41,13 +46,12 @@ class ModelResult:
 
     @property
     def cost_usd(self) -> float:
-        if self.backend != "spark":
+        price = PRICES.get(self.backend)
+        if price is None:
             return 0.0
         uncached = max(self.input_tokens - self.cached_tokens, 0)
         return (
-            uncached * SPARK_PRICE["input"]
-            + self.cached_tokens * SPARK_PRICE["cached_input"]
-            + self.output_tokens * SPARK_PRICE["output"]
+            uncached * price["input"] + self.cached_tokens * price["cached_input"] + self.output_tokens * price["output"]
         ) / 1e6
 
 
@@ -139,5 +143,36 @@ def classify_local(
         errors=errors,
         latency_s=latency,
         input_tokens=int(usage.get("prompt_tokens", 0)),
+        output_tokens=int(usage.get("completion_tokens", 0)),
+    )
+
+
+def classify_glimmer_fireworks(
+    bundle: Bundle, api_key: str | None = None, timeout: float = 120, model: str = GLIMMER_FIREWORKS_MODEL
+) -> ModelResult:
+    """Muse Glimmer (open weights, same model as the local guard) on Fireworks serverless."""
+    key = api_key or os.environ["FIREWORKS_API_KEY"]
+    payload = {
+        "model": model,
+        "messages": messages(bundle, compact=True),
+        "response_format": {"type": "json_schema", "json_schema": {"name": "verdict", "schema": verdict_json_schema()}},
+        "reasoning_effort": "low",
+        "temperature": 0.2,
+        "max_tokens": 3000,  # covers reasoning plus the verdict
+    }
+    raw, usage, latency = _chat(FIREWORKS_URL, {"Authorization": f"Bearer {key}"}, payload, timeout)
+    verdict, errors = _parse(raw)
+    if verdict:
+        errors += citation_errors(verdict, bundle)
+    details = usage.get("prompt_tokens_details") or {}
+    return ModelResult(
+        backend="glimmer-fireworks",
+        model=model,
+        verdict=verdict,
+        raw=raw,
+        errors=errors,
+        latency_s=latency,
+        input_tokens=int(usage.get("prompt_tokens", 0)),
+        cached_tokens=int(details.get("cached_tokens", 0) or 0),
         output_tokens=int(usage.get("completion_tokens", 0)),
     )

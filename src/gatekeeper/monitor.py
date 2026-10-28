@@ -93,13 +93,14 @@ def process_version(
     rec.content_score = content.score
     rec.rules = sorted(content.rules)
     rec.priority = meta.score + content.score
+    rules_flag = content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD
     fast_flag = False
     if fast is not None:
         # scored on the bundle without metadata notes, the format the classifier was trained on
         plain = build_bundle(info.name, info.version, pkg, content).render()
         rec.fast_risk, fast_flag = fast(info.name, info.version, plain, rec.rules)
-        rec.priority += round(10 * rec.fast_risk)
-    if content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD or fast_flag:
+        rec.priority += round(10 * rec.fast_risk)  # ordering only; the flag decision is made above
+    if rules_flag or fast_flag:
         bundle = build_bundle(info.name, info.version, pkg, content, meta_reasons=meta.reasons)
         text = bundle.render()
         rec.flagged = True
