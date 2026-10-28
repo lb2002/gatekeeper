@@ -244,23 +244,23 @@ SPARK_DAILY_CAP_USD = 10.0
 SPARK_TOTAL_CAP_USD = 130.0
 SPARK_PER_RUN = 20
 SPARK_SECRET = modal.Secret.from_name("meta-api", required_keys=["MODEL_API_KEY"])
-# Muse Glimmer on Fireworks serverless: judges every flag; ~$0.0015 per package
+# Muse Spark Open on Fireworks serverless (paid from Fireworks credits): judges every flag, ~$0.007 per package
 FIREWORKS_DAILY_CAP_USD = 5.0
 FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine-tuning tests
 FIREWORKS_PER_RUN = 60
 FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
-GLIMMER_BACKENDS = ("glimmer-local", "glimmer-fireworks")
+FIRST_OPINION_BACKENDS = ("glimmer-local", "spark-open-fireworks")
 
 
 def _spark_candidates(items: dict, now: datetime) -> list[str]:
-    """Second opinions on Glimmer malicious/suspicious verdicts first, then high-priority items no
-    model has judged for 30 minutes."""
+    """Second opinions on first-opinion malicious/suspicious verdicts first, then high-priority
+    items no model has judged for 30 minutes."""
     first, second = [], []
     for key, it in items.items():
         verdicts = it.get("verdicts", {})
         if "spark" in verdicts:
             continue
-        if any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in GLIMMER_BACKENDS):
+        if any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in FIRST_OPINION_BACKENDS):
             first.append((it["priority"], key))
         elif not verdicts and datetime.fromisoformat(it["seen_at"]) < now - timedelta(minutes=30):
             second.append((it["priority"], key))
@@ -268,17 +268,17 @@ def _spark_candidates(items: dict, now: datetime) -> list[str]:
 
 
 def _fireworks_candidates(items: dict) -> list[str]:
-    """Every queued item without a cloud Glimmer verdict, newest first."""
-    todo = [(it["seen_at"], key) for key, it in items.items() if "glimmer-fireworks" not in it.get("verdicts", {})]
+    """Every queued item without a Spark Open verdict, newest first."""
+    todo = [(it["seen_at"], key) for key, it in items.items() if "spark-open-fireworks" not in it.get("verdicts", {})]
     return [k for _, k in sorted(todo, reverse=True)]
 
 
 def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -> dict:
     """Classify one queued item with a cloud model, book the cost and store the verdict. Raises on API errors."""
     from gatekeeper.evidence.bundle import RenderedBundle
-    from gatekeeper.models.backends import classify_glimmer_fireworks, classify_spark
+    from gatekeeper.models.backends import classify_spark, classify_spark_open_fireworks
 
-    classify = {"spark": classify_spark, "glimmer-fireworks": classify_glimmer_fireworks}[backend]
+    classify = {"spark": classify_spark, "spark-open-fireworks": classify_spark_open_fireworks}[backend]
     day = f"{now:%Y-%m-%d}"
     result = classify(RenderedBundle.from_record(item))
     spend["total"] += result.cost_usd
@@ -338,13 +338,13 @@ def spark() -> dict:
 
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET], schedule=modal.Period(minutes=3), timeout=170, cpu=0.25, memory=512)
-def glimmer_cloud() -> dict:
-    """Muse Glimmer on Fireworks judges every flag under hard spending caps.
+def spark_open() -> dict:
+    """Muse Spark Open on Fireworks judges every flag under hard spending caps.
     Disabled until state['fireworks_enabled'] is True."""
     if not state.get("fireworks_enabled", False):
         return {"enabled": False}
     keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]
-    return _run_cloud("glimmer-fireworks", keys, "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD)
+    return _run_cloud("spark-open-fireworks", keys, "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD)
 
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, FIREWORKS_SECRET], timeout=180, cpu=0.25, memory=512)
@@ -358,7 +358,7 @@ def cloud_probe(backend: str = "spark", key: str = "") -> dict:
     item = queue.get(key, None) if key else None
     if item is None:
         return {"error": f"no queued item {key!r}"}
-    spend_key = {"spark": "spark_spend", "glimmer-fireworks": "fireworks_spend"}[backend]
+    spend_key = {"spark": "spark_spend", "spark-open-fireworks": "fireworks_spend"}[backend]
     spend = state.get(spend_key, {"total": 0.0, "days": {}})
     try:
         row = _cloud_one(backend, key, item, spend, now)

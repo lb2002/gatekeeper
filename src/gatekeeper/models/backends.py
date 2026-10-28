@@ -23,13 +23,13 @@ META_API_URL = "https://api.meta.ai/v1"
 SPARK_MODEL = "muse-spark-1.3"  # Standard mode; never the "-contributor" variants
 LOCAL_URL = os.environ.get("GK_LOCAL_URL", "http://127.0.0.1:8080/v1")
 FIREWORKS_URL = "https://api.fireworks.ai/inference/v1"
-GLIMMER_FIREWORKS_MODEL = "accounts/fireworks/models/muse-glimmer-30b"
+SPARK_OPEN_FIREWORKS_MODEL = "accounts/fireworks/models/muse-spark-open"  # Glimmer is no longer serverless there
 
 # USD per 1M tokens (dev.meta.ai/docs/pricing-rate-limits, Oct 2026)
 SPARK_PRICE = {"input": 1.25, "cached_input": 0.15, "output": 4.25}
-# USD per 1M tokens, Fireworks serverless (fireworks.ai/models/fireworks/muse-glimmer-30b, Oct 2026)
-GLIMMER_FIREWORKS_PRICE = {"input": 0.35, "cached_input": 0.04, "output": 1.50}
-PRICES = {"spark": SPARK_PRICE, "glimmer-fireworks": GLIMMER_FIREWORKS_PRICE}
+# USD per 1M tokens, Fireworks serverless (fireworks.ai/models/fireworks/muse-spark-open, Oct 2026)
+SPARK_OPEN_FIREWORKS_PRICE = {"input": 1.25, "cached_input": 0.15, "output": 4.25}
+PRICES = {"spark": SPARK_PRICE, "spark-open-fireworks": SPARK_OPEN_FIREWORKS_PRICE}
 
 
 @dataclass
@@ -147,18 +147,17 @@ def classify_local(
     )
 
 
-def classify_glimmer_fireworks(
-    bundle: Bundle, api_key: str | None = None, timeout: float = 120, model: str = GLIMMER_FIREWORKS_MODEL
+def classify_spark_open_fireworks(
+    bundle: Bundle, api_key: str | None = None, timeout: float = 120, model: str = SPARK_OPEN_FIREWORKS_MODEL
 ) -> ModelResult:
-    """Muse Glimmer (open weights, same model as the local guard) on Fireworks serverless."""
+    """Muse Spark Open (Meta open weights) on Fireworks serverless."""
     key = api_key or os.environ["FIREWORKS_API_KEY"]
     payload = {
         "model": model,
-        "messages": messages(bundle, compact=True),
+        "messages": messages(bundle),
         "response_format": {"type": "json_schema", "json_schema": {"name": "verdict", "schema": verdict_json_schema()}},
         "reasoning_effort": "low",
-        "temperature": 0.2,
-        "max_tokens": 3000,  # covers reasoning plus the verdict
+        "max_tokens": 4000,  # covers reasoning plus the verdict
     }
     raw, usage, latency = _chat(FIREWORKS_URL, {"Authorization": f"Bearer {key}"}, payload, timeout)
     verdict, errors = _parse(raw)
@@ -166,7 +165,7 @@ def classify_glimmer_fireworks(
         errors += citation_errors(verdict, bundle)
     details = usage.get("prompt_tokens_details") or {}
     return ModelResult(
-        backend="glimmer-fireworks",
+        backend="spark-open-fireworks",
         model=model,
         verdict=verdict,
         raw=raw,
