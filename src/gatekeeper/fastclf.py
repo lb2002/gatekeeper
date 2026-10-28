@@ -19,7 +19,9 @@ def clean_text(bundle_text: str, name: str, version: str, rules: list[str]) -> s
     Name and version are attacker-chosen, so they are masked only in identity contexts (the
     manifest's name/version fields and `name@version`), never inside code: a package named
     "curl" must not be able to erase `curl` from its own install script."""
-    text = _LINE_NO.sub("", bundle_text)
+    # the registry-signal header is not part of every training source, so it must not become a feature
+    text = "\n".join(line for line in bundle_text.splitlines() if not line.startswith("registry signals:"))
+    text = _LINE_NO.sub("", text)
     n, v = re.escape(name), re.escape(version)
     text = re.sub(rf'("name"\s*:\s*"){n}"', r'\1PKGNAME"', text)
     text = re.sub(rf'("version"\s*:\s*"){v}"', r'\1PKGVERSION"', text)

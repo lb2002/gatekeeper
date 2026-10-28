@@ -35,7 +35,10 @@ def train() -> dict:
     data_volume.reload()
     from sklearn.model_selection import cross_val_predict
 
-    tr, te = _rows("train"), _rows("test")
+    from gatekeeper.eval.splits import load_splits, rates
+
+    splits = load_splits(DATA)
+    tr, te, live = splits["train"], splits["test"], splits["live_test"]
     x = [clean_text(r["bundle"], r["name"], r["version"], r.get("rules", [])) for r in tr]
     y = [1 if r["label"] == "malicious" else 0 for r in tr]
     # threshold at 1% false positives on out-of-fold training predictions (the test set stays untouched)
@@ -67,7 +70,12 @@ def train() -> dict:
     vec, lr = model.steps[0][1], model.steps[1][1]
     names = vec.get_feature_names_out()
     order = lr.coef_[0].argsort()
+    live_scores = risk(model, live)
+    with (DATA / "eval" / "fastclf-live.jsonl").open("w", encoding="utf-8") as fh:
+        for r, sc in zip(live, live_scores):
+            fh.write(json.dumps({"name": r["name"], "version": r["version"], "label": r["label"], "kind": r.get("kind"), "risk": sc}) + "\n")
     stats = {
+        "live_test": rates(live_scores, live, threshold),
         "n_train": len(tr), "n_test": len(te), "fit_s": round(fit_s), "ms_per_item": round(per_item_ms, 2),
         "threshold": round(threshold, 4), "test_recall_at_threshold": round(tp / max(sum(labels), 1), 3),
         "test_fpr_at_threshold": round(fp / max(len(labels) - sum(labels), 1), 3),

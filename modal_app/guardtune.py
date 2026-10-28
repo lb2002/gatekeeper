@@ -34,19 +34,21 @@ def _rows(split: str) -> list[dict]:
     return [r for r in rows if r["split"] == split]
 
 
-@app.function(image=image, gpu="A10G", volumes={str(DATA): data_volume},
+@app.function(image=image, gpu="A100", volumes={str(DATA): data_volume},
               secrets=[modal.Secret.from_name("huggingface")], timeout=3 * 3600, cpu=4.0, memory=32768)
-def train(epochs: int = 2, lr: float = 2e-4, batch: int = 4, accum: int = 4) -> dict:
+def train(epochs: int = 2, lr: float = 2e-4, batch: int = 4, accum: int = 4, tag: str = "-v2") -> dict:
     import random
 
     import torch
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+    from gatekeeper.eval.splits import load_splits, rates
     from gatekeeper.fastclf import clean_text
 
     data_volume.reload()
-    train_rows, test_rows = _rows("train"), _rows("test")
+    splits = load_splits(DATA)
+    train_rows, test_rows, live_rows = splits["train"], splits["test"], splits["live_test"]
     # validation split by cluster/name so near-duplicates do not leak into the threshold choice
     rng = random.Random(7)
     groups = sorted({r.get("cluster") or r["name"] for r in train_rows})
@@ -116,11 +118,15 @@ def train(epochs: int = 2, lr: float = 2e-4, batch: int = 4, accum: int = 4) -> 
     test_scores = score(test_rows)
     ms_per_item = (time.time() - t) / max(len(test_rows), 1) * 1000
 
-    out_path = DATA / "eval" / "llamaguard1b-test.jsonl"
+    live_scores = score(live_rows)
+    out_path = DATA / "eval" / f"llamaguard1b{tag}-test.jsonl"
     with out_path.open("w", encoding="utf-8") as fh:
         for r, s in zip(test_rows, test_scores):
             fh.write(json.dumps({"name": r["name"], "version": r["version"], "label": r["label"], "kind": r["kind"], "risk": s}) + "\n")
-    adapter_dir = DATA / "models" / "llamaguard1b-gatekeeper"
+    with (DATA / "eval" / f"llamaguard1b{tag}-live.jsonl").open("w", encoding="utf-8") as fh:
+        for r, sc in zip(live_rows, live_scores):
+            fh.write(json.dumps({"name": r["name"], "version": r["version"], "label": r["label"], "kind": r.get("kind"), "risk": sc}) + "\n")
+    adapter_dir = DATA / "models" / f"llamaguard1b-gatekeeper{tag}"
     model.save_pretrained(str(adapter_dir))
     tok.save_pretrained(str(adapter_dir))
     (adapter_dir / "threshold.json").write_text(json.dumps({"threshold": threshold, "max_tokens": MAX_TOKENS}))
@@ -132,6 +138,7 @@ def train(epochs: int = 2, lr: float = 2e-4, batch: int = 4, accum: int = 4) -> 
         "n_fit": len(fit_rows), "n_val": len(val_rows), "n_test": len(test_rows), "train_s": round(time.time() - started),
         "threshold": round(threshold, 4), "test_recall_at_threshold": round(tp / max(sum(labels), 1), 3),
         "test_fpr_at_threshold": round(fp / max(len(labels) - sum(labels), 1), 3), "gpu_ms_per_item": round(ms_per_item, 1),
+        "live_test": rates(live_scores, live_rows, threshold),
     }
     data_volume.commit()
     print(json.dumps(stats, indent=1))
