@@ -532,7 +532,8 @@ LG_MAX_PER_RUN = 3000
 # 0.10; 0.30 keeps live false positives at ~1.2% on held-out later days (55% time-split recall).
 LG_ADAPTER = "llamaguard1b-gatekeeper-v2"
 LG_MIN_THRESHOLD = 0.3
-LG_KILL_RATE = 0.04  # switch off automatically if a run flags more than 4% of what it scores
+LG_KILL_RATE = 0.04  # a run is "hot" if it flags more than 4% of the distinct packages it scores
+LG_STRONG = 0.9  # hits this strong are queued even in a hot run
 
 
 @app.function(image=lg_image, gpu="L4", volumes={str(DATA): volume, "/models": model_volume},
@@ -571,10 +572,24 @@ def llamaguard() -> dict:
         if risk >= scorer.threshold:
             r["flagged"], r["lg_risk"] = True, round(risk, 4)
             new_flags.append(r)
-    if len(candidates) >= 50 and len(new_flags) > LG_KILL_RATE * len(candidates):
-        state["lg_enabled"] = False  # kill switch: this is far above the measured live rate
-        _notify("Gatekeeper: Llama Guard switched off", f"It flagged {len(new_flags)} of {len(candidates)} scanned versions.", tags="no_entry")
-        new_flags = []
+    # Kill switch against a broken model, robust against an attacker who floods the registry to trip it:
+    # the rate counts distinct package names, only 3 hot runs in a row switch the model off, and in a hot
+    # run strong hits are still queued while the rest is kept for re-scoring instead of being dropped.
+    names_scored = {r["name"] for r in candidates}
+    names_flagged = {r["name"] for r in new_flags}
+    hot = len(names_scored) >= 50 and len(names_flagged) > LG_KILL_RATE * len(names_scored)
+    hot_runs = state.get("lg_hot_runs", 0) + 1 if hot else 0
+    state["lg_hot_runs"] = hot_runs
+    held: list[dict] = []
+    if hot:
+        held = [r for r in new_flags if r["lg_risk"] < LG_STRONG]
+        new_flags = [r for r in new_flags if r["lg_risk"] >= LG_STRONG]
+        _append_jsonl(DATA / "lg_held" / f"{now:%Y-%m-%d-%H%M%S}.jsonl", held)
+    if hot_runs >= 3:
+        state["lg_enabled"] = False
+        _notify("Gatekeeper: Llama Guard switched off",
+                f"3 runs in a row flagged more than {LG_KILL_RATE:.0%} of scanned packages "
+                f"(last: {len(names_flagged)} of {len(names_scored)}). Held flags: data/lg_held/.", tags="no_entry")
     added = _enqueue(new_flags) if new_flags else 0
     for r in new_flags:  # record the score as a verdict on the new queue items
         key = f"{r['name']}@{r['version']}"
@@ -603,7 +618,8 @@ def llamaguard() -> dict:
     d["flagged"] += added
     state["daily"] = daily
     volume.commit()
-    stats = {"scored": len(candidates), "flagged": len(new_flags), "queued": added, "queue_scored": len(queued),
+    stats = {"scored": len(candidates), "flagged": len(new_flags), "held": len(held), "hot_runs": hot_runs,
+             "queued": added, "queue_scored": len(queued),
              "threshold": round(scorer.threshold, 4)}
     print(json.dumps(stats))
     return stats
