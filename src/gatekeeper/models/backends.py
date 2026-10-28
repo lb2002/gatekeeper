@@ -155,7 +155,7 @@ def classify_spark_open_fireworks(
     payload = {
         "model": model,
         "messages": messages(bundle),
-        "response_format": {"type": "json_schema", "json_schema": {"name": "verdict", "schema": verdict_json_schema()}},
+        "response_format": {"type": "json_schema", "json_schema": {"name": "verdict", "schema": verdict_json_schema(), "strict": True}},
         "reasoning_effort": "low",
         "max_tokens": 4000,  # covers reasoning plus the verdict
     }
