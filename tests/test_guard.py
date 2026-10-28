@@ -61,3 +61,14 @@ def test_rules_clean_but_classifier_suspicious_goes_to_the_model(monkeypatch):
     except RuntimeError:
         pass
     assert asked, "a package the classifier flags must not take the rules-only fast path"
+
+
+def test_model_decisions_are_cached_by_integrity(tmp_path, monkeypatch):
+    import gatekeeper.guard.core as core
+
+    monkeypatch.setattr(core, "CACHE_FILE", tmp_path / "verdicts.json")
+    meta = {"name": "x", "version": "1.0.0", "integrity": "sha512-abc"}
+    core._cache_put(meta, core.Decision("x", False, "Muse Glimmer: malicious", "x", "1.0.0"))
+    assert core._cache_get(meta)["allowed"] is False
+    assert core._cache_get({**meta, "integrity": "sha512-other"}) is None  # different bytes, no reuse
+    assert core._cache_get({**meta, "integrity": None}) is None

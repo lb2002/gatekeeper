@@ -32,6 +32,37 @@ ALLOW_FLAG = "--gk-allow"
 # the local model next instead of waiting behind the monitor queue.
 BUSY_FILE = Path(os.environ.get("USERPROFILE") or Path.home()) / ".gatekeeper" / "guard.busy"
 FAST_MODEL_FILE = BUSY_FILE.parent / "fastclf.json"  # exported by modal_app/fastclf.py::export
+CACHE_FILE = BUSY_FILE.parent / "verdicts.json"
+
+
+def _cache_key(meta: dict) -> str | None:
+    # Only versions with a sha512 integrity are cached: npm verifies the tarball it installs against
+    # that same value, so a cached decision always refers to exactly the bytes being installed.
+    integrity = meta.get("integrity") or ""
+    return f"{meta['name']}@{meta['version']} {integrity}" if integrity.startswith("sha512-") else None
+
+
+def _cache_get(meta: dict) -> dict | None:
+    key = _cache_key(meta)
+    if key is None or not CACHE_FILE.exists():
+        return None
+    try:
+        return json.loads(CACHE_FILE.read_text(encoding="utf-8")).get(key)
+    except ValueError:
+        return None
+
+
+def _cache_put(meta: dict, decision: "Decision") -> None:
+    key = _cache_key(meta)
+    if key is None:
+        return
+    try:
+        cache = json.loads(CACHE_FILE.read_text(encoding="utf-8")) if CACHE_FILE.exists() else {}
+    except ValueError:
+        cache = {}
+    cache[key] = {"allowed": decision.allowed, "reason": decision.reason, "verdict": decision.verdict, "rules": decision.rules}
+    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_FILE.write_text(json.dumps(cache), encoding="utf-8")
 
 
 def load_fast_model():
@@ -138,9 +169,13 @@ def verify_integrity(data: bytes, integrity: str | None) -> bool:
     return digest == integrity.split("-", 1)[1]
 
 
-def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None) -> Decision:
+def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, use_cache: bool = True) -> Decision:
     started = time.monotonic()
     meta = resolve(npm_cmd, spec)
+    cached = _cache_get(meta) if use_cache else None
+    if cached:
+        return Decision(spec, cached["allowed"], "cached: " + cached["reason"], meta["name"], meta["version"],
+                        cached.get("verdict"), cached.get("rules") or [], time.monotonic() - started)
     data = httpx.get(meta["tarball"], timeout=60, follow_redirects=True).content
     if not verify_integrity(data, meta["integrity"]):
         return Decision(spec, False, "tarball integrity mismatch", meta["name"], meta["version"])
@@ -168,4 +203,6 @@ def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None) ->
     verdict = v.model_dump(mode="json")
     risky = v.verdict.value == "malicious" or (v.verdict.value == "suspicious" and v.confidence >= BLOCK_CONFIDENCE)
     reason = f"Muse Glimmer: {v.verdict.value} ({v.confidence:.2f}) - {v.summary}"
-    return Decision(spec, not risky, reason, meta["name"], meta["version"], verdict, rules, secs)
+    decision = Decision(spec, not risky, reason, meta["name"], meta["version"], verdict, rules, secs)
+    _cache_put(meta, decision)  # model verdicts are the slow part; never cached: errors, missing verdicts
+    return decision
