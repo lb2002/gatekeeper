@@ -303,26 +303,50 @@ def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -
     return row
 
 
-def _run_cloud(backend: str, keys: list[str], spend_key: str, daily_cap: float, total_cap: float) -> dict:
+def _run_cloud(
+    backend: str, keys: list[str], spend_key: str, daily_cap: float, total_cap: float,
+    workers: int = 1, budget_s: float = 240,
+) -> dict:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    started = time.monotonic()
     now = datetime.now(timezone.utc)
     day = f"{now:%Y-%m-%d}"
     spend = state.get(spend_key, {"total": 0.0, "days": {}})
-    done = 0
-    for key in keys:
-        if spend["total"] >= total_cap or spend["days"].get(day, 0.0) >= daily_cap:
-            break
-        item = queue.get(key, None)
+    lock = threading.Lock()
+    counts = {"done": 0, "errors": 0, "consecutive_errors": 0}
+
+    def one(key: str) -> None:
+        with lock:
+            stop = (
+                spend["total"] >= total_cap or spend["days"].get(day, 0.0) >= daily_cap
+                or counts["consecutive_errors"] >= 3 or time.monotonic() - started > budget_s
+            )
+        item = None if stop else queue.get(key, None)
         if item is None:
-            continue
+            return
         try:
-            _cloud_one(backend, key, item, spend, now)
-        except Exception as exc:  # API errors (restriction, rate limit) must not crash the cron
+            row = _cloud_one(backend, key, item, {"total": 0.0, "days": {}}, now)
+        except Exception as exc:  # API errors (timeouts, rate limits) skip the item; 3 in a row stop the run
             print(f"{backend} error on {key}: {type(exc).__name__}: {exc}"[:300])
-            break
-        done += 1
-        state[spend_key] = spend  # save as we go, so a timeout cannot lose booked spend
+            with lock:
+                counts["errors"] += 1
+                counts["consecutive_errors"] += 1
+            return
+        with lock:
+            spend["total"] += row["cost_usd"]
+            spend["days"][day] = spend["days"].get(day, 0.0) + row["cost_usd"]
+            counts["done"] += 1
+            counts["consecutive_errors"] = 0
+            state[spend_key] = spend  # save as we go, so a timeout cannot lose booked spend
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(one, keys))
+    state[spend_key] = spend
     volume.commit()
-    stats = {"backend": backend, "classified": done, "spend_today": round(spend["days"].get(day, 0.0), 4), "spend_total": round(spend["total"], 4)}
+    stats = {"backend": backend, "classified": counts["done"], "errors": counts["errors"],
+             "spend_today": round(spend["days"].get(day, 0.0), 4), "spend_total": round(spend["total"], 4)}
     print(json.dumps(stats))
     return stats
 
@@ -334,17 +358,17 @@ def spark() -> dict:
     if not state.get("spark_enabled", False):
         return {"enabled": False}
     keys = _spark_candidates(dict(queue.items()), datetime.now(timezone.utc))[:SPARK_PER_RUN]
-    return _run_cloud("spark", keys, "spark_spend", SPARK_DAILY_CAP_USD, SPARK_TOTAL_CAP_USD)
+    return _run_cloud("spark", keys, "spark_spend", SPARK_DAILY_CAP_USD, SPARK_TOTAL_CAP_USD, workers=4, budget_s=140)
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET], schedule=modal.Period(minutes=3), timeout=170, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark_open() -> dict:
     """Muse Spark Open on Fireworks judges every flag under hard spending caps.
     Disabled until state['fireworks_enabled'] is True."""
     if not state.get("fireworks_enabled", False):
         return {"enabled": False}
     keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]
-    return _run_cloud("spark-open-fireworks", keys, "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD)
+    return _run_cloud("spark-open-fireworks", keys, "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD, workers=8, budget_s=140)
 
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, FIREWORKS_SECRET], timeout=180, cpu=0.25, memory=512)
