@@ -15,7 +15,7 @@ Work in progress for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 202
 npm replication feed (every 2 min, on Modal)
   -> metadata triage (install hooks, typosquats, maintainer changes, new packages)
   -> in-memory tarball scan: static rules + a fast first-stage classifier
-  -> (being retrained) fine-tuned Llama Guard 3 1B over everything the cheap stages let through
+  -> every 15 min: fine-tuned Llama Guard 3 1B (v2) over everything the cheap stages let through
   -> evidence bundle: numbered excerpts of the code that matters (max 8000 chars)
   -> Muse Spark Open (Fireworks) judges every flag; Muse Spark (Meta API) gives second opinions;
      Muse Glimmer 30B runs locally (laptop worker, install guard)
@@ -47,16 +47,17 @@ A flag is never named before it is confirmed. Instead, within two minutes, the m
 
 Time-split evaluation: train on samples discovered up to May 2026, test on samples discovered from July 2026 (June left out as a gap; campaign clusters deduplicated, no test cluster in training). Test set: 212 malicious, 590 benign packages including 71 hard negatives with install scripts. Thresholds are fixed on training data before the test set is scored once.
 
-| System | PR-AUC (95% CI) | Recall at 1% false positives | Notes |
+| System | PR-AUC (95% CI) | Recall at 1% FP (test) | False positives on live npm (later days) |
 |---|---|---|---|
-| Static rules | 0.48 (0.42-0.54) | 18% | miss 125 of 212 malware samples entirely |
-| Muse Glimmer 30B, zero-shot | 0.88 (0.84-0.91) | 66% | as a blocker: 57% recall, 0 of 590 false blocks; explains with cited lines |
-| TF-IDF + logistic regression | 0.93 (0.90-0.95) | 75% | 1 ms on a laptop CPU, ships as plain JSON |
-| **Llama Guard 3 1B, fine-tuned** (LoRA + classification head) | **0.97 (0.95-0.98)** | **87%** | 89% recall at 1.4% false positives at its fixed threshold; 101 of the 125 samples the rules miss |
+| Static rules | 0.48 (0.42-0.54) | 18% | - |
+| **Muse Glimmer 30B, zero-shot** | **0.88 (0.84-0.91)** | **66%** | as a blocker: 0 of 590 false blocks; explains with cited lines |
+| TF-IDF + logistic regression (real npm negatives) | 0.87 (0.83-0.90) | 62% | 2.0% |
+| Llama Guard 3 1B fine-tuned, v1 (popular packages as negatives) | 0.97 (0.95-0.98) | 87% | **37%**: unusable |
+| Llama Guard 3 1B fine-tuned, v2 (real npm negatives) | 0.86 (0.82-0.89) | 61% | 1.2% at threshold 0.3 (0.2% on the monitor's own stream) |
 
-The fine-tuned Llama Guard was trained only on dataset ground truth (never on Muse Spark outputs).
+Live false positives are measured on 1,459 npm releases from days the models never saw (published 2026-10-22, labelled with a week of OSV hindsight, plus the monitor's own sample from 2026-10-28). Most remaining false positives there are SEO spam packages (`0.0.0-stage`).
 
-**Lesson from going live (2026-10-28):** on real new npm releases the same Llama Guard flagged 29 of 79 scanned packages (37%), mostly small new CLIs and MCP tools that Muse Spark and Muse Spark Open judged benign. The benign training data came from popular, well-maintained packages, so the model partly learned "unpolished = malicious". The test set shares that bias, which is why it looked excellent offline. It is switched off in the monitor; the monitor now collects a capped sample of everyday npm releases to retrain it with realistic negatives and to measure false positives on live data from later days.
+**Lesson:** v1 looked excellent offline but flagged 37% of live npm releases. Its benign training data were popular, well-maintained packages, so it learned "unpolished = malicious", and the offline test shared that bias. Retrained with real npm releases as negatives (v2), it is usable as a safety net, and the honest ranking changes: zero-shot Muse Glimmer is the strongest detector, and the small models serve as fast pre-filters in front of it. The thresholds of the small models are fixed on training data; the monitor's Llama Guard threshold (0.3, stricter than validation) was chosen after looking at the 2026-10-22 slice, so the monitor's own stream is the cleaner check. Fine-tuned models were trained only on ground truth (never on Muse Spark outputs).
 
 ## Safety
 

@@ -528,10 +528,15 @@ def spark_open() -> dict:
 
 
 LG_MAX_PER_RUN = 3000
+# v2: trained with real npm releases as negatives (v1 flagged 37% of live npm). Validation threshold
+# 0.10; 0.30 keeps live false positives at ~1.2% on held-out later days (55% time-split recall).
+LG_ADAPTER = "llamaguard1b-gatekeeper-v2"
+LG_MIN_THRESHOLD = 0.3
+LG_KILL_RATE = 0.04  # switch off automatically if a run flags more than 4% of what it scores
 
 
 @app.function(image=lg_image, gpu="L4", volumes={str(DATA): volume, "/models": model_volume},
-              secrets=[modal.Secret.from_name("huggingface")], schedule=modal.Period(minutes=15), timeout=900,
+              secrets=[modal.Secret.from_name("huggingface"), NTFY_SECRET], schedule=modal.Period(minutes=15), timeout=900,
               cpu=2.0, memory=16384)
 def llamaguard() -> dict:
     """Batched pass of the fine-tuned Llama Guard 3 1B over every scanned version the rules and the
@@ -540,7 +545,7 @@ def llamaguard() -> dict:
     from gatekeeper.models.llamaguard import BACKEND, LlamaGuardScorer, prepare
 
     if not state.get("lg_enabled", False):
-        return {"enabled": False}  # off until it is retrained on live npm negatives (37% live false positives)
+        return {"enabled": False}
     volume.reload()
     now = datetime.now(timezone.utc)
     files = sorted((DATA / "lg_pending").glob("*.jsonl")) if (DATA / "lg_pending").exists() else []
@@ -554,7 +559,8 @@ def llamaguard() -> dict:
     queued = [(k, it) for k, it in queue.items() if it.get("lg_risk") is None and it.get("bundle")]
     if not candidates and not queued:
         return {"scored": 0}
-    scorer = LlamaGuardScorer(DATA / "models" / "llamaguard1b-gatekeeper")
+    scorer = LlamaGuardScorer(DATA / "models" / LG_ADAPTER)
+    scorer.threshold = max(scorer.threshold, LG_MIN_THRESHOLD)
     texts = [prepare(r["bundle"], r["name"], r["version"], r.get("rules") or []) for r in candidates]
     texts += [prepare(it["bundle"], it["name"], it["version"], it.get("rules") or []) for _, it in queued]
     risks = scorer.risk(texts)
@@ -565,6 +571,10 @@ def llamaguard() -> dict:
         if risk >= scorer.threshold:
             r["flagged"], r["lg_risk"] = True, round(risk, 4)
             new_flags.append(r)
+    if len(candidates) >= 50 and len(new_flags) > LG_KILL_RATE * len(candidates):
+        state["lg_enabled"] = False  # kill switch: this is far above the measured live rate
+        _notify("Gatekeeper: Llama Guard switched off", f"It flagged {len(new_flags)} of {len(candidates)} scanned versions.", tags="no_entry")
+        new_flags = []
     added = _enqueue(new_flags) if new_flags else 0
     for r in new_flags:  # record the score as a verdict on the new queue items
         key = f"{r['name']}@{r['version']}"
