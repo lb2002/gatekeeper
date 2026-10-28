@@ -54,3 +54,26 @@ def append_file(token: str, path: str, text: str, message: str, repo: str = LEDG
         put = client.put(url, json=payload)
         put.raise_for_status()
         return put.json()["commit"]["sha"]
+
+
+def first_commit_with(digest: str, day: str, repo: str = LEDGER_REPO, token: str | None = None) -> str | None:
+    """Commit time of the earliest ledger commit whose commitments/<day>.txt contains `digest`."""
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    path = f"commitments/{day}.txt"
+    with httpx.Client(timeout=30, headers=headers) as client:
+        commits: list[dict] = []
+        for page in range(1, 31):  # a busy day has hundreds of ledger commits
+            resp = client.get(f"https://api.github.com/repos/{repo}/commits", params={"path": path, "per_page": 100, "page": page})
+            resp.raise_for_status()
+            batch = resp.json()
+            commits += batch
+            if len(batch) < 100:
+                break
+        commits.sort(key=lambda c: c["commit"]["committer"]["date"])
+        for c in commits:
+            raw = client.get(f"https://raw.githubusercontent.com/{repo}/{c['sha']}/{path}")
+            if raw.status_code == 200 and digest in raw.text:
+                return c["commit"]["committer"]["date"]
+    return None

@@ -344,5 +344,23 @@ def packet(
     console.print(f"review packet: {folder / 'PACKET.md'}", markup=False)
 
 
+@app.command("verify-flag")
+def verify_flag(
+    salt: str = typer.Argument(..., help="hex salt from revealed/<month>.jsonl"),
+    line: str = typer.Argument(..., help="the canonical JSON line from revealed/<month>.jsonl"),
+) -> None:
+    """Check a revealed detection against the public ledger: hash it, find the commitment, print when it was committed."""
+    import json
+
+    from gatekeeper.ledger import commitment, first_commit_with
+
+    digest = commitment(salt, line)
+    flagged_at = json.loads(line)["flagged_at"]
+    committed = first_commit_with(digest, flagged_at[:10])
+    console.print(f"digest {digest}", markup=False)
+    console.print(f"flag time claimed: {flagged_at}", markup=False)
+    console.print(f"first public commit containing it: {committed or 'NOT FOUND'}", markup=False)
+
+
 if __name__ == "__main__":
     app()
