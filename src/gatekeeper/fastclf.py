@@ -14,11 +14,16 @@ TOKEN_PATTERN = r"[A-Za-z_$][A-Za-z0-9_$]{1,40}|[0-9]{1,6}|[^\sA-Za-z0-9]{1,3}"
 
 
 def clean_text(bundle_text: str, name: str, version: str, rules: list[str]) -> str:
-    """Bundle text with the package identity masked, so the model learns code, not names."""
+    """Bundle text with the package identity masked, so the model learns code, not names.
+
+    Name and version are attacker-chosen, so they are masked only in identity contexts (the
+    manifest's name/version fields and `name@version`), never inside code: a package named
+    "curl" must not be able to erase `curl` from its own install script."""
     text = _LINE_NO.sub("", bundle_text)
-    for value, mask in ((name, " PKGNAME "), (name.split("/")[-1], " PKGNAME "), (version, " PKGVERSION ")):
-        if value:
-            text = text.replace(value, mask)
+    n, v = re.escape(name), re.escape(version)
+    text = re.sub(rf'("name"\s*:\s*"){n}"', r'\1PKGNAME"', text)
+    text = re.sub(rf'("version"\s*:\s*"){v}"', r'\1PKGVERSION"', text)
+    text = re.sub(rf"(?<![\w@/.-]){n}@{v}(?![\w.-])", "PKGNAME@PKGVERSION", text)
     return text + "\n" + " ".join(f"RULE_{r}" for r in rules)
 
 
