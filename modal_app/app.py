@@ -249,17 +249,23 @@ def _reveal_confirmed() -> int:
 
 
 def _flush_ledger() -> int:
-    """Commit pending commitments to the public ledger repo; on failure they wait for the next run."""
-    from gatekeeper.ledger import append_file
+    """Publish pending commitments as one new batch file plus its OpenTimestamps proof.
+
+    Each batch is a new file that is never rewritten; the .ots proof (Bitcoin-anchored by public
+    calendars) dates it independently of git. On failure the batch waits for the next run."""
+    from gatekeeper.ledger import ots_stamp, put_new_file
 
     pending = state.get("ledger_pending", [])
     token = os.environ.get("GITHUB_TOKEN")
     if not pending or not token:
         return 0
-    day = pending[0][:10]
+    now = datetime.now(timezone.utc)
+    path = f"commitments/{now:%Y-%m-%d}/{now:%H%M%S}-{uuid.uuid4().hex[:6]}.txt"
+    data = "".join(line + "\n" for line in pending).encode()
     try:
-        append_file(token, f"commitments/{day}.txt", "".join(line + "\n" for line in pending),
-                    f"{len(pending)} commitment(s)")
+        proof = ots_stamp(data)
+        put_new_file(token, path, data, f"{len(pending)} commitment(s)")
+        put_new_file(token, path + ".ots", proof, "OpenTimestamps proof")
     except Exception as exc:  # the ledger must never stop the monitor
         print(f"ledger error: {type(exc).__name__}: {exc}"[:300])
         return 0

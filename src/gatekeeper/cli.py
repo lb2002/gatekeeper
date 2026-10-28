@@ -349,17 +349,26 @@ def verify_flag(
     salt: str = typer.Argument(..., help="hex salt from revealed/<month>.jsonl"),
     line: str = typer.Argument(..., help="the canonical JSON line from revealed/<month>.jsonl"),
 ) -> None:
-    """Check a revealed detection against the public ledger: hash it, find the commitment, print when it was committed."""
+    """Check a revealed detection against the public ledger: hash it and find the batch that holds it."""
     import json
 
-    from gatekeeper.ledger import commitment, first_commit_with
+    from gatekeeper.ledger import LEDGER_REPO, commitment, find_batch, first_commit_with
 
     digest = commitment(salt, line)
-    flagged_at = json.loads(line)["flagged_at"]
-    committed = first_commit_with(digest, flagged_at[:10])
+    day = json.loads(line)["flagged_at"][:10]
     console.print(f"digest {digest}", markup=False)
-    console.print(f"flag time claimed: {flagged_at}", markup=False)
-    console.print(f"first public commit containing it: {committed or 'NOT FOUND'}", markup=False)
+    batch = find_batch(digest, day)
+    if batch:
+        console.print(f"found in {LEDGER_REPO}/{batch}", markup=False)
+        console.print("Independent time proof (OpenTimestamps, Bitcoin-anchored): download the batch and its .ots, then run", markup=False)
+        console.print(f"  ots verify {batch.rsplit('/', 1)[-1]}.ots", markup=False)
+        return
+    committed = first_commit_with(digest, day)  # early ledger format: one file per day, no .ots yet
+    if committed:
+        console.print(f"found in commitments/{day}.txt, first commit {committed}", markup=False)
+        console.print("Note: this git date is self-asserted (unsigned commit); only later batches carry an OpenTimestamps proof.", markup=False)
+    else:
+        console.print("NOT FOUND in the ledger", markup=False)
 
 
 if __name__ == "__main__":
