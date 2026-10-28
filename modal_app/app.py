@@ -40,8 +40,12 @@ NTFY_SECRET = modal.Secret.from_name("ntfy", required_keys=["NTFY_TOPIC"])  # re
 QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk", "low_priority")
 
 DATA = Path("/data")
-RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
-PROCESS_BUDGET_S = 75  # after this, unfinished names are deferred to the next run (timeout is 115 s)
+# Time budget of one poll run (the function is killed at 115 s): every network step has a short timeout
+# and a latest start time, and whatever does not fit is picked up by the next run two minutes later.
+FEED_BUDGET_S = 25  # reading the change feed
+PROCESS_BUDGET_S = 65  # after this, unfinished names are deferred to the next run
+LEDGER_START_BY_S = 55  # the ledger flush (OTS + 2 GitHub writes) can take up to ~55 s
+HTTP_TIMEOUT_S = 15
 MAX_CHANGES_PER_RUN = 4000
 MAX_PENDING = 8000
 LIVE_SAMPLE_CAP = 40_000
@@ -82,6 +86,8 @@ def _fast_scorer():
 
 
 def _run_poll() -> dict:
+    import httpx
+
     from gatekeeper.monitor import FLAG_CONTENT_THRESHOLD, FLAG_TOTAL_THRESHOLD, process_names
     from gatekeeper.npm import feed
     from gatekeeper.popular import load_popular
@@ -90,7 +96,7 @@ def _run_poll() -> dict:
     now = datetime.now(timezone.utc)
     popular = load_popular(DATA / "popular.txt")
     stats = {"changes": 0, "versions": 0, "scanned": 0, "flagged": 0, "errors": 0}
-    with feed.make_client() as client:
+    with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
         head = feed.current_seq(client)
         since = state.get("seq", None)
         if since is None:
@@ -98,8 +104,12 @@ def _run_poll() -> dict:
         pending = state.get("pending_names", [])
         names: dict[str, None] = {}
         # read less of the feed while a backlog is pending, so the backlog cannot grow without bound
-        while since < head and len(names) + len(pending) < MAX_CHANGES_PER_RUN and time.monotonic() - started < RUN_BUDGET_S / 3:
-            batch, nxt = feed.fetch_changes(client, since, limit=1000)
+        while since < head and len(names) + len(pending) < MAX_CHANGES_PER_RUN and time.monotonic() - started < FEED_BUDGET_S:
+            try:
+                batch, nxt = feed.fetch_changes(client, since, limit=1000, deadline=started + FEED_BUDGET_S)
+            except (httpx.HTTPError, TimeoutError) as exc:  # keep what was read; the next run continues from `since`
+                stats["feed_error"] = type(exc).__name__
+                break
             if not batch or nxt <= since:
                 break
             for ch in batch:
@@ -170,7 +180,8 @@ def _run_poll() -> dict:
     for k in ("versions", "scanned", "flagged"):
         d[k] += stats[k]
     state["daily"] = daily
-    stats["ledger_committed"] = _flush_ledger()
+    # pending commitments stay in state, so a skipped flush only delays them to the next run
+    stats["ledger_committed"] = _flush_ledger() if time.monotonic() - started < LEDGER_START_BY_S else 0
     stats["lag_changes"] = head - since
     stats["seconds"] = round(time.monotonic() - started, 1)
     return stats
@@ -181,9 +192,55 @@ LEDGER_SECRET = modal.Secret.from_name("github-ledger", required_keys=["GITHUB_T
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], schedule=modal.Period(minutes=2), timeout=115, cpu=1.0, memory=2048)
 def poll() -> dict:
-    stats = _run_poll()
+    import httpx
+
+    # A run that never cleared `poll_started` was killed (timeout, OOM): count it as a failure.
+    if state.get("poll_started"):
+        _poll_failed("previous run did not finish (timeout or crash)")
+    state["poll_started"] = datetime.now(timezone.utc).isoformat()
+    try:
+        stats = _run_poll()
+    except (httpx.TransportError, httpx.HTTPStatusError) as exc:  # npm hiccup: skip, the next run catches up
+        state["poll_started"] = None
+        _poll_failed(f"network: {type(exc).__name__}: {exc}"[:200])
+        return {"skipped": type(exc).__name__}
+    except Exception as exc:
+        state["poll_started"] = None
+        _poll_failed(f"{type(exc).__name__}: {exc}"[:200])
+        raise
+    state["poll_started"] = None
+    if state.get("poll_fail_streak", 0) >= POLL_ALERT_AFTER:
+        _notify("Gatekeeper: monitor recovered", f"poll works again after {state['poll_fail_streak']} failed runs.", tags="white_check_mark")
+    state["poll_fail_streak"] = 0
     print(json.dumps(stats))
     return stats
+
+
+POLL_ALERT_AFTER = 3  # failed runs in a row (6 minutes) before a push
+
+
+def _poll_failed(reason: str) -> None:
+    streak = state.get("poll_fail_streak", 0) + 1
+    state["poll_fail_streak"] = streak
+    state["poll_last_error"] = {"at": datetime.now(timezone.utc).isoformat(), "reason": reason}
+    print(f"poll failure #{streak}: {reason}")
+    if streak == POLL_ALERT_AFTER or (streak > POLL_ALERT_AFTER and streak % 30 == 0):  # then once an hour
+        _notify("Gatekeeper: monitor failing", f"{streak} poll runs in a row failed. Last: {reason}")
+
+
+def _watchdog() -> None:
+    """Called by the 5-minute crons: alert if poll has not finished a run for 10 minutes, whatever the
+    cause (also when Modal never started it). At most one push per hour."""
+    last = (state.get("last_run") or {}).get("at")
+    now = datetime.now(timezone.utc)
+    if not last or now - datetime.fromisoformat(last) < timedelta(minutes=10):
+        return
+    alerted = state.get("watchdog_alert_at")
+    if alerted and now - datetime.fromisoformat(alerted) < timedelta(hours=1):
+        return
+    state["watchdog_alert_at"] = now.isoformat()
+    err = (state.get("poll_last_error") or {}).get("reason", "unknown")
+    _notify("Gatekeeper: monitor stalled", f"No successful poll since {last[:16]} UTC. Last error: {err}")
 
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], timeout=600, cpu=1.0, memory=2048)
@@ -372,6 +429,9 @@ FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine
 FIREWORKS_PER_RUN = 60
 FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
 FIRST_OPINION_BACKENDS = ("glimmer-local", "spark-open-fireworks")
+# The cloud crons are killed at 280 s: no call starts after budget_s (140 s), and none runs longer than
+# this, so a run always ends with time to spare for saving state.
+CLOUD_CALL_TIMEOUT_S = 75
 
 
 def _spark_candidates(items: dict, now: datetime) -> list[str]:
@@ -423,10 +483,20 @@ def _maybe_notify_candidate(key: str, item: dict) -> dict:
     bad = {b: v for b, v in calls.items() if v["verdict"] in ("malicious", "suspicious")}
     if len(bad) < 2 or not any(v["verdict"] == "malicious" for v in bad.values()):
         return item
+    now = datetime.now(timezone.utc)
+    item["notified"] = now.isoformat()
+    # one push per package name per 12 h: campaigns publish many versions within minutes
+    pushed = state.get("notified_names", {})
+    last = pushed.get(item["name"])
+    if last and now - datetime.fromisoformat(last) < timedelta(hours=12):
+        item["notify_suppressed"] = True
+        return item
+    pushed = {n: t for n, t in pushed.items() if now - datetime.fromisoformat(t) < timedelta(hours=12)}
+    pushed[item["name"]] = now.isoformat()
+    state["notified_names"] = pushed
     summary = ", ".join(f"{b} {v['verdict']} {v.get('confidence')}" for b, v in bad.items())
-    _notify(f"Gatekeeper: candidate {key}", f"{summary}\nReview: uv run gk packet {key}",
-            click=f"https://www.npmjs.com/package/{item['name']}")
-    item["notified"] = datetime.now(timezone.utc).isoformat()
+    _notify(f"Gatekeeper: candidate {key}", f"{summary}\nFurther versions of this package stay silent for 12 h.\n"
+            f"Review: uv run gk packet {key}", click=f"https://www.npmjs.com/package/{item['name']}")
     return item
 
 
@@ -437,7 +507,7 @@ def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -
 
     classify = {"spark": classify_spark, "spark-open-fireworks": classify_spark_open_fireworks}[backend]
     day = f"{now:%Y-%m-%d}"
-    result = classify(RenderedBundle.from_record(item))
+    result = classify(RenderedBundle.from_record(item), timeout=CLOUD_CALL_TIMEOUT_S)
     spend["total"] += result.cost_usd
     spend["days"][day] = spend["days"].get(day, 0.0) + result.cost_usd
     v = result.verdict
@@ -512,6 +582,7 @@ def _run_cloud(
 def spark() -> dict:
     """Second opinions from Muse Spark (Meta Model API) under hard spending caps.
     Disabled until state['spark_enabled'] is True."""
+    _watchdog()
     if not state.get("spark_enabled", False):
         return {"enabled": False}
     keys = _spark_candidates(dict(queue.items()), datetime.now(timezone.utc))[:SPARK_PER_RUN]
@@ -522,6 +593,7 @@ def spark() -> dict:
 def spark_open() -> dict:
     """Muse Spark Open on Fireworks judges every flag under hard spending caps.
     Disabled until state['fireworks_enabled'] is True."""
+    _watchdog()
     if not state.get("fireworks_enabled", False):
         return {"enabled": False}
     keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]

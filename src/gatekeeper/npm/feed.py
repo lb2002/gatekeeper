@@ -26,21 +26,31 @@ def make_client(timeout: float = 30.0) -> httpx.Client:
     return httpx.Client(timeout=timeout, headers={"User-Agent": USER_AGENT}, follow_redirects=True)
 
 
-def current_seq(client: httpx.Client) -> int:
-    resp = client.get(f"{REPLICATE_URL}/")
-    resp.raise_for_status()
-    return int(resp.json()["update_seq"])
+def current_seq(client: httpx.Client, retries: int = 3) -> int:
+    for attempt in range(retries):
+        try:
+            resp = client.get(f"{REPLICATE_URL}/")
+            resp.raise_for_status()
+            return int(resp.json()["update_seq"])
+        except (httpx.HTTPError, ValueError, KeyError):  # resets and 5xx happen a few times a day
+            if attempt == retries - 1:
+                raise
+            time.sleep(1 + attempt)
+    raise AssertionError("unreachable")
 
 
 def fetch_changes(
-    client: httpx.Client, since: int, limit: int = 1000, retries: int = 4
+    client: httpx.Client, since: int, limit: int = 1000, retries: int = 4, deadline: float | None = None
 ) -> tuple[list[Change], int]:
     """Return the changes after `since` and the sequence number to continue from.
 
     Large limits are known to time out (504), so we back off and shrink the page on errors.
+    With a `deadline` (time.monotonic()), no retry starts after it; the caller continues next run.
     """
     page = limit
     for attempt in range(retries):
+        if attempt and deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("feed retries ran past the run budget")
         try:
             resp = client.get(f"{REPLICATE_URL}/_changes", params={"since": since, "limit": page})
             resp.raise_for_status()

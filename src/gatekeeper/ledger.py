@@ -29,7 +29,7 @@ OTS_CALENDARS = (
 OTS_HEADER = b"\x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94" + b"\x01" + b"\x08"
 
 
-def ots_stamp(data: bytes, calendars: tuple[str, ...] = OTS_CALENDARS, timeout: float = 20) -> bytes:
+def ots_stamp(data: bytes, calendars: tuple[str, ...] = OTS_CALENDARS, timeout: float = 8) -> bytes:
     """A pending OpenTimestamps proof (.ots file) for `data`, from the first calendar that answers.
     `ots upgrade` later completes it with the Bitcoin attestation; `ots verify` checks it."""
     digest = hashlib.sha256(data).digest()
@@ -66,7 +66,7 @@ def put_new_file(token: str, path: str, content: bytes, message: str, repo: str 
     """Create a file in the ledger repo (fails if it exists, so nothing is ever rewritten)."""
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
-    resp = httpx.put(f"https://api.github.com/repos/{repo}/contents/{path}", headers=headers, timeout=30,
+    resp = httpx.put(f"https://api.github.com/repos/{repo}/contents/{path}", headers=headers, timeout=15,
                      json={"message": message, "content": base64.b64encode(content).decode()})
     resp.raise_for_status()
     return resp.json()["commit"]["sha"]
