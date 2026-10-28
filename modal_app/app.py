@@ -422,6 +422,33 @@ def set_spark(enabled: bool) -> dict:
     return {"spark_enabled": state["spark_enabled"], "spend": state.get("spark_spend", None)}
 
 
+@app.function(image=image, timeout=120, cpu=0.25, memory=1024)
+def inspect_package(name: str, version: str, show_up_to: int = 20_000) -> dict:
+    """Facts for a human review and a report: tarball and per-file SHA-256, the manifest, and the
+    full text of install-time files. Read in memory inside this container; nothing is executed."""
+    import hashlib
+
+    from gatekeeper.npm import feed, packument
+    from gatekeeper.npm.tarball import read_tarball
+    from gatekeeper.triage.content import install_time_files
+
+    with feed.make_client() as client:
+        doc = packument.fetch_packument(client, name) or {}
+        info = packument.version_info(doc, version)
+        data = client.get(info.tarball_url).content if info.tarball_url else b""
+    pkg = read_tarball(data)
+    install = install_time_files(pkg)
+    return {
+        "name": name, "version": version, "published_at": info.published_at.isoformat() if info.published_at else None,
+        "publisher": info.publisher, "maintainers": info.maintainers, "tarball_url": info.tarball_url,
+        "tarball_sha256": hashlib.sha256(data).hexdigest(), "integrity": info.integrity,
+        "files": {p: {"size": pkg.sizes[p], "sha256": hashlib.sha256(b).hexdigest()} for p, b in pkg.files.items()},
+        "install_time_files": install,
+        "text": {p: (pkg.text(p) or "")[:show_up_to] for p in install + [info_main for info_main in ("index.js",) if info_main in pkg.files]},
+        "still_on_registry": version in (doc.get("versions") or {}),
+    }
+
+
 @app.function(image=image, timeout=60)
 def set_fireworks(enabled: bool) -> dict:
     state["fireworks_enabled"] = bool(enabled)
