@@ -143,19 +143,23 @@ def _run_poll() -> dict:
         state["caught_up_at"] = now.isoformat()
     state["seq"] = since
     state["last_run"] = {"at": now.isoformat(), "head": head, "seq": since, **stats}
+    stats["ledger_committed"] = _flush_ledger()
     stats["lag_changes"] = head - since
     stats["seconds"] = round(time.monotonic() - started, 1)
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, schedule=modal.Period(minutes=2), timeout=115, cpu=1.0, memory=2048)
+LEDGER_SECRET = modal.Secret.from_name("github-ledger", required_keys=["GITHUB_TOKEN"])
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], schedule=modal.Period(minutes=2), timeout=115, cpu=1.0, memory=2048)
 def poll() -> dict:
     stats = _run_poll()
     print(json.dumps(stats))
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, timeout=600, cpu=1.0, memory=2048)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], timeout=600, cpu=1.0, memory=2048)
 def poll_once() -> dict:
     """Manual single run for testing (same code path as the cron)."""
     stats = _run_poll()
@@ -167,16 +171,73 @@ QUEUE_TTL = timedelta(days=7)
 
 
 def _enqueue(rows: list[dict]) -> int:
+    from gatekeeper.ledger import canonical_line, commitment, new_salt
+
     added = 0
+    pending = state.get("ledger_pending", [])
     for r in rows:
         key = f"{r['name']}@{r['version']}"
         if key in queue:
             continue
         item = {k: r.get(k) for k in QUEUE_FIELDS}
         item.update(status="pending", leased_until=0.0, verdicts={})
+        # public commitment now, salt revealed only after independent confirmation
+        line = canonical_line(r["name"], r["version"], r["seen_at"], "flagged")
+        salt = new_salt()
+        item["ledger"] = {"line": line, "salt": salt, "digest": commitment(salt, line), "revealed": False}
+        _append_jsonl(DATA / "ledger" / "salts.jsonl", [{"key": key, **item["ledger"]}])  # private, outlives the queue TTL
+        pending.append(f"{r['seen_at']} {item['ledger']['digest']}")
         queue[key] = item
         added += 1
+    state["ledger_pending"] = pending
     return added
+
+
+def _reveal_confirmed() -> int:
+    """Publish the salt of every independently confirmed flag, so anyone can check its commitment."""
+    from gatekeeper.ledger import append_file
+
+    token = os.environ.get("GITHUB_TOKEN")
+    todo = [(k, it) for k, it in queue.items()
+            if (it.get("confirmation") or {}).get("confirmed") and it.get("ledger") and not it["ledger"].get("revealed")]
+    if not todo or not token:
+        return 0
+    lines = []
+    for key, it in todo:
+        conf = it["confirmation"]
+        lines.append(json.dumps({"line": it["ledger"]["line"], "salt": it["ledger"]["salt"], "digest": it["ledger"]["digest"],
+                                 "osv_ids": conf.get("osv_ids"), "ghsa_ids": conf.get("ghsa_ids"),
+                                 "earliest_public": conf.get("earliest_public")}, sort_keys=True) + "\n")
+    try:
+        append_file(token, f"revealed/{datetime.now(timezone.utc):%Y-%m}.jsonl", "".join(lines),
+                    f"reveal {len(lines)} confirmed detection(s)")
+    except Exception as exc:
+        print(f"ledger reveal error: {type(exc).__name__}: {exc}"[:300])
+        return 0
+    for key, it in todo:
+        fresh = queue.get(key, None) or it
+        fresh["ledger"]["revealed"] = True
+        queue[key] = fresh
+    return len(lines)
+
+
+def _flush_ledger() -> int:
+    """Commit pending commitments to the public ledger repo; on failure they wait for the next run."""
+    from gatekeeper.ledger import append_file
+
+    pending = state.get("ledger_pending", [])
+    token = os.environ.get("GITHUB_TOKEN")
+    if not pending or not token:
+        return 0
+    day = pending[0][:10]
+    try:
+        append_file(token, f"commitments/{day}.txt", "".join(line + "\n" for line in pending),
+                    f"{len(pending)} commitment(s)")
+    except Exception as exc:  # the ledger must never stop the monitor
+        print(f"ledger error: {type(exc).__name__}: {exc}"[:300])
+        return 0
+    state["ledger_pending"] = state.get("ledger_pending", [])[len(pending):]
+    return len(pending)
 
 
 @app.function(image=image, timeout=120)
@@ -207,7 +268,7 @@ def backfill_queue() -> dict:
     return {"flagged_records": total, "added": added}
 
 
-@app.function(image=image, volumes={str(DATA): volume}, schedule=modal.Period(hours=1), timeout=900, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], schedule=modal.Period(hours=1), timeout=900, cpu=0.25, memory=512)
 def confirm() -> dict:
     """Hourly: check every queued flag against OSV, GitHub malware advisories and npm takedowns."""
     from gatekeeper.confirm.batch import confirm_many
@@ -222,7 +283,8 @@ def confirm() -> dict:
     pending = {k: it for k, it in items.items() if not (it.get("confirmation") or {}).get("confirmed")}
     since = (now - QUEUE_TTL).isoformat()
     with feed.make_client() as client:
-        results, gh_error = confirm_many(client, [(it["name"], it["version"]) for it in pending.values()], since, now=now)
+        results, gh_error = confirm_many(client, [(it["name"], it["version"]) for it in pending.values()], since, now=now,
+                                         github_token=os.environ.get("GITHUB_TOKEN"))
     newly = 0
     rows = []
     for (key, item), conf in zip(pending.items(), results):
@@ -233,8 +295,10 @@ def confirm() -> dict:
         item["confirmation"] = {k: row[k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at", "checked_at")}
         queue[key] = item
     _append_jsonl(DATA / "confirmations" / f"{now:%Y-%m-%d}.jsonl", rows)
+    revealed = _reveal_confirmed()
     volume.commit()
-    stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error}
+    stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error,
+             "ledger_revealed": revealed}
     state["last_confirm"] = {"at": now.isoformat(), **stats}
     print(json.dumps(stats))
     return stats

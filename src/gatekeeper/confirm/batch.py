@@ -8,7 +8,7 @@ import httpx
 
 from gatekeeper.confirm import earliest, to_iso
 from gatekeeper.confirm.ghsa import GhsaResult, recent_malware
-from gatekeeper.confirm.osv import malicious_hits
+from gatekeeper.confirm.osv import malicious_hits, report_commit_time
 from gatekeeper.confirm.takedown import check_takedown
 from gatekeeper.confirm.tracker import Confirmation
 
@@ -18,10 +18,12 @@ def confirm_many(
     keys: list[tuple[str, str]],
     ghsa_since: str,
     now: datetime | None = None,
+    github_token: str | None = None,
 ) -> tuple[list[Confirmation], str | None]:
     """`keys` are (name, version) pairs. Returns confirmations and a GitHub error, if any."""
     now = now or datetime.now(timezone.utc)
     ghsa_by_name, ghsa_error = recent_malware(client, ghsa_since)
+    report_times: dict[str, str | None] = {}  # ossf commit time per package name
     out: list[Confirmation] = []
     for name, version in keys:
         c = Confirmation(name=name, version=version, checked_at=to_iso(now))
@@ -29,6 +31,10 @@ def confirm_many(
             hits = malicious_hits(client, name, version)
             c.osv_ids = [h.id for h in hits]
             c.osv_first_public = earliest(h.first_public for h in hits)
+            if hits and c.osv_first_public is None:
+                if name not in report_times:
+                    report_times[name] = report_commit_time(client, name, github_token)
+                c.osv_first_public = report_times[name]
         except Exception as exc:
             c.errors.append(f"osv: {type(exc).__name__}")
         g = ghsa_by_name.get(name, GhsaResult())
