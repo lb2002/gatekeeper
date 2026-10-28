@@ -37,7 +37,7 @@ state = modal.Dict.from_name("gatekeeper-state", create_if_missing=True)
 queue = modal.Dict.from_name("gatekeeper-queue", create_if_missing=True)  # key "name@version" -> item
 worker_secret = modal.Secret.from_name("gatekeeper-worker")  # GK_WORKER_TOKEN
 NTFY_SECRET = modal.Secret.from_name("ntfy", required_keys=["NTFY_TOPIC"])  # reviewer push notifications
-QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk")
+QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk", "low_priority")
 
 DATA = Path("/data")
 RUN_BUDGET_S = 95  # stay well inside the 2-minute schedule
@@ -391,8 +391,9 @@ def _spark_candidates(items: dict, now: datetime) -> list[str]:
 
 def _fireworks_candidates(items: dict) -> list[str]:
     """Every queued item without a Spark Open verdict, newest first."""
-    todo = [(it["seen_at"], key) for key, it in items.items() if "spark-open-fireworks" not in it.get("verdicts", {})]
-    return [k for _, k in sorted(todo, reverse=True)]
+    todo = [(not it.get("low_priority"), it["seen_at"], key) for key, it in items.items()
+            if "spark-open-fireworks" not in it.get("verdicts", {})]
+    return [k for *_, k in sorted(todo, reverse=True)]
 
 
 NOTIFY_BACKENDS = ("glimmer-local", "spark", "spark-open-fireworks")
@@ -533,7 +534,7 @@ LG_MAX_PER_RUN = 3000
 LG_ADAPTER = "llamaguard1b-gatekeeper-v2"
 LG_MIN_THRESHOLD = 0.3
 LG_KILL_RATE = 0.04  # a run is "hot" if it flags more than 4% of the distinct packages it scores
-LG_STRONG = 0.9  # hits this strong are queued even in a hot run
+LG_STRONG = 0.9  # in a hot run, weaker hits are queued as low priority
 
 
 @app.function(image=lg_image, gpu="L4", volumes={str(DATA): volume, "/models": model_volume},
@@ -572,24 +573,24 @@ def llamaguard() -> dict:
         if risk >= scorer.threshold:
             r["flagged"], r["lg_risk"] = True, round(risk, 4)
             new_flags.append(r)
-    # Kill switch against a broken model, robust against an attacker who floods the registry to trip it:
-    # the rate counts distinct package names, only 3 hot runs in a row switch the model off, and in a hot
-    # run strong hits are still queued while the rest is kept for re-scoring instead of being dropped.
+    # Unusual flag rate (broken model, or a flood meant to bury real hits): nothing is dropped and the
+    # model is never switched off automatically. Weaker hits of a hot run are queued as low priority,
+    # so the cloud judges see everything else first (their daily caps bound the cost), and the
+    # reviewer gets one push per hot streak to decide.
     names_scored = {r["name"] for r in candidates}
     names_flagged = {r["name"] for r in new_flags}
     hot = len(names_scored) >= 50 and len(names_flagged) > LG_KILL_RATE * len(names_scored)
     hot_runs = state.get("lg_hot_runs", 0) + 1 if hot else 0
     state["lg_hot_runs"] = hot_runs
-    held: list[dict] = []
     if hot:
-        held = [r for r in new_flags if r["lg_risk"] < LG_STRONG]
-        new_flags = [r for r in new_flags if r["lg_risk"] >= LG_STRONG]
-        _append_jsonl(DATA / "lg_held" / f"{now:%Y-%m-%d-%H%M%S}.jsonl", held)
-    if hot_runs >= 3:
-        state["lg_enabled"] = False
-        _notify("Gatekeeper: Llama Guard switched off",
-                f"3 runs in a row flagged more than {LG_KILL_RATE:.0%} of scanned packages "
-                f"(last: {len(names_flagged)} of {len(names_scored)}). Held flags: data/lg_held/.", tags="no_entry")
+        for r in new_flags:
+            if r["lg_risk"] < LG_STRONG:
+                r["low_priority"] = True
+                r["priority"] = min(r.get("priority") or 0, 0)
+    if hot_runs == 1:
+        _notify("Gatekeeper: unusual Llama Guard rate",
+                f"It flagged {len(names_flagged)} of {len(names_scored)} scanned packages (expected about 1%). "
+                "Weaker hits are queued as low priority. Switch it off with set_lg if this continues.", tags="warning")
     added = _enqueue(new_flags) if new_flags else 0
     for r in new_flags:  # record the score as a verdict on the new queue items
         key = f"{r['name']}@{r['version']}"
@@ -618,7 +619,7 @@ def llamaguard() -> dict:
     d["flagged"] += added
     state["daily"] = daily
     volume.commit()
-    stats = {"scored": len(candidates), "flagged": len(new_flags), "held": len(held), "hot_runs": hot_runs,
+    stats = {"scored": len(candidates), "flagged": len(new_flags), "hot_runs": hot_runs,
              "queued": added, "queue_scored": len(queued),
              "threshold": round(scorer.threshold, 4)}
     print(json.dumps(stats))
@@ -701,6 +702,12 @@ def inspect_package(name: str, version: str, show_up_to: int = 20_000) -> dict:
         "text": {p: (pkg.text(p) or "")[:show_up_to] for p in install + [info_main for info_main in ("index.js",) if info_main in pkg.files]},
         "still_on_registry": version in (doc.get("versions") or {}),
     }
+
+
+@app.function(image=image, timeout=60)
+def set_lg(enabled: bool) -> dict:
+    state["lg_enabled"] = bool(enabled)
+    return {"lg_enabled": state["lg_enabled"]}
 
 
 @app.function(image=image, timeout=60)
