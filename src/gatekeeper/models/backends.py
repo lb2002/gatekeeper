@@ -24,12 +24,17 @@ SPARK_MODEL = "muse-spark-1.3"  # Standard mode; never the "-contributor" varian
 LOCAL_URL = os.environ.get("GK_LOCAL_URL", "http://127.0.0.1:8080/v1")
 FIREWORKS_URL = "https://api.fireworks.ai/inference/v1"
 SPARK_OPEN_FIREWORKS_MODEL = "accounts/fireworks/models/muse-spark-open"  # Glimmer is no longer serverless there
+BASETEN_URL = "https://inference.baseten.co/v1"
+SPARK_OPEN_BASETEN_MODEL = "meta-models/muse-spark-open-1026"  # the hackathon key only works with this id
 
 # USD per 1M tokens (dev.meta.ai/docs/pricing-rate-limits, Oct 2026)
 SPARK_PRICE = {"input": 1.25, "cached_input": 0.15, "output": 4.25}
 # USD per 1M tokens, Fireworks serverless (fireworks.ai/models/fireworks/muse-spark-open, Oct 2026)
 SPARK_OPEN_FIREWORKS_PRICE = {"input": 1.25, "cached_input": 0.15, "output": 4.25}
-PRICES = {"spark": SPARK_PRICE, "spark-open-fireworks": SPARK_OPEN_FIREWORKS_PRICE}
+# Baseten Model APIs list the same rates for Muse Spark Open (third-party price trackers, Oct 2026)
+SPARK_OPEN_BASETEN_PRICE = {"input": 1.25, "cached_input": 0.15, "output": 4.25}
+PRICES = {"spark": SPARK_PRICE, "spark-open-fireworks": SPARK_OPEN_FIREWORKS_PRICE,
+          "spark-open-baseten": SPARK_OPEN_BASETEN_PRICE}
 
 
 @dataclass
@@ -152,6 +157,18 @@ def classify_spark_open_fireworks(
 ) -> ModelResult:
     """Muse Spark Open (Meta open weights) on Fireworks serverless."""
     key = api_key or os.environ["FIREWORKS_API_KEY"]
+    return _classify_spark_open(bundle, FIREWORKS_URL, key, model, "spark-open-fireworks", timeout)
+
+
+def classify_spark_open_baseten(
+    bundle: Bundle, api_key: str | None = None, timeout: float = 120, model: str = SPARK_OPEN_BASETEN_MODEL
+) -> ModelResult:
+    """The same Muse Spark Open weights on Baseten Model APIs (hackathon credits)."""
+    key = api_key or os.environ["BASETEN_API_KEY"]
+    return _classify_spark_open(bundle, BASETEN_URL, key, model, "spark-open-baseten", timeout)
+
+
+def _classify_spark_open(bundle: Bundle, url: str, key: str, model: str, backend: str, timeout: float) -> ModelResult:
     payload = {
         "model": model,
         "messages": messages(bundle),
@@ -159,13 +176,13 @@ def classify_spark_open_fireworks(
         "reasoning_effort": "low",
         "max_tokens": 4000,  # covers reasoning plus the verdict
     }
-    raw, usage, latency = _chat(FIREWORKS_URL, {"Authorization": f"Bearer {key}"}, payload, timeout)
+    raw, usage, latency = _chat(url, {"Authorization": f"Bearer {key}"}, payload, timeout)
     verdict, errors = _parse(raw)
     if verdict:
         errors += citation_errors(verdict, bundle)
     details = usage.get("prompt_tokens_details") or {}
     return ModelResult(
-        backend="spark-open-fireworks",
+        backend=backend,
         model=model,
         verdict=verdict,
         raw=raw,

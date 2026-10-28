@@ -79,14 +79,14 @@ def poll_once(
 @app.command("check")
 def check(
     target: str = typer.Argument(..., help="A package spec 'name' or 'name@version', or a local .tgz file."),
-    backend: str = typer.Option("local", help="'local' (Muse Glimmer via llama-server), 'fireworks' (Muse Spark Open on Fireworks) or 'spark' (Meta API)."),
+    backend: str = typer.Option("local", help="'local' (Muse Glimmer via llama-server), 'fireworks' or 'baseten' (Muse Spark Open) or 'spark' (Meta API)."),
     show_bundle: bool = typer.Option(False, help="Print the evidence bundle sent to the model."),
 ) -> None:
     """Statically check one package: rules first, then a Meta model. Nothing is executed."""
     from pathlib import Path
 
     from gatekeeper.evidence.bundle import build_bundle
-    from gatekeeper.models.backends import classify_spark_open_fireworks, classify_local, classify_spark
+    from gatekeeper.models.backends import classify_local, classify_spark, classify_spark_open_baseten, classify_spark_open_fireworks
     from gatekeeper.npm.tarball import read_tarball
     from gatekeeper.triage.content import score_content
 
@@ -112,7 +112,8 @@ def check(
     console.print(f"[bold]{name}@{version}[/]  rules score {content.score}  ({', '.join(sorted(content.rules)) or 'no rule hits'})")
     if show_bundle:
         console.print(bundle.render(), markup=False, highlight=False)
-    classify = {"spark": classify_spark, "fireworks": classify_spark_open_fireworks}.get(backend, classify_local)
+    classify = {"spark": classify_spark, "fireworks": classify_spark_open_fireworks,
+                "baseten": classify_spark_open_baseten}.get(backend, classify_local)
     result = classify(bundle)
     v = result.verdict
     if v is None:

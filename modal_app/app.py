@@ -428,7 +428,14 @@ FIREWORKS_DAILY_CAP_USD = 5.0
 FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine-tuning tests
 FIREWORKS_PER_RUN = 60
 FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
-FIRST_OPINION_BACKENDS = ("glimmer-local", "spark-open-fireworks")
+# Baseten serves the same Spark Open weights from the hackathon credits ($100): it takes over when
+# Fireworks reached its daily cap, so every flag still gets a Spark Open verdict
+BASETEN_DAILY_CAP_USD = 8.0
+BASETEN_TOTAL_CAP_USD = 85.0  # of $100; the rest stays for the time-split evaluation baseline
+BASETEN_SECRET = modal.Secret.from_name("baseten-api", required_keys=["BASETEN_API_KEY"])
+# one model on two hosts: they count as a single opinion
+SPARK_OPEN_BACKENDS = ("spark-open-fireworks", "spark-open-baseten")
+FIRST_OPINION_BACKENDS = ("glimmer-local", *SPARK_OPEN_BACKENDS)
 # The cloud crons are killed at 280 s: no call starts after budget_s (140 s), and none runs longer than
 # this, so a run always ends with time to spare for saving state.
 CLOUD_CALL_TIMEOUT_S = 75
@@ -450,13 +457,13 @@ def _spark_candidates(items: dict, now: datetime) -> list[str]:
 
 
 def _fireworks_candidates(items: dict) -> list[str]:
-    """Every queued item without a Spark Open verdict, newest first."""
+    """Every queued item without a Spark Open verdict (from either host), newest first."""
     todo = [(not it.get("low_priority"), it["seen_at"], key) for key, it in items.items()
-            if "spark-open-fireworks" not in it.get("verdicts", {})]
+            if not any(b in it.get("verdicts", {}) for b in SPARK_OPEN_BACKENDS)]
     return [k for *_, k in sorted(todo, reverse=True)]
 
 
-NOTIFY_BACKENDS = ("glimmer-local", "spark", "spark-open-fireworks")
+NOTIFY_BACKENDS = ("glimmer-local", "spark", *SPARK_OPEN_BACKENDS)
 
 
 def _notify(title: str, body: str, click: str = "", tags: str = "warning") -> None:
@@ -479,7 +486,8 @@ def _maybe_notify_candidate(key: str, item: dict) -> dict:
     """Strong candidate: at least two Meta-model verdicts malicious/suspicious, one of them malicious."""
     if item.get("notified") or (item.get("confirmation") or {}).get("confirmed"):
         return item
-    calls = {b: v for b, v in (item.get("verdicts") or {}).items() if b in NOTIFY_BACKENDS and v.get("verdict")}
+    calls = {("spark-open" if b in SPARK_OPEN_BACKENDS else b): v for b, v in (item.get("verdicts") or {}).items()
+             if b in NOTIFY_BACKENDS and v.get("verdict")}
     bad = {b: v for b, v in calls.items() if v["verdict"] in ("malicious", "suspicious")}
     if len(bad) < 2 or not any(v["verdict"] == "malicious" for v in bad.values()):
         return item
@@ -503,9 +511,10 @@ def _maybe_notify_candidate(key: str, item: dict) -> dict:
 def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -> dict:
     """Classify one queued item with a cloud model, book the cost and store the verdict. Raises on API errors."""
     from gatekeeper.evidence.bundle import RenderedBundle
-    from gatekeeper.models.backends import classify_spark, classify_spark_open_fireworks
+    from gatekeeper.models.backends import classify_spark, classify_spark_open_baseten, classify_spark_open_fireworks
 
-    classify = {"spark": classify_spark, "spark-open-fireworks": classify_spark_open_fireworks}[backend]
+    classify = {"spark": classify_spark, "spark-open-fireworks": classify_spark_open_fireworks,
+                "spark-open-baseten": classify_spark_open_baseten}[backend]
     day = f"{now:%Y-%m-%d}"
     result = classify(RenderedBundle.from_record(item), timeout=CLOUD_CALL_TIMEOUT_S)
     spend["total"] += result.cost_usd
@@ -589,15 +598,28 @@ def spark() -> dict:
     return _run_cloud("spark", keys, "spark_spend", SPARK_DAILY_CAP_USD, SPARK_TOTAL_CAP_USD, workers=4, budget_s=140)
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET, BASETEN_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark_open() -> dict:
-    """Muse Spark Open on Fireworks judges every flag under hard spending caps.
-    Disabled until state['fireworks_enabled'] is True."""
+    """Muse Spark Open judges every flag under hard spending caps: on Fireworks while it is under its
+    caps, otherwise on Baseten. Each host is off until state['fireworks_enabled'] / ['baseten_enabled']."""
     _watchdog()
-    if not state.get("fireworks_enabled", False):
+    host = _spark_open_host()
+    if host is None:
         return {"enabled": False}
+    backend, spend_key, daily_cap, total_cap = host
     keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]
-    return _run_cloud("spark-open-fireworks", keys, "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD, workers=8, budget_s=140)
+    return _run_cloud(backend, keys, spend_key, daily_cap, total_cap, workers=8, budget_s=140)
+
+
+def _spark_open_host() -> tuple[str, str, float, float] | None:
+    day = f"{datetime.now(timezone.utc):%Y-%m-%d}"
+    hosts = [("fireworks_enabled", "spark-open-fireworks", "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD),
+             ("baseten_enabled", "spark-open-baseten", "baseten_spend", BASETEN_DAILY_CAP_USD, BASETEN_TOTAL_CAP_USD)]
+    for flag, backend, spend_key, daily_cap, total_cap in hosts:
+        spend = state.get(spend_key, {"total": 0.0, "days": {}})
+        if state.get(flag, False) and spend["total"] < total_cap and spend["days"].get(day, 0.0) < daily_cap:
+            return backend, spend_key, daily_cap, total_cap
+    return None
 
 
 LG_MAX_PER_RUN = 3000
@@ -698,7 +720,7 @@ def llamaguard() -> dict:
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, FIREWORKS_SECRET], timeout=180, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, FIREWORKS_SECRET, BASETEN_SECRET], timeout=180, cpu=0.25, memory=512)
 def cloud_probe(backend: str = "spark", key: str = "") -> dict:
     """One call on one queued item (the top candidate unless a key is given), to check the key,
     the schema mode and the cost accounting before a cron is switched on."""
@@ -709,7 +731,7 @@ def cloud_probe(backend: str = "spark", key: str = "") -> dict:
     item = queue.get(key, None) if key else None
     if item is None:
         return {"error": f"no queued item {key!r}"}
-    spend_key = {"spark": "spark_spend", "spark-open-fireworks": "fireworks_spend"}[backend]
+    spend_key = {"spark": "spark_spend", "spark-open-fireworks": "fireworks_spend", "spark-open-baseten": "baseten_spend"}[backend]
     spend = state.get(spend_key, {"total": 0.0, "days": {}})
     try:
         row = _cloud_one(backend, key, item, spend, now)
@@ -786,6 +808,12 @@ def set_lg(enabled: bool) -> dict:
 def set_fireworks(enabled: bool) -> dict:
     state["fireworks_enabled"] = bool(enabled)
     return {"fireworks_enabled": state["fireworks_enabled"], "spend": state.get("fireworks_spend", None)}
+
+
+@app.function(image=image, timeout=60)
+def set_baseten(enabled: bool) -> dict:
+    state["baseten_enabled"] = bool(enabled)
+    return {"baseten_enabled": state["baseten_enabled"], "spend": state.get("baseten_spend", None)}
 
 
 
