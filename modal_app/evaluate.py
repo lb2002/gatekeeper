@@ -136,6 +136,7 @@ def report(split: str = "test") -> dict:
     rows = _load(split, None)
     labels = [1 if r["label"] == "malicious" else 0 for r in rows]
     systems = {"rules (content score)": [float(r["content_score"]) for r in rows]}
+    scored = {"rules (content score)"}  # systems with a continuous risk score instead of a verdict
     key = {(r["name"], r["version"], r["label"]): i for i, r in enumerate(rows)}
     for path in sorted((DATA / "eval").glob(f"*-{split}.jsonl")):
         scores = [0.0] * len(rows)
@@ -145,6 +146,8 @@ def report(split: str = "test") -> dict:
             i = key.get((p["name"], p["version"], p["label"]))
             if i is not None:
                 scores[i] = p["risk"] if "risk" in p else verdict_risk(p["verdict"], p["confidence"])
+                if "risk" in p:
+                    scored.add(path.stem)
                 seen += 1
         if seen:
             systems[path.stem] = scores
@@ -158,7 +161,7 @@ def report(split: str = "test") -> dict:
         for target in (0.95, 0.99):
             ok = [pt for pt in curve(scores, labels) if pt.recall >= target]
             res[f"benign_passed_at_{int(target * 100)}pct_recall"] = round(min(pt.fpr for pt in ok), 3) if ok else None
-        if name not in ("rules (content score)", "fastclf-test"):
+        if name not in scored:
             flag = at_threshold(scores, labels, 0.5)  # "malicious or suspicious" blocks
             res["block_recall"] = round(flag.recall, 3)
             res["block_fpr"] = round(flag.fpr, 3)
