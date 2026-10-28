@@ -11,12 +11,14 @@ import json
 from dataclasses import dataclass, field
 
 from gatekeeper.npm.tarball import PackageFiles
-from gatekeeper.triage.content import ContentScore
+from gatekeeper.triage.content import CODE_EXT, ContentScore
 
 MAX_CHARS = 8000  # roughly 2k tokens
 CONTEXT_LINES = 8
 MAX_LINE_CHARS = 240
 MINIFIED_LINE_CHARS = 1000
+FILL_CHUNK_CHARS = 2500  # per file in the fill phase, so several files get a look
+TYPE_DECLARATION_EXT = (".d.ts", ".d.mts", ".d.cts")
 MANIFEST_KEYS = ("name", "version", "main", "bin", "scripts", "gypfile", "dependencies", "optionalDependencies", "repository", "files")
 
 
@@ -166,6 +168,7 @@ def build_bundle(
     for h in content.hits:
         hits_by_path.setdefault(h.path, []).append(h.line)
     ordered = list(dict.fromkeys(content.focus_files + list(hits_by_path)))
+    shown_until: dict[str, int] = {}  # last line shown from the top of a file without rule hits
     for path in ordered:
         text = pkg.text(path)
         if text is None:
@@ -195,4 +198,36 @@ def build_bundle(
         for start, end in spans:
             if not add(path, start, all_lines[start - 1 : end]):
                 break
+            shown_until[path] = end
+
+    # Fill phase: malware often triggers no rule at all, so spend the remaining budget on code the
+    # model has not seen yet: the rest of the entry files, then the largest other code files.
+    others = sorted(
+        (p for p in pkg.files if p.endswith(CODE_EXT) and not p.endswith(TYPE_DECLARATION_EXT) and p not in hits_by_path),
+        key=lambda p: -pkg.sizes.get(p, 0),
+    )
+    for path in list(dict.fromkeys([p for p in content.focus_files if p not in hits_by_path] + others)):
+        if max_chars - used < 400:
+            break
+        text = pkg.text(path)
+        if not text:
+            continue
+        all_lines = text.splitlines()
+        start = shown_until.get(path, 0) + 1
+        if start > len(all_lines):
+            continue
+        budget = min(FILL_CHUNK_CHARS, max_chars - used - 120)
+        if any(len(line) > MINIFIED_LINE_CHARS for line in all_lines[start - 1 : start + 49]):
+            if path not in shown_until:
+                add(path, start, [all_lines[start - 1][: budget - 60]], clip=budget, note="minified, start of the file")
+            continue
+        chunk, size = [], 0
+        for line in all_lines[start - 1 :]:
+            line = _clip(line)
+            if size + len(line) + 7 > budget:
+                break
+            chunk.append(line)
+            size += len(line) + 7
+        if chunk:
+            add(path, start, chunk, note="more code" if path in shown_until else "")
     return b

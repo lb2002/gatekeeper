@@ -24,3 +24,12 @@ def test_bootstrap_brackets_estimate():
     labels = [1 if i > 60 else 0 for i in range(100)]
     est, lo, hi = bootstrap(scores, labels, pr_auc, n=200)
     assert lo <= est <= hi
+
+
+def test_pr_auc_ignores_input_order_of_ties():
+    from gatekeeper.eval.metrics import pr_auc
+
+    scores, labels = [0.0, 0.0, 0.0, 0.0, 1.0], [0, 0, 1, 1, 1]
+    flipped = list(zip(*sorted(zip(scores, labels), key=lambda t: -t[1])))
+    assert pr_auc(scores, labels) == pr_auc(list(flipped[0]), list(flipped[1]))
+    assert abs(pr_auc(scores, labels) - (1 / 3 * 1.0 + 2 / 3 * 3 / 5)) < 1e-9

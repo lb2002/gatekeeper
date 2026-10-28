@@ -61,18 +61,24 @@ def recall_at_fpr(scores: list[float], labels: list[int], max_fpr: float = 0.01)
 
 
 def pr_auc(scores: list[float], labels: list[int]) -> float:
-    """Average precision (area under the precision-recall curve, step-wise)."""
+    """Average precision (area under the precision-recall curve, step-wise).
+
+    Tied scores form one threshold step, so the result does not depend on input order."""
     positives = sum(labels)
     if positives == 0:
         return 0.0
-    ranked = sorted(zip(scores, labels), key=lambda t: -t[0])
-    tp = 0
+    by_score: dict[float, list[int]] = {}
+    for s, y in zip(scores, labels):
+        counts = by_score.setdefault(s, [0, 0])
+        counts[0 if y else 1] += 1
+    tp = fp = 0
     ap = 0.0
-    for i, (_, y) in enumerate(ranked, start=1):
-        if y:
-            tp += 1
-            ap += tp / i
-    return ap / positives
+    for s in sorted(by_score, reverse=True):
+        new_tp, new_fp = by_score[s]
+        tp += new_tp
+        fp += new_fp
+        ap += new_tp / positives * tp / (tp + fp)
+    return ap
 
 
 def at_threshold(scores: list[float], labels: list[int], thr: float) -> Point:
