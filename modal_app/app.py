@@ -36,6 +36,7 @@ model_volume = modal.Volume.from_name("gatekeeper-models", create_if_missing=Tru
 state = modal.Dict.from_name("gatekeeper-state", create_if_missing=True)
 queue = modal.Dict.from_name("gatekeeper-queue", create_if_missing=True)  # key "name@version" -> item
 worker_secret = modal.Secret.from_name("gatekeeper-worker")  # GK_WORKER_TOKEN
+NTFY_SECRET = modal.Secret.from_name("ntfy", required_keys=["NTFY_TOPIC"])  # reviewer push notifications
 QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk")
 
 DATA = Path("/data")
@@ -322,7 +323,7 @@ def backfill_queue() -> dict:
     return {"flagged_records": total, "added": added}
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], schedule=modal.Period(hours=1), timeout=900, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET, NTFY_SECRET], schedule=modal.Period(hours=1), timeout=900, cpu=0.25, memory=512)
 def confirm() -> dict:
     """Hourly: check every queued flag against OSV, GitHub malware advisories and npm takedowns."""
     from gatekeeper.confirm.batch import confirm_many
@@ -346,6 +347,8 @@ def confirm() -> dict:
         rows.append(row)
         if conf.confirmed:
             newly += 1
+            _notify(f"Gatekeeper: confirmed {key}", f"Public records: {', '.join(conf.osv_ids + conf.ghsa_ids) or conf.npm_takedown_at}\n"
+                    f"We flagged it at {item['seen_at'][:16]} UTC.", click=f"https://osv.dev/list?q={item['name']}", tags="white_check_mark")
         item["confirmation"] = {k: row[k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at", "checked_at")}
         queue[key] = item
     _append_jsonl(DATA / "confirmations" / f"{now:%Y-%m-%d}.jsonl", rows)
@@ -392,6 +395,40 @@ def _fireworks_candidates(items: dict) -> list[str]:
     return [k for _, k in sorted(todo, reverse=True)]
 
 
+NOTIFY_BACKENDS = ("glimmer-local", "spark", "spark-open-fireworks")
+
+
+def _notify(title: str, body: str, click: str = "", tags: str = "warning") -> None:
+    """Push to the reviewer's phone via ntfy (secret topic). Never raises."""
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        return
+    import httpx
+
+    headers = {"Title": title.encode("ascii", "replace").decode(), "Tags": tags, "Priority": "high"}
+    if click:
+        headers["Click"] = click
+    try:
+        httpx.post(f"https://ntfy.sh/{topic}", content=body.encode(), headers=headers, timeout=10)
+    except Exception as exc:
+        print(f"ntfy error: {type(exc).__name__}"[:200])
+
+
+def _maybe_notify_candidate(key: str, item: dict) -> dict:
+    """Strong candidate: at least two Meta-model verdicts malicious/suspicious, one of them malicious."""
+    if item.get("notified") or (item.get("confirmation") or {}).get("confirmed"):
+        return item
+    calls = {b: v for b, v in (item.get("verdicts") or {}).items() if b in NOTIFY_BACKENDS and v.get("verdict")}
+    bad = {b: v for b, v in calls.items() if v["verdict"] in ("malicious", "suspicious")}
+    if len(bad) < 2 or not any(v["verdict"] == "malicious" for v in bad.values()):
+        return item
+    summary = ", ".join(f"{b} {v['verdict']} {v.get('confidence')}" for b, v in bad.items())
+    _notify(f"Gatekeeper: candidate {key}", f"{summary}\nReview: uv run gk packet {key}",
+            click=f"https://www.npmjs.com/package/{item['name']}")
+    item["notified"] = datetime.now(timezone.utc).isoformat()
+    return item
+
+
 def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -> dict:
     """Classify one queued item with a cloud model, book the cost and store the verdict. Raises on API errors."""
     from gatekeeper.evidence.bundle import RenderedBundle
@@ -418,7 +455,7 @@ def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -
         "verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
         "at": now.isoformat(), "errors": result.errors[:3], "full": row["verdict"],
     }
-    queue[key] = fresh
+    queue[key] = _maybe_notify_candidate(key, fresh)
     return row
 
 
@@ -470,7 +507,7 @@ def _run_cloud(
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark() -> dict:
     """Second opinions from Muse Spark (Meta Model API) under hard spending caps.
     Disabled until state['spark_enabled'] is True."""
@@ -480,7 +517,7 @@ def spark() -> dict:
     return _run_cloud("spark", keys, "spark_spend", SPARK_DAILY_CAP_USD, SPARK_TOTAL_CAP_USD, workers=4, budget_s=140)
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark_open() -> dict:
     """Muse Spark Open on Fireworks judges every flag under hard spending caps.
     Disabled until state['fireworks_enabled'] is True."""
@@ -775,7 +812,7 @@ class ReviewIn(BaseModel):
     note: str = ""
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[worker_secret], cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[worker_secret, NTFY_SECRET], cpu=0.25, memory=512)
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app()
 def api():
@@ -900,7 +937,7 @@ def api():
             }
             item["status"] = "done" if v.verdict else "pending"
             item["leased_until"] = 0.0
-            queue[v.key] = item
+            queue[v.key] = _maybe_notify_candidate(v.key, item)
         return {"ok": True}
 
     return web
