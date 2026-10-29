@@ -51,9 +51,9 @@ def download_model() -> str:
     return path
 
 
-def _load(split: str, limit: int | None) -> list[dict]:
+def _load(split: str, limit: int | None, source: str = "") -> list[dict]:
     rows = []
-    for name in ("malicious.jsonl", "benign.jsonl"):
+    for name in ((f"{source}-{split}.jsonl",) if source else ("malicious.jsonl", "benign.jsonl")):
         path = DATA / "datasets" / name
         rows += [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
     rows = [r for r in rows if r["split"] == split]
@@ -135,7 +135,8 @@ def eval_glimmer(split: str = "test", limit: int = 0, parallel: int = 8, tag: st
     cpu=1.0,
     memory=2048,
 )
-def eval_cloud(backend: str = "spark", split: str = "test", limit: int = 0, parallel: int = 6, max_usd: float = 12.0) -> dict:
+def eval_cloud(backend: str = "spark", split: str = "test", limit: int = 0, parallel: int = 6, max_usd: float = 12.0,
+               source: str = "", min_chars: int = 0) -> dict:
     """Zero-shot Muse Spark (Meta API) or Muse Spark Open (Fireworks / Baseten) on the same bundles.
     Resumable: rows already in the output file are skipped. Stops starting new calls at `max_usd`.
     Outputs are used for evaluation only, never as training data."""
@@ -146,7 +147,7 @@ def eval_cloud(backend: str = "spark", split: str = "test", limit: int = 0, para
 
     fn = {"spark": backends.classify_spark, "spark-open-fireworks": backends.classify_spark_open_fireworks,
           "spark-open-baseten": backends.classify_spark_open_baseten}[backend]
-    out_path = DATA / "eval" / f"{backend}-zeroshot-{split}.jsonl"
+    out_path = DATA / "eval" / f"{backend}-{source or 'zeroshot'}-{split}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     done = set()
     spent = 0.0
@@ -159,7 +160,9 @@ def eval_cloud(backend: str = "spark", split: str = "test", limit: int = 0, para
         # keep only usable rows; failed ones are retried
         kept = [l for l in out_path.read_text(encoding="utf-8").splitlines() if json.loads(l)["verdict"] is not None]
         out_path.write_text("".join(l + "\n" for l in kept), encoding="utf-8")
-    rows = [r for r in _load(split, limit or None) if (r["name"], r["version"], r["label"]) not in done]
+    # min_chars: only bundles the larger budget actually grew (the rest would get the same answer as before)
+    rows = [r for r in _load(split, limit or None, source) if (r["name"], r["version"], r["label"]) not in done
+            and len(r["bundle"]) >= min_chars]
     lock = threading.Lock()
     started = time.time()
 

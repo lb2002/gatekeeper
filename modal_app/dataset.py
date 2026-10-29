@@ -313,3 +313,48 @@ def _known_malicious_names() -> list[str]:
         return list(json.loads(raw))
     except Exception:
         return []
+
+
+@app.function(image=image, volumes={str(DATA): volume}, timeout=2 * 3600, cpu=4.0, memory=8192)
+def build_deep(split: str = "test", max_chars: int = 24000) -> dict:
+    """The same packages as the `split` rows, with a larger evidence budget: the "closer look" a second
+    stage gives only to what the cheap first stage flagged. Malware is decrypted in memory as before."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gatekeeper.evidence.bundle import build_bundle
+    from gatekeeper.npm import feed, packument
+    from gatekeeper.npm.tarball import read_tarball
+    from gatekeeper.triage.content import score_content
+
+    rows = []
+    for name in ("malicious.jsonl", "benign.jsonl"):
+        rows += [json.loads(l) for l in (DATA / "datasets" / name).read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows = [r for r in rows if r["split"] == split]
+    paths = {(m["name"], m["version"]): m["path"] for m in map(_parse, _list_paths())}
+
+    def work(r: dict):
+        try:
+            if r["label"] == "malicious":
+                pkg, _ = _package_from_zip(_blob(paths[(r["name"], r["version"])]))
+            else:
+                with feed.make_client() as client:
+                    info = packument.version_info(packument.fetch_packument(client, r["name"]), r["version"])
+                    pkg = read_tarball(client.get(info.tarball_url).content)
+            content = score_content(pkg)
+            b = build_bundle(r["name"], r["version"], pkg, content, max_chars=max_chars)
+            return r | {"bundle": b.render(), "excerpts": [e.ref() for e in b.excerpts]}
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"[:200], "name": r["name"]}
+
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        results = list(ex.map(work, rows))
+    good = [x for x in results if "error" not in x]
+    out = DATA / "datasets" / f"deep-{split}.jsonl"
+    with out.open("w", encoding="utf-8") as fh:
+        for x in good:
+            fh.write(json.dumps(x, ensure_ascii=False) + "\n")
+    volume.commit()
+    stats = {"rows": len(rows), "built": len(good), "errors": [x for x in results if "error" in x][:5],
+             "mean_chars": round(sum(len(x["bundle"]) for x in good) / max(len(good), 1))}
+    print(json.dumps(stats))
+    return stats

@@ -147,7 +147,7 @@ def _run_poll() -> dict:
         todo = list(dict.fromkeys(pending + list(names)))
         records, deferred = process_names(
             client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S,
-            fast=_fast_scorer(), mal_index=_mal_index(),
+            fast=_fast_scorer(), mal_index=_mal_index(), workers=32,
         )
         stats["deferred"] = len(deferred)
 
