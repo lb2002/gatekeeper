@@ -57,30 +57,38 @@ def build_index(zip_path: Path) -> dict[str, dict]:
     return index
 
 
-def dependency_targets(deps: dict[str, str]) -> list[tuple[str, str, str]]:
-    """(declared name, package actually installed, version spec); npm aliases point elsewhere."""
+KNOWN_MALICIOUS = "known_malicious"  # flag on its own
+TAKEN_DOWN = "taken_down"
+REMOTE_URL = "remote_url"  # sometimes legitimate: only worth a scan
+DepEntries = dict[str, str] | list[tuple[str, str]]
+
+
+def dependency_targets(deps: DepEntries) -> list[tuple[str, str, str]]:
+    """(declared name, package actually installed, version spec); npm aliases point elsewhere.
+    Takes a name->spec dict or a list of (name, spec) pairs (one per manifest section, duplicates kept)."""
     out = []
-    for name, spec in deps.items():
+    for name, spec in (deps.items() if isinstance(deps, dict) else deps):
         m = _ALIAS.match(str(spec).strip())
         out.append((name, m.group(1), m.group(2) or "") if m else (name, name, str(spec)))
     return out
 
 
-def bad_dependencies(deps: dict[str, str], index: dict[str, dict], before: str | None = None,
-                     popular: set[str] = frozenset()) -> list[str]:
-    """Reasons for dependencies that are known malicious (reported in OSV before `before`, if given) or
-    pinned to npm's security placeholder. A package that was malicious only in some versions (a hijacked
-    library) counts only when the spec pins one of those versions; a popular package only then."""
-    reasons = []
+def bad_dependencies(deps: DepEntries, index: dict[str, dict], before: str | None = None,
+                     popular: set[str] = frozenset()) -> list[tuple[str, str]]:
+    """(kind, reason) for dependencies that are known malicious (reported in OSV before `before`, if
+    given), pinned to npm's security placeholder, or fetched from a URL. A package that was malicious only
+    in some versions (a hijacked library) counts only when the spec pins one of those versions; a popular
+    package only then. The kind, never the text (which holds attacker-chosen names), decides the weight."""
+    out = []
     for declared, target, spec in dependency_targets(deps):
         shown = declared if declared == target else f"{declared} (alias of {target})"
         e = index.get(target)
         known = e is not None and (before is None or e["public"] < before)
         exact = spec.lstrip("=v ").strip()
         if known and ((e["all"] and target not in popular) or exact in e["versions"]):
-            reasons.append(f"depends on {shown}, reported malicious {e['public'][:10]}")
+            out.append((KNOWN_MALICIOUS, f"depends on {shown}, reported malicious {e['public'][:10]}"))
         elif spec.endswith("-security") and target not in NODE_BUILTINS:
-            reasons.append(f"depends on {shown} at {spec}, npm's placeholder for removed malware")
+            out.append((TAKEN_DOWN, f"depends on {shown} at {spec}, npm's placeholder for removed malware"))
         elif _REMOTE.match(spec):
-            reasons.append(f"depends on {shown} from a URL outside the registry ({spec[:80]})")
-    return reasons
+            out.append((REMOTE_URL, f"depends on {shown} from a URL outside the registry ({spec[:80]})"))
+    return out

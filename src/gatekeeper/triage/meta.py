@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from gatekeeper.confirm.malindex import bad_dependencies
+from gatekeeper.confirm.malindex import KNOWN_MALICIOUS, REMOTE_URL, TAKEN_DOWN, bad_dependencies
 from gatekeeper.npm.packument import VersionInfo
 from gatekeeper.triage.typosquat import typosquat_target
 
@@ -54,6 +54,11 @@ def score_metadata(
     if not info.has_repository:
         s.add(1, "no repository field")
     # a clean-looking wrapper that installs known malware: enough to flag on its own (FLAG_TOTAL_THRESHOLD)
-    for reason in bad_dependencies(info.dependencies, mal_index or {}, popular=popular)[:3]:
-        s.add(2 if "from a URL" in reason else 9, reason)  # URL deps are sometimes legitimate: scan, do not flag
+    found = bad_dependencies(info.dependencies, mal_index or {}, popular=popular)
+    strong = [r for kind, r in found if kind in (KNOWN_MALICIOUS, TAKEN_DOWN)]
+    if strong:
+        s.add(9, strong[0] + (f" (+{len(strong) - 1} more)" if len(strong) > 1 else ""))
+    remote = [r for kind, r in found if kind == REMOTE_URL]
+    if remote:  # URL dependencies are sometimes legitimate: scan, do not flag
+        s.add(2, remote[0] + (f" (+{len(remote) - 1} more)" if len(remote) > 1 else ""))
     return s

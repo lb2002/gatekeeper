@@ -29,7 +29,7 @@ class VersionInfo:
     integrity: str | None = None
     unpacked_size: int | None = None
     file_count: int | None = None
-    dependencies: dict[str, str] = field(default_factory=dict)
+    dependencies: list[tuple[str, str]] = field(default_factory=list)
     previous_version: str | None = None
     previous_install_scripts: dict[str, str] = field(default_factory=dict)
     previous_publisher: str | None = None
@@ -106,13 +106,14 @@ def versions_by_time(packument: dict) -> list[tuple[str, datetime]]:
     return out
 
 
-def _all_dependencies(manifest: dict) -> dict[str, str]:
-    """Everything npm may install with this version: optional and peer dependencies are installed too."""
-    out: dict[str, str] = {}
-    for section in ("peerDependencies", "optionalDependencies", "dependencies"):
+def _all_dependencies(manifest: dict) -> list[tuple[str, str]]:
+    """Every (name, spec) npm may install with this version, one entry per section: optional and peer
+    dependencies are installed too, and a name listed twice keeps both specs."""
+    out: list[tuple[str, str]] = []
+    for section in ("dependencies", "optionalDependencies", "peerDependencies"):
         deps = manifest.get(section)
         if isinstance(deps, dict):
-            out.update({str(k): str(v) for k, v in deps.items()})
+            out.extend((str(k), str(v)) for k, v in deps.items())
     return out
 
 

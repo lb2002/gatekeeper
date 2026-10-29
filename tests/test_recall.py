@@ -44,9 +44,9 @@ def test_bad_dependencies():
              "late-evil": {"public": "2026-12-01T00:00:00Z", "all": True, "versions": []}}
     deps = {"libsignal": "npm:@evil/libsignal-node@^0.0.1", "chalk": "^5.0.0", "late-evil": "1.0.0",
             "gone": "^0.0.1-security", "lodash": "^4.17.21"}
-    reasons = bad_dependencies(deps, index, before="2026-10-01T00:00:00Z")
-    assert len(reasons) == 2
-    assert "libsignal (alias of @evil/libsignal-node)" in reasons[0] and "placeholder" in reasons[1]
+    found = bad_dependencies(deps, index, before="2026-10-01T00:00:00Z")
+    assert [k for k, _ in found] == ["known_malicious", "taken_down"]
+    assert "libsignal (alias of @evil/libsignal-node)" in found[0][1] and "placeholder" in found[1][1]
     assert bad_dependencies({"chalk": "5.6.1"}, index, popular={"chalk"})  # pinned to the hijacked version
     assert not bad_dependencies({"@evil/libsignal-node": "1.0.0"}, index, popular={"@evil/libsignal-node"})
 
@@ -71,5 +71,16 @@ def test_index_keeps_every_version_and_reads_optional_deps():
     doc = {"name": "w", "versions": {"1.0.0": {"optionalDependencies": {"lib": "1.0.79"}, "peerDependencies": {"p": "^1"}}},
            "time": {"1.0.0": "2026-10-29T00:00:00Z"}}
     info = version_info(doc, "1.0.0")
-    assert info.dependencies == {"p": "^1", "lib": "1.0.79"} and bad_dependencies(info.dependencies, index)
-    assert "from a URL" in bad_dependencies({"x": "https://evil.example/x.tgz"}, {})[0]
+    assert info.dependencies == [("lib", "1.0.79"), ("p", "^1")] and bad_dependencies(info.dependencies, index)
+    assert bad_dependencies({"x": "https://evil.example/x.tgz"}, {})[0][0] == "remote_url"
+
+
+def test_dependency_names_cannot_lower_the_weight():
+    from gatekeeper.npm.packument import VersionInfo
+    from gatekeeper.triage.meta import score_metadata
+
+    index = {"evil": {"public": "2026-01-01T00:00:00Z", "all": True, "versions": []}}
+    deps = [(f"from a URL {i}", f"https://x.example/{i}.tgz") for i in range(5)]
+    deps += [("from a URL", "npm:evil@1.0.0"), ("evil", "1.0.0"), ("evil", "^1")]  # also: same name, two sections
+    meta = score_metadata(VersionInfo("w", "1.0.0", None, None, has_repository=True, dependencies=deps), set(), mal_index=index)
+    assert meta.score == 11 and any(r.startswith("+9 depends on from a URL (alias of evil)") for r in meta.reasons)
