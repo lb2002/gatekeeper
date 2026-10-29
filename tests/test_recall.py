@@ -49,3 +49,27 @@ def test_bad_dependencies():
     assert "libsignal (alias of @evil/libsignal-node)" in reasons[0] and "placeholder" in reasons[1]
     assert bad_dependencies({"chalk": "5.6.1"}, index, popular={"chalk"})  # pinned to the hijacked version
     assert not bad_dependencies({"@evil/libsignal-node": "1.0.0"}, index, popular={"@evil/libsignal-node"})
+
+
+def test_index_keeps_every_version_and_reads_optional_deps():
+    import io
+    import json as js
+    import zipfile
+
+    from gatekeeper.confirm.malindex import bad_dependencies, build_index
+    from gatekeeper.npm.packument import version_info
+
+    versions = [f"1.0.{i}" for i in range(80)]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("MAL-1.json", js.dumps({"id": "MAL-1", "published": "2026-01-01T00:00:00Z",
+                                            "affected": [{"package": {"ecosystem": "npm", "name": "lib"}, "versions": versions}]}))
+    path = __import__("pathlib").Path(__import__("tempfile").mkdtemp()) / "all.zip"
+    path.write_bytes(buf.getvalue())
+    index = build_index(path)
+    assert bad_dependencies({"lib": "1.0.79"}, index)  # past the old 50-version cap
+    doc = {"name": "w", "versions": {"1.0.0": {"optionalDependencies": {"lib": "1.0.79"}, "peerDependencies": {"p": "^1"}}},
+           "time": {"1.0.0": "2026-10-29T00:00:00Z"}}
+    info = version_info(doc, "1.0.0")
+    assert info.dependencies == {"p": "^1", "lib": "1.0.79"} and bad_dependencies(info.dependencies, index)
+    assert "from a URL" in bad_dependencies({"x": "https://evil.example/x.tgz"}, {})[0]

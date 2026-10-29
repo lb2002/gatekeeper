@@ -106,6 +106,16 @@ def versions_by_time(packument: dict) -> list[tuple[str, datetime]]:
     return out
 
 
+def _all_dependencies(manifest: dict) -> dict[str, str]:
+    """Everything npm may install with this version: optional and peer dependencies are installed too."""
+    out: dict[str, str] = {}
+    for section in ("peerDependencies", "optionalDependencies", "dependencies"):
+        deps = manifest.get(section)
+        if isinstance(deps, dict):
+            out.update({str(k): str(v) for k, v in deps.items()})
+    return out
+
+
 def version_info(packument: dict, version: str, ordered: list[tuple[str, datetime]] | None = None) -> VersionInfo:
     """`ordered` is versions_by_time(packument); pass it when calling this for many versions."""
     name = packument.get("name", "")
@@ -136,7 +146,7 @@ def version_info(packument: dict, version: str, ordered: list[tuple[str, datetim
         integrity=dist.get("integrity"),
         unpacked_size=dist.get("unpackedSize"),
         file_count=dist.get("fileCount"),
-        dependencies={str(k): str(v) for k, v in (manifest.get("dependencies") or {}).items()},
+        dependencies=_all_dependencies(manifest),
         previous_version=previous,
         previous_install_scripts=_hooks(prev_manifest),
         previous_publisher=prev_user.get("name") if isinstance(prev_user, dict) else None,

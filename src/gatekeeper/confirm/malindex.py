@@ -14,6 +14,8 @@ from gatekeeper.confirm.osv import first_public
 
 ALL_ZIP = "https://osv-vulnerabilities.storage.googleapis.com/npm/all.zip"
 _ALIAS = re.compile(r"^npm:(@?[^@]+)(?:@(.*))?$")
+# a tarball fetched from an arbitrary server bypasses the registry (and every check on it)
+_REMOTE = re.compile(r"^https?://", re.IGNORECASE)
 # npm holds these names (Node built-ins) as security placeholders: depending on them is a harmless mistake
 NODE_BUILTINS = {"assert", "buffer", "child_process", "cluster", "crypto", "dgram", "dns", "events", "fs", "http",
                  "http2", "https", "net", "os", "path", "process", "querystring", "readline", "stream", "string_decoder",
@@ -51,7 +53,7 @@ def build_index(zip_path: Path) -> dict[str, dict]:
                 e = index.setdefault(name, {"public": public, "all": False, "versions": []})
                 e["public"] = earliest([e["public"], public]) or public
                 e["all"] = e["all"] or _all_versions(a)
-                e["versions"] = sorted(set(e["versions"]) | set(a.get("versions") or []))[:50]
+                e["versions"] = sorted(set(e["versions"]) | set(a.get("versions") or []))  # never truncated
     return index
 
 
@@ -79,4 +81,6 @@ def bad_dependencies(deps: dict[str, str], index: dict[str, dict], before: str |
             reasons.append(f"depends on {shown}, reported malicious {e['public'][:10]}")
         elif spec.endswith("-security") and target not in NODE_BUILTINS:
             reasons.append(f"depends on {shown} at {spec}, npm's placeholder for removed malware")
+        elif _REMOTE.match(spec):
+            reasons.append(f"depends on {shown} from a URL outside the registry ({spec[:80]})")
     return reasons

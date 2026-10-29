@@ -55,5 +55,5 @@ def score_metadata(
         s.add(1, "no repository field")
     # a clean-looking wrapper that installs known malware: enough to flag on its own (FLAG_TOTAL_THRESHOLD)
     for reason in bad_dependencies(info.dependencies, mal_index or {}, popular=popular)[:3]:
-        s.add(9, reason)
+        s.add(2 if "from a URL" in reason else 9, reason)  # URL deps are sometimes legitimate: scan, do not flag
     return s
