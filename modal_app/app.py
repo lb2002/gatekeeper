@@ -1,4 +1,4 @@
-"""Gatekeeper live monitor on Modal.
+﻿"""Gatekeeper live monitor on Modal.
 
 Deploy:  uv run modal deploy modal_app/app.py
 Test:    uv run modal run modal_app/app.py::poll_once
@@ -316,13 +316,18 @@ def _record_catches() -> None:
         if not conf.get("confirmed"):
             continue
         verdicts = {b: v.get("verdict") for b, v in (it.get("verdicts") or {}).items()}
+        review = (it.get("review") or {}).get("decision")
+        # Queued but judged benign by every model is not a detection, even if OSV lists it later.
+        if not ({"malicious", "suspicious"} & set(verdicts.values()) or review == "malicious"):
+            catches.pop(key, None)
+            continue
         catches[key] = {
             "name": it["name"], "version": it["version"], "published_at": it.get("published_at"),
             "flagged_at": it["seen_at"], "earliest_public": conf.get("earliest_public"),
             "osv_ids": conf.get("osv_ids"), "ghsa_ids": conf.get("ghsa_ids"), "npm_takedown_at": conf.get("npm_takedown_at"),
             "publish_to_flag_min": publish_to_flag_minutes(it.get("published_at"), it["seen_at"]),
             "lead_over_public_min": flag_lead_minutes(it["seen_at"], conf.get("earliest_public")),
-            "model_verdicts": verdicts, "review": (it.get("review") or {}).get("decision"),
+            "model_verdicts": verdicts, "review": review,
             "ledger_digest": (it.get("ledger") or {}).get("digest"),
         }
     state["catches"] = catches
@@ -409,7 +414,7 @@ def backfill_queue() -> dict:
     return {"flagged_records": total, "added": added}
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET, NTFY_SECRET], schedule=modal.Period(hours=1), timeout=900, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET, NTFY_SECRET], schedule=modal.Period(hours=1), timeout=900, cpu=0.5, memory=2048)
 def confirm() -> dict:
     """Hourly: check every queued flag against OSV, GitHub malware advisories and npm takedowns."""
     from gatekeeper.confirm.batch import confirm_many
@@ -1242,7 +1247,7 @@ th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(-
 <div class="wrap"><table><tr><th>package</th><th>published (UTC)</th><th>publish to flag</th><th>lead over public report</th><th>public records</th></tr>{rows}</table></div>
 <h2>Daily volume</h2>
 <div class="wrap"><table><tr><th>day (UTC)</th><th>versions</th><th>scanned</th><th>flagged</th></tr>{days}</table></div>
-<p class="sub">Open source: <a href="{st['repo']}">{st['repo']}</a> · JSON: <a href="stats.json">stats.json</a></p>
+<p class="sub">Open source: <a href="{st['repo']}">{st['repo']}</a> Â· JSON: <a href="stats.json">stats.json</a></p>
 </body></html>"""
 
 
@@ -1338,7 +1343,7 @@ def api():
         best["status"] = "leased"
         best["leased_until"] = now + LEASE_S
         queue[best_key] = best
-        return {"key": best_key, **{k: best[k] for k in QUEUE_FIELDS}}
+        return {"key": best_key, **{k: best.get(k) for k in QUEUE_FIELDS}}  # older items lack newer fields
 
     @web.get("/items", dependencies=[Depends(auth)])
     def items(limit: int = 50) -> list[dict]:
