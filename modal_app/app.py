@@ -433,6 +433,8 @@ FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREW
 BASETEN_DAILY_CAP_USD = 8.0
 BASETEN_TOTAL_CAP_USD = 85.0  # of $100; the rest stays for the time-split evaluation baseline
 BASETEN_SECRET = modal.Secret.from_name("baseten-api", required_keys=["BASETEN_API_KEY"])
+# classic token, public_repo only: opens the automatic OpenSSF reports as lb2002
+REPORTER_SECRET = modal.Secret.from_name("github-reporter", required_keys=["GITHUB_REPORT_TOKEN"])
 # one model on two hosts: they count as a single opinion
 SPARK_OPEN_BACKENDS = ("spark-open-fireworks", "spark-open-baseten")
 FIRST_OPINION_BACKENDS = ("glimmer-local", *SPARK_OPEN_BACKENDS)
@@ -587,7 +589,7 @@ def _run_cloud(
     return stats
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, NTFY_SECRET, REPORTER_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark() -> dict:
     """Second opinions from Muse Spark (Meta Model API) under hard spending caps, after the automatic
     reporting pass. Spark is disabled until state['spark_enabled'] is True."""
