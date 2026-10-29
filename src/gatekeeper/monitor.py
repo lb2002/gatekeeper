@@ -87,6 +87,7 @@ def process_version(
     client: httpx.Client, info: packument.VersionInfo, popular: set[str], now: datetime,
     fast: FastScorer | None = None,
     mal_index: dict[str, dict] | None = None,
+    scan: bool = True,
 ) -> Record:
     meta = score_metadata(info, popular, now=now, mal_index=mal_index)
     rec = Record(
@@ -97,6 +98,9 @@ def process_version(
         meta_score=meta.score,
         meta_reasons=meta.reasons,
     )
+    # past the per-name cap only a strong metadata signal (e.g. a known-malicious dependency) earns a download
+    if not scan and meta.score < FLAG_TOTAL_THRESHOLD:
+        return rec
     if not info.tarball_url or not should_scan(info, meta.score, popular, now):
         return rec
     try:
@@ -148,26 +152,27 @@ def process_names(
     instead of blocking, so a scheduled run never overruns its timeout."""
     now = now or datetime.now(timezone.utc)
 
-    def one(name: str) -> list[Record] | None:
+    def one(name: str) -> tuple[list[Record], bool] | None:
         if deadline is not None and time.monotonic() > deadline:
             return None
         try:
             doc = packument.fetch_packument(client, name)
         except Exception as exc:
-            return [Record(name, "?", None, now.isoformat(), 0, [], error=f"packument: {type(exc).__name__}")]
+            return [Record(name, "?", None, now.isoformat(), 0, [], error=f"packument: {type(exc).__name__}")], False
         if not doc:
-            return []
+            return [], False
         todo = [v for v in packument.recent_versions(doc, window, now=now)
                 if not v.is_security_holder and f"{v.name}@{v.version}" not in seen]
         # Newest first, and only a few per name: a package that pushed 190 versions in a day (CI canaries,
         # spam) otherwise ties up a worker for minutes. Malware rarely comes as more than a handful.
+        # Versions past the cap still get the metadata check (install hooks, dependencies), just no download.
         todo.sort(key=lambda v: v.published_at or now, reverse=True)
         out = []
-        for info in todo[:MAX_VERSIONS_PER_NAME]:
+        for i, info in enumerate(todo):
             if out and deadline is not None and time.monotonic() > deadline:
-                break  # keep what is done; the rest is picked up when the name changes again
-            out.append(process_version(client, info, popular, now, fast, mal_index))
-        return out
+                return out, True  # unfinished: the name is deferred, `seen` skips what is done
+            out.append(process_version(client, info, popular, now, fast, mal_index, scan=i < MAX_VERSIONS_PER_NAME))
+        return out, False
 
     pool = ThreadPoolExecutor(max_workers=workers)
     futures = {pool.submit(one, n): n for n in names}
@@ -181,9 +186,11 @@ def process_names(
             exc = fut.exception()
             records.append(Record(name, "?", None, now.isoformat(), 0, [], error=f"process: {type(exc).__name__}"))
             continue
-        rs = fut.result() if fut in done else None
-        if rs is None:
+        res = fut.result() if fut in done else None
+        if res is None:
             deferred.append(name)
         else:
-            records.extend(rs)
+            records.extend(res[0])
+            if res[1]:
+                deferred.append(name)
     return records, deferred
