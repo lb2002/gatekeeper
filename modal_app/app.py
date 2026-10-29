@@ -589,13 +589,211 @@ def _run_cloud(
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark() -> dict:
-    """Second opinions from Muse Spark (Meta Model API) under hard spending caps.
-    Disabled until state['spark_enabled'] is True."""
+    """Second opinions from Muse Spark (Meta Model API) under hard spending caps, after the automatic
+    reporting pass. Spark is disabled until state['spark_enabled'] is True."""
     _watchdog()
+    items = dict(queue.items())
+    reported = _autoreport(items, budget_s=50)
     if not state.get("spark_enabled", False):
-        return {"enabled": False}
-    keys = _spark_candidates(dict(queue.items()), datetime.now(timezone.utc))[:SPARK_PER_RUN]
-    return _run_cloud("spark", keys, "spark_spend", SPARK_DAILY_CAP_USD, SPARK_TOTAL_CAP_USD, workers=4, budget_s=140)
+        return {"enabled": False, **reported}
+    keys = _spark_candidates(items, datetime.now(timezone.utc))[:SPARK_PER_RUN]
+    return _run_cloud("spark", keys, "spark_spend", SPARK_DAILY_CAP_USD, SPARK_TOTAL_CAP_USD, workers=4, budget_s=110) | reported
+
+
+def _autoreport(items: dict, budget_s: float) -> dict:
+    """Report packages that pass every check in gatekeeper.report.auto to OpenSSF, without a human.
+    Off unless state['autoreport_enabled']; mode 'dry' does everything except the GitHub writes.
+    Never raises: a failure here must not stop the Spark cron (and fails closed: nothing is sent)."""
+    if not state.get("autoreport_enabled", False):
+        return {"autoreport": "off"}
+    try:
+        return _autoreport_run(items, budget_s)
+    except Exception as exc:
+        print(f"autoreport failed: {type(exc).__name__}: {exc}"[:300])
+        return {"autoreport": "error"}
+
+
+# Results that cannot change on a later run. Anything else (network errors, the daily limit) is
+# not stored, so the item is evaluated again on the next run.
+AUTOREPORT_FINAL = (
+    "no longer on the registry", "version no longer on the registry", "popular package", "package older than 7 days",
+    "too many versions", "archive integrity mismatch", "archive unreadable", "install-time code does not meet the static check",
+    "already in OSV", "a pull request already exists", "package already reported",
+)
+JUDGE_NAMES = {"spark": "Muse Spark", "spark-open": "Muse Spark Open", "glimmer-local": "Muse Glimmer"}
+
+
+def _github():
+    import httpx
+
+    return httpx.Client(base_url="https://api.github.com", timeout=20, headers={
+        "Authorization": f"Bearer {os.environ['GITHUB_REPORT_TOKEN']}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"})
+
+
+def _autoreport_run(items: dict, budget_s: float) -> dict:
+    from gatekeeper.report import auto
+
+    started = time.monotonic()
+    live = state.get("autoreport_mode", "dry") == "live" and bool(os.environ.get("GITHUB_REPORT_TOKEN"))
+    if live and _autoreport_breaker():
+        return {"autoreport": "stopped"}
+    reports = state.get("autoreports", {})
+    by_name: dict[str, list] = {}
+    for key, it in items.items():
+        prev = it.get("autoreport")
+        if prev and not (live and prev.get("result") == "dry-run"):
+            continue
+        if it.get("low_priority") or (it.get("review") or {}).get("decision") not in (None, "malicious"):
+            continue
+        ok, judges = auto.models_agree(it.get("verdicts"))
+        if ok:  # otherwise re-checked next run, when more verdicts may have arrived
+            by_name.setdefault(it["name"], []).append((key, it, judges))
+    done = []
+    for name, entries in by_name.items():
+        if time.monotonic() - started > budget_s:
+            break
+        if name in reports:  # reported or pending: later versions are never added automatically
+            marks = {key: {"result": "skipped", "reason": "package already reported"} for key, _, _ in entries}
+        else:
+            try:
+                marks = _autoreport_package(name, entries, live)
+            except Exception as exc:  # network trouble: everything is evaluated again next run
+                print(f"autoreport error on {name}: {type(exc).__name__}: {exc}"[:300])
+                continue
+        for key, result in marks.items():
+            if result["result"] == "skipped" and result["reason"] not in AUTOREPORT_FINAL:
+                continue
+            fresh = queue.get(key, None)
+            if fresh is not None:
+                fresh["autoreport"] = {"at": datetime.now(timezone.utc).isoformat(), **result}
+                queue[key] = fresh
+            done.append({"key": key, **result})
+    volume.commit()
+    return {"autoreport": "live" if live else "dry", "autoreport_done": done}
+
+
+def _autoreport_breaker() -> bool:
+    """Stop all automatic reporting as soon as OpenSSF closes one of our reports without merging it.
+    Checked every 30 minutes; a GitHub error raises, which skips reporting for this run."""
+    from gatekeeper.report import auto
+
+    now = datetime.now(timezone.utc)
+    last = state.get("autoreport_breaker_at")
+    if last and now - datetime.fromisoformat(last) < timedelta(minutes=30):
+        return False
+    urls = [r["pr"] for r in state.get("autoreports", {}).values() if r.get("pr")] + state.get("reports_watch", [])
+    with _github() as gh:
+        for url in urls:
+            r = gh.get(f"/repos/{auto.UPSTREAM}/pulls/{url.rsplit('/', 1)[-1]}")
+            r.raise_for_status()
+            pr = r.json()
+            if pr["state"] == "closed" and not pr.get("merged_at"):
+                state["autoreport_enabled"] = False
+                _notify("Gatekeeper: automatic reporting stopped",
+                        f"OpenSSF closed {url} without merging it. Nothing is reported automatically until you have "
+                        "looked at it and switched it on again.", click=url, tags="no_entry")
+                return True
+    state["autoreport_breaker_at"] = now.isoformat()
+    return False
+
+
+def _autoreport_package(name: str, entries: list, live: bool) -> dict:
+    """Decide and (in live mode) submit one report for all qualifying versions of `name`.
+    Returns {queue key: result}. Raises on network errors (the caller retries next run)."""
+    import base64
+    import hashlib
+    import tarfile
+
+    from gatekeeper.confirm import osv as osv_api
+    from gatekeeper.npm import feed, packument
+    from gatekeeper.npm.tarball import ArchiveTooLarge, read_tarball
+    from gatekeeper.popular import load_popular
+    from gatekeeper.report import auto
+
+    now = datetime.now(timezone.utc)
+    day = f"{now:%Y-%m-%d}"
+
+    def skip(reason: str, keys=None) -> dict:
+        return {k: {"result": "skipped", "reason": reason} for k in (keys or [k for k, _, _ in entries])}
+
+    marks: dict = {}
+    evidence = []
+    with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
+        doc = packument.fetch_packument(client, name)
+        if not doc:
+            return skip("no longer on the registry")
+        ok, why = auto.package_is_new(doc, load_popular(DATA / "popular.txt"), now)
+        if not ok:
+            return skip(why)
+        if any(v.get("id", "").startswith("MAL-") for v in osv_api.query(client, name)):
+            return skip("already in OSV")
+        for key, it, _ in entries:
+            version = it["version"]
+            if version not in (doc.get("versions") or {}):
+                marks |= skip("version no longer on the registry", [key])
+                continue
+            info = packument.version_info(doc, version)
+            resp = client.get(info.tarball_url)
+            resp.raise_for_status()
+            if not (info.integrity or "").startswith("sha512-") or \
+                    base64.b64encode(hashlib.sha512(resp.content).digest()).decode() != info.integrity[7:]:
+                marks |= skip("archive integrity mismatch", [key])
+                continue
+            try:
+                pkg = read_tarball(resp.content)
+            except (ArchiveTooLarge, tarfile.TarError, EOFError, OSError):
+                marks |= skip("archive unreadable", [key])
+                continue
+            ev = auto.install_evidence(pkg, version)
+            if ev is None:
+                marks |= skip("install-time code does not meet the static check", [key])
+                continue
+            evidence.append((key, it, ev))
+    if not evidence:
+        return marks
+    ev_keys = [k for k, _, _ in evidence]
+    counts = state.get("autoreport_days", {})
+    if counts.get(day, 0) >= auto.DAILY_LIMIT:
+        return marks | skip("daily limit reached", ev_keys)
+    judge_ids = sorted({j for _, it, _ in evidence for j in auto.judge_verdicts(it.get("verdicts"))})
+    judges = ", ".join(JUDGE_NAMES.get(j, j) for j in judge_ids)
+    published = {it["version"]: it.get("published_at") or "" for _, it, _ in evidence}
+    osv_doc = auto.build_osv(name, [ev for _, _, ev in evidence], published, judges, now)
+    if not live:
+        _append_jsonl(DATA / "autoreport" / "dry" / f"{day}.jsonl", [{"name": name, "versions": list(published), "osv": osv_doc}])
+        return marks | {k: {"result": "dry-run", "reason": judges} for k in ev_keys}
+
+    # last look at the live queue: a newer dissenting verdict or a human review wins
+    for key in ev_keys:
+        fresh = queue.get(key, None) or {}
+        if (fresh.get("review") or {}).get("decision") not in (None, "malicious") or not auto.models_agree(fresh.get("verdicts"))[0]:
+            return marks
+    with _github() as gh:
+        found = auto.existing_pr(gh, name)
+        if found:
+            return marks | {k: {"result": "skipped", "reason": "a pull request already exists", "pr": found} for k in ev_keys}
+        reports = state.get("autoreports", {})
+        reports[name] = {"pending": now.isoformat(), "versions": list(published)}  # blocks any retry from submitting twice
+        state["autoreports"] = reports
+        try:
+            res = auto.submit(gh, osv_doc, name)
+        except Exception:
+            _notify(f"Gatekeeper: automatic report for {name} failed",
+                    "It stopped partway and will not be retried. Check https://github.com/lb2002/malicious-packages/branches")
+            raise
+    try:  # bookkeeping must never trigger a second submission
+        reports = state.get("autoreports", {})
+        reports[name] = {**res, "versions": list(published), "at": now.isoformat()}
+        state["autoreports"] = reports
+        counts[day] = counts.get(day, 0) + 1
+        state["autoreport_days"] = counts
+        _append_jsonl(DATA / "autoreport" / f"{day}.jsonl", [{"name": name, "pr": res["pr"], "osv": osv_doc}])
+    except Exception as exc:
+        print(f"autoreport bookkeeping error for {name}: {type(exc).__name__}: {exc}"[:300])
+    _notify(f"Gatekeeper: reported {name} to OpenSSF", f"{res['pr']}\nVersions: {', '.join(published)}\nJudges: {judges}\n"
+            "No action needed. To retract, close the PR.", click=res["pr"], tags="rotating_light")
+    return marks | {k: {"result": "reported", "pr": res["pr"]} for k in ev_keys}
 
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET, BASETEN_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
@@ -808,6 +1006,16 @@ def set_lg(enabled: bool) -> dict:
 def set_fireworks(enabled: bool) -> dict:
     state["fireworks_enabled"] = bool(enabled)
     return {"fireworks_enabled": state["fireworks_enabled"], "spend": state.get("fireworks_spend", None)}
+
+
+@app.function(image=image, timeout=60)
+def set_autoreport(enabled: bool, mode: str = "dry") -> dict:
+    """mode 'dry' records what would be reported; 'live' opens OpenSSF pull requests."""
+    assert mode in ("dry", "live")
+    state["autoreport_enabled"] = bool(enabled)
+    state["autoreport_mode"] = mode
+    return {"autoreport_enabled": state["autoreport_enabled"], "autoreport_mode": mode,
+            "reports": state.get("autoreports", {}), "per_day": state.get("autoreport_days", {})}
 
 
 @app.function(image=image, timeout=60)
