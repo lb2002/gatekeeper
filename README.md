@@ -29,11 +29,16 @@ Every verdict must cite excerpt lines that exist in the bundle; verdicts that ci
 ### Install guard decisions
 
 ```
-npm install X  ->  npm view (read-only) -> download tarball, verify sha512 -> read in memory
-  rules clean AND local classifier clean   -> install (seconds)
+npm install X  ->  npm view (read-only)
+  X (or a dependency of X) is on OSV's list of 222k malicious npm packages -> blocked (offline, instant)
+  -> download tarball, verify sha512 -> read in memory
+  rules clean AND local classifier clean   -> clean
   otherwise                                -> Muse Glimmer on your machine judges, citing lines
   malicious, or suspicious with confidence >= 0.6, or any error -> blocked, nothing installed
+  clean, but X was published less than 24 h ago -> held, with the newest older version suggested
 ```
+
+The waiting period comes from OSV itself: of 785 npm malware reports in October 2026, 82% were public within an hour of the package's publication and 89% within a day, so a fresh version is the riskiest one to install. A model catches what is new; the waiting period lets the rest of the ecosystem catch what the model misses. `GK_MIN_AGE_HOURS=0` turns it off; `--gk-allow` overrides one install.
 
 Decisions are cached per exact tarball integrity. The classifier ships as plain JSON numbers (no pickle), so loading it cannot run code.
 
