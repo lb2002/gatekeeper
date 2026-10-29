@@ -23,6 +23,9 @@ from gatekeeper.triage.meta import score_metadata
 RECENT_WINDOW = timedelta(hours=6)  # versions considered "new" for a changed package
 NEW_PACKAGE_WINDOW = timedelta(hours=72)
 SCAN_META_THRESHOLD = 2
+# Updates of small packages are scanned too: live recall showed malware pushed as an update of a
+# young, little-used package (no install hook, so no metadata signal) went unscanned.
+SMALL_PACKAGE_VERSIONS = 20
 FLAG_CONTENT_THRESHOLD = 6
 FLAG_TOTAL_THRESHOLD = 9
 
@@ -56,7 +59,8 @@ class Record:
 
 def should_scan(info: packument.VersionInfo, meta_score: int, popular: set[str], now: datetime) -> bool:
     is_new_package = info.package_created_at is not None and now - info.package_created_at <= NEW_PACKAGE_WINDOW
-    return is_new_package or meta_score >= SCAN_META_THRESHOLD or info.name in popular
+    is_small = info.version_count is not None and info.version_count <= SMALL_PACKAGE_VERSIONS
+    return is_new_package or is_small or meta_score >= SCAN_META_THRESHOLD or info.name in popular
 
 
 # (name, version, bundle text, rules) -> (risk in [0, 1], flag?) from the fast first-stage classifier

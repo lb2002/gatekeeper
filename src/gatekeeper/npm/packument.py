@@ -34,6 +34,7 @@ class VersionInfo:
     previous_install_scripts: dict[str, str] = field(default_factory=dict)
     previous_publisher: str | None = None
     previous_maintainers: list[str] = field(default_factory=list)
+    version_count: int | None = None
 
     @property
     def is_security_holder(self) -> bool:
@@ -140,6 +141,7 @@ def version_info(packument: dict, version: str, ordered: list[tuple[str, datetim
         previous_install_scripts=_hooks(prev_manifest),
         previous_publisher=prev_user.get("name") if isinstance(prev_user, dict) else None,
         previous_maintainers=_people(prev_manifest.get("maintainers")),
+        version_count=len(ordered),
     )
 
 

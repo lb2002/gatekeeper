@@ -127,6 +127,81 @@ def eval_glimmer(split: str = "test", limit: int = 0, parallel: int = 8, tag: st
     return stats
 
 
+@app.function(
+    image=cpu_image,
+    volumes={str(DATA): data_volume},
+    secrets=[modal.Secret.from_name("meta-api"), modal.Secret.from_name("fireworks-api"), modal.Secret.from_name("baseten-api")],
+    timeout=3 * 3600,
+    cpu=1.0,
+    memory=2048,
+)
+def eval_cloud(backend: str = "spark", split: str = "test", limit: int = 0, parallel: int = 6, max_usd: float = 12.0) -> dict:
+    """Zero-shot Muse Spark (Meta API) or Muse Spark Open (Fireworks / Baseten) on the same bundles.
+    Resumable: rows already in the output file are skipped. Stops starting new calls at `max_usd`.
+    Outputs are used for evaluation only, never as training data."""
+    import threading
+
+    from gatekeeper.evidence.bundle import RenderedBundle
+    from gatekeeper.models import backends
+
+    fn = {"spark": backends.classify_spark, "spark-open-fireworks": backends.classify_spark_open_fireworks,
+          "spark-open-baseten": backends.classify_spark_open_baseten}[backend]
+    out_path = DATA / "eval" / f"{backend}-zeroshot-{split}.jsonl"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    done = set()
+    spent = 0.0
+    if out_path.exists():
+        for line in out_path.read_text(encoding="utf-8").splitlines():
+            p = json.loads(line)
+            if p["verdict"] is not None:
+                done.add((p["name"], p["version"], p["label"]))
+                spent += p.get("cost_usd", 0.0)
+        # keep only usable rows; failed ones are retried
+        kept = [l for l in out_path.read_text(encoding="utf-8").splitlines() if json.loads(l)["verdict"] is not None]
+        out_path.write_text("".join(l + "\n" for l in kept), encoding="utf-8")
+    rows = [r for r in _load(split, limit or None) if (r["name"], r["version"], r["label"]) not in done]
+    lock = threading.Lock()
+    started = time.time()
+
+    def one(r: dict) -> dict | None:
+        nonlocal spent
+        with lock:
+            if spent >= max_usd:
+                return None
+        try:
+            res = fn(RenderedBundle.from_record(r), timeout=180)
+        except Exception as exc:
+            return {"name": r["name"], "version": r["version"], "label": r["label"], "verdict": None,
+                    "errors": [f"{type(exc).__name__}: {exc}"[:200]], "cost_usd": 0.0}
+        v = res.verdict
+        with lock:
+            spent += res.cost_usd
+        return {
+            "name": r["name"], "version": r["version"], "label": r["label"], "kind": r["kind"],
+            "hard_negative": r.get("hard_negative", False), "content_score": r["content_score"],
+            "verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
+            "category": v.category.value if v else None, "injection": v.injection_attempt_observed if v else None,
+            "errors": res.errors, "latency_s": res.latency_s, "input_tokens": res.input_tokens,
+            "output_tokens": res.output_tokens, "cost_usd": res.cost_usd,
+        }
+
+    n = 0
+    with ThreadPoolExecutor(max_workers=parallel) as ex, out_path.open("a", encoding="utf-8") as fh:
+        for rec in ex.map(one, rows):
+            if rec is None:
+                continue
+            fh.write(json.dumps(rec) + "\n")
+            n += 1
+            if n % 50 == 0:
+                fh.flush()
+                data_volume.commit()
+                print(f"{n}/{len(rows)} done, ${spent:.2f}, {time.time() - started:.0f}s")
+    data_volume.commit()
+    stats = {"backend": backend, "new_rows": n, "todo": len(rows), "spent_usd": round(spent, 2), "seconds": round(time.time() - started)}
+    print(json.dumps(stats))
+    return stats
+
+
 @app.function(image=cpu_image, volumes={str(DATA): data_volume}, timeout=600)
 def report(split: str = "test") -> dict:
     """Metrics for every prediction file of this split plus the rules baseline."""

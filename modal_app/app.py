@@ -153,6 +153,12 @@ def _run_poll() -> dict:
         _append_jsonl(DATA / "live_samples" / f"{day}.jsonl", keep)
         state["live_samples"] = collected + len(keep)
     events = [r if r["flagged"] else {k: v for k, v in r.items() if k not in ("bundle", "excerpts")} for r in rows]
+    # evidence text of every scanned version (no archives): when OSV later reports a package we did
+    # not flag, its bundle is here, so misses can be studied and become fresh training/test data
+    kept = [{k: r.get(k) for k in ("name", "version", "published_at", "seen_at", "meta_score", "content_score", "rules",
+                                  "fast_risk", "flagged", "bundle")} for r in rows if r.get("bundle")]
+    if kept:
+        _append_jsonl(DATA / "bundles" / day / f"{run_id}.jsonl", kept)
     _append_jsonl(DATA / "events" / day / f"{run_id}.jsonl", events)
     flagged = [r for r in rows if r["flagged"]]
     if flagged:
@@ -412,6 +418,7 @@ def confirm() -> dict:
     _record_catches()
     revealed = _reveal_confirmed()
     volume.commit()
+    live_recall.spawn()  # separate container: reads all event logs and the OSV feed
     stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error,
              "ledger_revealed": revealed}
     state["last_confirm"] = {"at": now.isoformat(), **stats}
@@ -1048,6 +1055,46 @@ def rebuild_public_stats() -> dict:
     return {"daily": daily, "catches": len(state.get("catches", {}))}
 
 
+@app.function(image=image, volumes={str(DATA): volume}, timeout=900, cpu=1.0, memory=2048)
+def live_recall() -> dict:
+    """Of the npm packages OSV reported as malicious since the monitor started: how many we flagged
+    (any stage), how fast, and what the misses looked like. Spawned by `confirm` every hour."""
+    from gatekeeper.confirm import recall
+    from gatekeeper.npm import feed
+
+    volume.reload()
+    start = datetime.fromisoformat(min(state.get("daily", {"2026-10-27": 0})) + "T00:00:00+00:00")
+    with feed.make_client(timeout=30) as client:
+        vulns = recall.fetch_recent(client, start)
+    names = {name for v in vulns for name, _ in recall._targets(v)}
+    seen: dict[str, list[dict]] = {}
+    for path in sorted((DATA / "events").glob("*/*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip() and any(n in line for n in names):  # cheap prefilter before parsing
+                r = json.loads(line)
+                if r.get("name") in names:
+                    seen.setdefault(r["name"], []).append({k: r.get(k) for k in (
+                        "version", "published_at", "seen_at", "scanned", "flagged", "meta_score", "content_score", "error")})
+    flags: dict[str, str] = {}
+    salts = DATA / "ledger" / "salts.jsonl"
+    if salts.exists():
+        for line in salts.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                row = json.loads(line)
+                flags.setdefault(row["key"], json.loads(row["line"])["flagged_at"])
+    for key, it in queue.items():
+        flags.setdefault(key, it["seen_at"])
+    outcomes = [o for v in vulns for o in recall.classify(v, seen, flags, start)]
+    result = {"at": datetime.now(timezone.utc).isoformat(), "since": start.isoformat(), **recall.summarize(outcomes),
+              "outcomes": [o.as_dict() for o in sorted(outcomes, key=lambda o: o.first_public or "")]}
+    state["recall"] = result
+    out = DATA / "recall" / f"{datetime.now(timezone.utc):%Y-%m-%d}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, indent=1), encoding="utf-8")
+    volume.commit()
+    return result
+
+
 REPO_URL = "https://github.com/lb2002/gatekeeper"
 LEDGER_URL = "https://github.com/lb2002/gatekeeper-ledger"
 
@@ -1076,6 +1123,7 @@ def _public_stats() -> dict:
         "median_publish_to_flag_min": _median([c["publish_to_flag_min"] for c in first]),
         "flagged_before_public_report": sum(1 for c in first if (c.get("lead_over_public_min") or 0) > 0),
         "median_lead_over_public_min": _median([c["lead_over_public_min"] for c in first if (c.get("lead_over_public_min") or 0) > 0]),
+        "live_recall": {k: v for k, v in (state.get("recall") or {}).items() if k != "outcomes"},
         "catches": catches,
         "repo": REPO_URL,
         "ledger": LEDGER_URL,
