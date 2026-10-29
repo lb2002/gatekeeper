@@ -1297,6 +1297,23 @@ def api():
         flags are never named here (they appear only as salted hashes in the ledger)."""
         return _public_stats()
 
+    gz_cache: dict = {}
+
+    @web.get("/osv/mal_npm.json")
+    def mal_index():
+        """Public, no auth: the npm names OSV lists as malicious (built daily from OSV's all.zip, Apache-2.0
+        data from OpenSSF malicious-packages), for the install guard's offline check."""
+        import gzip
+
+        from fastapi import Response
+
+        volume.reload()
+        mtime = MAL_INDEX.stat().st_mtime
+        if gz_cache.get("mtime") != mtime:
+            gz_cache.update(mtime=mtime, body=gzip.compress(MAL_INDEX.read_bytes(), 6))
+        return Response(gz_cache["body"], media_type="application/json",
+                        headers={"Content-Encoding": "gzip", "Cache-Control": "public, max-age=3600"})
+
     @web.get("/", response_class=HTMLResponse)
     def public_page() -> str:
         return _public_html(_public_stats())

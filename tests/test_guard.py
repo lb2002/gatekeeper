@@ -110,3 +110,34 @@ def test_brand_new_version_is_held_with_an_older_suggestion(monkeypatch, tmp_pat
     d = core.check_spec(["npm"], "lib", min_age_hours=24)
     assert not d.allowed and d.kind == "too_new" and d.suggestion == "lib@1.9.0"
     assert core.check_spec(["npm"], "lib", min_age_hours=0).allowed
+
+
+def test_online_osv_hit_blocks_even_with_an_empty_local_list(monkeypatch, tmp_path):
+    import httpx
+
+    meta = {"name": "fresh-evil", "version": "1.0.0", "integrity": None, "time": {}, "dependencies": []}
+    core = _fake_install(monkeypatch, tmp_path, meta)
+    monkeypatch.setattr(core, "OSV_ONLINE", True)
+
+    def fake_post(url, json, timeout):
+        assert json == {"package": {"name": "fresh-evil", "ecosystem": "npm"}, "version": "1.0.0"}
+        return httpx.Response(200, json={"vulns": [{"id": "MAL-2026-1", "published": "2026-10-30T00:00:00Z"}]},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(core.httpx, "post", fake_post)
+    d = core.check_spec(["npm"], "fresh-evil")
+    assert not d.allowed and d.kind == "osv" and "MAL-2026-1" in d.reason
+
+
+def test_offline_osv_check_fails_open_to_the_other_checks(monkeypatch, tmp_path):
+    import httpx
+
+    meta = {"name": "lib", "version": "1.0.0", "integrity": None, "time": {}, "dependencies": []}
+    core = _fake_install(monkeypatch, tmp_path, meta)
+    monkeypatch.setattr(core, "OSV_ONLINE", True)
+
+    def no_network(*a, **k):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(core.httpx, "post", no_network)
+    assert core.check_spec(["npm"], "lib", min_age_hours=0).allowed

@@ -211,14 +211,38 @@ def guard_update_model() -> None:
 
 
 @guard_app.command("update-osv")
-def guard_update_osv() -> None:
-    """Download the list of npm packages OSV reports as malicious (~20 MB, refreshed daily by the monitor)."""
-    import subprocess
+def guard_update_osv(
+    from_osv: bool = typer.Option(False, "--from-osv", help="Build the list yourself from OSV's npm/all.zip (~220 MB) "
+                                  "instead of downloading the monitor's daily copy (~3 MB)"),
+) -> None:
+    """Download the list of npm packages OSV reports as malicious, for the guard's offline check."""
+    import json
+    import tempfile
+    from pathlib import Path
 
-    from gatekeeper.guard.core import MAL_INDEX_FILE, load_mal_index
+    import httpx
+
+    from gatekeeper.confirm.malindex import ALL_ZIP, build_index
+    from gatekeeper.guard.core import MAL_INDEX_FILE, MAL_INDEX_URL, load_mal_index
 
     MAL_INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["modal", "volume", "get", "--force", "gatekeeper-data", "osv/mal_npm.json", str(MAL_INDEX_FILE)], check=True)
+    tmp = MAL_INDEX_FILE.with_suffix(".tmp")
+    if from_osv:
+        with tempfile.TemporaryDirectory() as d:
+            zpath = Path(d) / "all.zip"
+            with httpx.stream("GET", ALL_ZIP, timeout=300, follow_redirects=True) as resp, zpath.open("wb") as fh:
+                resp.raise_for_status()
+                for chunk in resp.iter_bytes(1 << 20):
+                    fh.write(chunk)
+            tmp.write_text(json.dumps(build_index(zpath)), encoding="utf-8")
+    else:
+        resp = httpx.get(MAL_INDEX_URL, timeout=120, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()  # parse before replacing the old list
+        if not isinstance(data, dict) or len(data) < 1000:
+            raise typer.Exit(f"unexpected index from {MAL_INDEX_URL}")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(MAL_INDEX_FILE)
     console.print(f"known malicious npm packages: {len(load_mal_index()):,}", markup=False)
 
 
@@ -230,7 +254,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, load_fast_model, package_specs
+    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, index_age_days, load_fast_model, package_specs
 
     args = [a for a in ctx.args if a != "--"]
     cfg = shim.config()
@@ -239,6 +263,10 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     specs = package_specs(tool, args)
     if specs and not allow:
         fast_model = load_fast_model()
+        stale = index_age_days()
+        if stale is None or stale > 3:
+            console.print("[yellow]gatekeeper[/] the offline OSV malware list is "
+                          + ("missing" if stale is None else f"{stale:.0f} days old") + "; run `gk guard update-osv`", highlight=False)
         for spec in specs:
             console.print(f"[cyan]gatekeeper[/] checking {spec} ...", highlight=False)
             try:

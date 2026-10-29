@@ -37,6 +37,8 @@ MAL_INDEX_FILE = BUSY_FILE.parent / "mal_npm.json"  # `gk guard update-osv`: npm
 # Versions younger than this are held back even when every check is clean: 82% of October's npm malware
 # was publicly reported within an hour of publication, 89% within a day (OSV, 785 entries).
 MIN_AGE_HOURS = float(os.environ.get("GK_MIN_AGE_HOURS", "24"))
+MAL_INDEX_URL = os.environ.get("GK_MAL_INDEX_URL", "https://lb2002--gatekeeper-api.us-east.modal.run/osv/mal_npm.json")
+OSV_ONLINE = os.environ.get("GK_OFFLINE", "") != "1"  # GK_OFFLINE=1: never contact OSV, local list only
 
 
 def _cache_key(meta: dict) -> str | None:
@@ -130,6 +132,34 @@ def reported_malicious(meta: dict, index: dict) -> str | None:
     if e and (e["all"] or meta["version"] in e["versions"]):
         return f"{meta['name']}@{meta['version']} is listed as malicious in OSV (reported {e['public'][:10]})"
     return None
+
+
+def osv_online(meta: dict, timeout: float = 4.0) -> str | None:
+    """Ask OSV directly about this exact version: the local list can be a day old, and most reports land
+    in the first days after publication. Sends only the package name and version. None when offline."""
+    from gatekeeper.confirm.osv import OSV_QUERY_URL, first_public
+
+    if not OSV_ONLINE:
+        return None
+    try:
+        resp = httpx.post(OSV_QUERY_URL, json={"package": {"name": meta["name"], "ecosystem": "npm"}, "version": meta["version"]},
+                          timeout=timeout)
+        resp.raise_for_status()
+        vulns = (resp.json() or {}).get("vulns") or []
+    except (httpx.HTTPError, ValueError):
+        return None
+    mal = [v for v in vulns if str(v.get("id", "")).startswith("MAL-") and not v.get("withdrawn")]
+    if not mal:
+        return None
+    when = (first_public(mal[0]) or mal[0].get("published") or "")[:10]
+    return f"{meta['name']}@{meta['version']} is listed as malicious in OSV ({mal[0]['id']}, {when})"
+
+
+def index_age_days() -> float | None:
+    try:
+        return (time.time() - MAL_INDEX_FILE.stat().st_mtime) / 86400
+    except OSError:
+        return None
 
 
 def age_hours(meta: dict, now: float | None = None) -> float | None:
@@ -232,7 +262,7 @@ def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, us
     started = time.monotonic()
     meta = resolve(npm_cmd, spec)
     index = load_mal_index()
-    listed = reported_malicious(meta, index)
+    listed = reported_malicious(meta, index) or osv_online(meta)
     if listed:
         return Decision(spec, False, listed, meta["name"], meta["version"], kind="osv", seconds=time.monotonic() - started)
     bad = [r for k, r in bad_dependencies(meta.get("dependencies") or [], index) if k in (KNOWN_MALICIOUS, TAKEN_DOWN)]
@@ -246,7 +276,7 @@ def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, us
     if decision.allowed and limit > 0 and age is not None and age < limit:
         older = older_version(meta, limit)
         return Decision(spec, False, f"published {age:.1f} h ago; Gatekeeper holds versions newer than {limit:.0f} h "
-                        f"(most npm malware is reported within hours). Checks so far: {decision.reason}",
+                        f"(about 58% of npm malware is publicly reported within a day). Checks so far: {decision.reason}",
                         meta["name"], meta["version"], decision.verdict, decision.rules, time.monotonic() - started,
                         kind="too_new", suggestion=f"{meta['name']}@{older}" if older else "")
     return decision

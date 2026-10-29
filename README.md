@@ -30,7 +30,8 @@ Every verdict must cite excerpt lines that exist in the bundle; verdicts that ci
 
 ```
 npm install X  ->  npm view (read-only)
-  X (or a dependency of X) is on OSV's list of 222k malicious npm packages -> blocked (offline, instant)
+  X is listed as malicious by OSV (asked live; offline: a local copy of OSV's 222k malicious npm names),
+    or a dependency of X is on that list                      -> blocked
   -> download tarball, verify sha512 -> read in memory
   rules clean AND local classifier clean   -> clean
   otherwise                                -> Muse Glimmer on your machine judges, citing lines
@@ -38,7 +39,11 @@ npm install X  ->  npm view (read-only)
   clean, but X was published less than 24 h ago -> held, with the newest older version suggested
 ```
 
-The waiting period comes from OSV itself: of 785 npm malware reports in October 2026, 82% were public within an hour of the package's publication and 89% within a day, so a fresh version is the riskiest one to install. A model catches what is new; the waiting period lets the rest of the ecosystem catch what the model misses. `GK_MIN_AGE_HOURS=0` turns it off; `--gk-allow` overrides one install.
+The waiting period is there because the rest of the ecosystem catches up quickly. Of 742 npm malware reports in OSV for October 2026, measured from the npm publish time of the malicious version to the report's import into OSV, 33% were public within an hour, 58% within a day, 74% within three days (median 10 h). A model catches what is new; the waiting period plus the live OSV lookup catch much of what the model misses. As a rough estimate (assuming the two are independent), the model's ~57% plus a 24 h wait block about 4 in 5 malicious versions, and a 72 h wait (`GK_MIN_AGE_HOURS=72`) about 9 in 10. `GK_MIN_AGE_HOURS=0` turns the wait off, `--gk-allow` overrides one install, and `GK_OFFLINE=1` never contacts OSV (the live lookup sends only the package name and version).
+
+A note on OSV timestamps: an entry's `published` field is set by the reporter and is often backdated to the package's own publish time (301 of the 742 entries above look like that), so it says nothing about when the warning became public. Gatekeeper uses the import time into OSV (or the first commit to OpenSSF malicious-packages) everywhere, including for its own lead times below.
+
+`gk guard update-osv` refreshes the offline list (a 3 MB copy the monitor rebuilds daily; `--from-osv` builds it yourself from OSV's `npm/all.zip`).
 
 Decisions are cached per exact tarball integrity. The classifier ships as plain JSON numbers (no pickle), so loading it cannot run code.
 
@@ -46,9 +51,25 @@ Decisions are cached per exact tarball integrity. The classifier ships as plain 
 
 A flag is never named before it is confirmed. Instead, within two minutes, the monitor publishes `sha256(salt || package, version, flag time)` to [gatekeeper-ledger](https://github.com/lb2002/gatekeeper-ledger), one new file per batch, each with an [OpenTimestamps](https://opentimestamps.org) proof anchored in Bitcoin. Once OSV, GitHub or npm independently confirm a detection, its salt is published and anyone can run `gk verify-flag <salt> <line>` and `ots verify` to check that we had it first.
 
-## First results (Oct 27-28, 2026)
+## Live results (Oct 27-30, 2026)
 
-- `@webapp-shared/login-vmok` (5 versions, dependency confusion beaconing host data to a raw IP): flagged 1-1.6 minutes after publication and 13 hours before the public report ([MAL-2026-18356](https://osv.dev/vulnerability/MAL-2026-18356), [GHSA-cmqx-q58q-9m8p](https://github.com/advisories/GHSA-cmqx-q58q-9m8p)). The flag time comes from our own logs; from now on flags are also committed to a public ledger.
+In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **13 packages (30 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm. Median time from npm publication to our flag: about 1 minute. **10 of the 13 were flagged before any public report, by a median of 23 hours.**
+
+| Package (versions) | What it does | Flagged after publish | Ahead of the public report |
+|---|---|---|---|
+| `@webapp-shared/login-vmok` (5) | dependency confusion: postinstall beacons host data to a raw IP | 1.0-1.6 min | 13 h ([MAL-2026-18356](https://osv.dev/vulnerability/MAL-2026-18356)) |
+| `identity-two-factor` | dependency confusion aimed at one company: postinstall POSTs host, user and CI data to webhook.site | 1.8 min | 26 h ([MAL-2026-18367](https://osv.dev/vulnerability/MAL-2026-18367)) |
+| `spectral-net-probe` | postinstall calls a Cloudflare quick tunnel | 1.6 min | 25 h ([MAL-2026-18368](https://osv.dev/vulnerability/MAL-2026-18368)) |
+| `cjlowuxbnexkhgpzq` | random-name package with an install-time network call (GitHub malware advisory) | 0.1 min | 29 h ([MAL-2026-18381](https://osv.dev/vulnerability/MAL-2026-18381)) |
+| `@zmtcdn/components`, `@zmtcdn/ui` | dependency confusion: postinstall POSTs hostname, user, platform and env | 0-2 min | 23 h ([MAL-2026-18372](https://osv.dev/vulnerability/MAL-2026-18372), [-18373](https://osv.dev/vulnerability/MAL-2026-18373)) |
+| `black-spindle`, `black-spindle-2` (4) | postinstall runs `curl` against a throwaway host | 0-1.8 min | 1-22 h ([MAL-2026-18359](https://osv.dev/vulnerability/MAL-2026-18359), [-18376](https://osv.dev/vulnerability/MAL-2026-18376)) |
+| `spectral-core` (10) | no install script at all: a `binding.gyp` action (run by node-gyp on install) reads process environments and AWS instance metadata and POSTs them to webhook.site; a new version every ~15 min | 0.2-3.3 min | 18-20 h ([MAL-2026-18377](https://osv.dev/vulnerability/MAL-2026-18377)) |
+| `@dmangal/curse-dependent-ecto` (3) | the same `binding.gyp` trick: greps the machine for secrets and POSTs every env var | 0.3-1.5 min | 17 h ([MAL-2026-18375](https://osv.dev/vulnerability/MAL-2026-18375)) |
+| 3 `dowload_ebok_*` packages | SEO spam (flagged by Llama Guard only) | ~1 min | none (reported the same minute) |
+
+"Ahead of the public report" uses the report's import time into OSV, not the backdated `published` field (see above). Every flag time is committed to the public ledger before confirmation. Only flags at least one model called malicious or suspicious count; packages that sat in the queue but were judged benign do not, even when OSV listed them later.
+
+What the monitor misses is tracked too: every hour it checks each new OSV npm malware report against its own logs (recall, publish-to-flag time, misses). Most misses so far were versions it never downloaded (placeholder or already-removed versions) or that showed no suspicious code in the archive. The monitor was down from about 15:00 to 22:00 UTC on Oct 29 (it stalled on packages with hundreds of new versions; fixed and alerting since).
 
 Time-split evaluation: train on samples discovered up to May 2026, test on samples discovered from July 2026 (June left out as a gap; campaign clusters deduplicated, no test cluster in training). Test set: 212 malicious, 590 benign packages including 71 hard negatives with install scripts. Thresholds are fixed on training data before the test set is scored once.
 
