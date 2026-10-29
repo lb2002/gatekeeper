@@ -85,6 +85,20 @@ def _fast_scorer():
     return score
 
 
+_MAL_CACHE: dict = {}
+
+
+def _mal_index() -> dict:
+    """Known-malicious npm names (refreshed daily by `confirm`), cached per container by file mtime."""
+    try:
+        mtime = MAL_INDEX.stat().st_mtime
+    except OSError:
+        return {}
+    if _MAL_CACHE.get("mtime") != mtime:
+        _MAL_CACHE.update(mtime=mtime, index=json.loads(MAL_INDEX.read_text(encoding="utf-8")))
+    return _MAL_CACHE["index"]
+
+
 def _run_poll() -> dict:
     import httpx
 
@@ -133,7 +147,7 @@ def _run_poll() -> dict:
         todo = list(dict.fromkeys(pending + list(names)))
         records, deferred = process_names(
             client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S,
-            fast=_fast_scorer(),
+            fast=_fast_scorer(), mal_index=_mal_index(),
         )
         stats["deferred"] = len(deferred)
 
@@ -419,6 +433,9 @@ def confirm() -> dict:
     revealed = _reveal_confirmed()
     volume.commit()
     live_recall.spawn()  # separate container: reads all event logs and the OSV feed
+    last = (state.get("mal_index") or {}).get("at")
+    if not last or now - datetime.fromisoformat(last) > timedelta(hours=24):
+        refresh_mal_index.spawn()
     stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error,
              "ledger_revealed": revealed}
     state["last_confirm"] = {"at": now.isoformat(), **stats}
@@ -466,9 +483,15 @@ def _spark_candidates(items: dict, now: datetime) -> list[str]:
 
 
 def _fireworks_candidates(items: dict) -> list[str]:
-    """Every queued item without a Spark Open verdict (from either host), newest first."""
-    todo = [(not it.get("low_priority"), it["seen_at"], key) for key, it in items.items()
-            if not any(b in it.get("verdicts", {}) for b in SPARK_OPEN_BACKENDS)]
+    """Every queued item without a Spark Open verdict (from either host), newest first; then items whose
+    Spark Open answer was unusable, once more."""
+    todo = []
+    for key, it in items.items():
+        tried = [it.get("verdicts", {})[b] for b in SPARK_OPEN_BACKENDS if b in it.get("verdicts", {})]
+        if not tried:
+            todo.append((True, not it.get("low_priority"), it["seen_at"], key))
+        elif all((t or {}).get("verdict") is None for t in tried) and it.get("open_failures", 1) < 2:
+            todo.append((False, not it.get("low_priority"), it["seen_at"], key))  # one retry, after new items
     return [k for *_, k in sorted(todo, reverse=True)]
 
 
@@ -544,6 +567,13 @@ def _cloud_one(backend: str, key: str, item: dict, spend: dict, now: datetime) -
         "verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
         "at": now.isoformat(), "errors": result.errors[:3], "full": row["verdict"],
     }
+    if backend in SPARK_OPEN_BACKENDS:
+        if v:  # a usable answer replaces an unusable one from the other host (they count as one opinion)
+            for b in SPARK_OPEN_BACKENDS:
+                if b != backend and (fresh["verdicts"].get(b) or {}).get("verdict") is None:
+                    fresh["verdicts"].pop(b, None)
+        else:
+            fresh["open_failures"] = fresh.get("open_failures", 0) + 1
     queue[key] = _maybe_notify_candidate(key, fresh)
     return row
 
@@ -1093,6 +1123,33 @@ def live_recall() -> dict:
     out.write_text(json.dumps(result, indent=1), encoding="utf-8")
     volume.commit()
     return result
+
+
+MAL_INDEX = DATA / "osv" / "mal_npm.json"
+
+
+@app.function(image=image, volumes={str(DATA): volume}, timeout=900, cpu=1.0, memory=4096)
+def refresh_mal_index() -> dict:
+    """Daily: names of all npm packages reported malicious in OSV (~220 MB zip, read once, then dropped)."""
+    import tempfile
+
+    import httpx
+
+    from gatekeeper.confirm.malindex import ALL_ZIP, build_index
+
+    with tempfile.NamedTemporaryFile(suffix=".zip") as tmp:
+        with httpx.stream("GET", ALL_ZIP, timeout=300, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_bytes(1 << 20):
+                tmp.write(chunk)
+        tmp.flush()
+        index = build_index(Path(tmp.name))
+    MAL_INDEX.parent.mkdir(parents=True, exist_ok=True)
+    MAL_INDEX.write_text(json.dumps(index, separators=(",", ":")), encoding="utf-8")
+    volume.commit()
+    state["mal_index"] = {"at": datetime.now(timezone.utc).isoformat(), "names": len(index),
+                          "all_versions": sum(e["all"] for e in index.values())}
+    return state["mal_index"]
 
 
 REPO_URL = "https://github.com/lb2002/gatekeeper"

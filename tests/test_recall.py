@@ -34,3 +34,18 @@ def test_flagged_missed_not_seen_before_monitor():
 def test_all_versions_entry_matches_any_flagged_version():
     out = recall.classify(_vuln("MAL-1", "evil"), {}, {"evil@9.9.9": "2026-10-28T11:00:00Z", "evil-not@1.0.0": "x"}, START)
     assert out[0].status == "flagged" and out[0].flagged_at == "2026-10-28T11:00:00Z"
+
+
+def test_bad_dependencies():
+    from gatekeeper.confirm.malindex import bad_dependencies
+
+    index = {"@evil/libsignal-node": {"public": "2026-08-01T00:00:00Z", "all": True, "versions": []},
+             "chalk": {"public": "2025-09-08T00:00:00Z", "all": False, "versions": ["5.6.1"]},
+             "late-evil": {"public": "2026-12-01T00:00:00Z", "all": True, "versions": []}}
+    deps = {"libsignal": "npm:@evil/libsignal-node@^0.0.1", "chalk": "^5.0.0", "late-evil": "1.0.0",
+            "gone": "^0.0.1-security", "lodash": "^4.17.21"}
+    reasons = bad_dependencies(deps, index, before="2026-10-01T00:00:00Z")
+    assert len(reasons) == 2
+    assert "libsignal (alias of @evil/libsignal-node)" in reasons[0] and "placeholder" in reasons[1]
+    assert bad_dependencies({"chalk": "5.6.1"}, index, popular={"chalk"})  # pinned to the hijacked version
+    assert not bad_dependencies({"@evil/libsignal-node": "1.0.0"}, index, popular={"@evil/libsignal-node"})

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from gatekeeper.confirm.malindex import bad_dependencies
 from gatekeeper.npm.packument import VersionInfo
 from gatekeeper.triage.typosquat import typosquat_target
 
@@ -25,6 +26,7 @@ def score_metadata(
     info: VersionInfo,
     popular: set[str],
     now: datetime | None = None,
+    mal_index: dict[str, dict] | None = None,
 ) -> MetaScore:
     now = now or datetime.now(timezone.utc)
     s = MetaScore()
@@ -51,4 +53,7 @@ def score_metadata(
         s.add(3, "bin shadows system command: " + ",".join(shadowed))
     if not info.has_repository:
         s.add(1, "no repository field")
+    # a clean-looking wrapper that installs known malware: enough to flag on its own (FLAG_TOTAL_THRESHOLD)
+    for reason in bad_dependencies(info.dependencies, mal_index or {}, popular=popular)[:3]:
+        s.add(9, reason)
     return s

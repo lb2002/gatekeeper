@@ -70,8 +70,9 @@ FastScorer = Callable[[str, str, str, list[str]], tuple[float, bool]]
 def process_version(
     client: httpx.Client, info: packument.VersionInfo, popular: set[str], now: datetime,
     fast: FastScorer | None = None,
+    mal_index: dict[str, dict] | None = None,
 ) -> Record:
-    meta = score_metadata(info, popular, now=now)
+    meta = score_metadata(info, popular, now=now, mal_index=mal_index)
     rec = Record(
         name=info.name,
         version=info.version,
@@ -125,6 +126,7 @@ def process_names(
     window: timedelta = RECENT_WINDOW,
     deadline: float | None = None,
     fast: FastScorer | None = None,
+    mal_index: dict[str, dict] | None = None,
 ) -> tuple[list[Record], list[str]]:
     """Score every version of the changed packages published within `window`, unless already seen.
 
@@ -145,7 +147,7 @@ def process_names(
         for info in packument.recent_versions(doc, window, now=now):
             if info.is_security_holder or f"{info.name}@{info.version}" in seen:
                 continue
-            out.append(process_version(client, info, popular, now, fast))
+            out.append(process_version(client, info, popular, now, fast, mal_index))
         return out
 
     pool = ThreadPoolExecutor(max_workers=workers)

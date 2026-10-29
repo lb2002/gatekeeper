@@ -80,6 +80,9 @@ class Verdict(_Strict):
     summary: str = Field(description="One or two sentences, at most 300 characters.")
 
 
+STRING_CAPS = {"summary": 300, "why": 160}
+
+
 def verdict_json_schema() -> dict:
     """Strict JSON schema for structured output: all properties required, no additional properties."""
     schema = Verdict.model_json_schema()
@@ -89,6 +92,14 @@ def verdict_json_schema() -> dict:
             if node.get("type") == "object" and "properties" in node:
                 node["required"] = list(node["properties"].keys())
                 node["additionalProperties"] = False
+                # Length caps are enforced by constrained decoding: without them Spark Open sometimes
+                # loops inside a free-text field until max_tokens and the JSON never closes (35% of
+                # its test-set answers were lost that way).
+                for key, prop in node["properties"].items():
+                    if prop.get("type") == "string" and "enum" not in prop:
+                        prop["maxLength"] = STRING_CAPS.get(key, 200)
+                    elif prop.get("type") == "array":
+                        prop["maxItems"] = 8
             for value in node.values():
                 tighten(value)
         elif isinstance(node, list):
