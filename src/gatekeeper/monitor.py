@@ -23,6 +23,7 @@ from gatekeeper.triage.meta import score_metadata
 RECENT_WINDOW = timedelta(hours=6)  # versions considered "new" for a changed package
 NEW_PACKAGE_WINDOW = timedelta(hours=72)
 SCAN_META_THRESHOLD = 2
+MAX_VERSIONS_PER_NAME = 6
 # Updates of small packages are scanned too: live recall showed malware pushed as an update of a
 # young, little-used package (no install hook, so no metadata signal) went unscanned.
 SMALL_PACKAGE_VERSIONS = 20
@@ -156,10 +157,15 @@ def process_names(
             return [Record(name, "?", None, now.isoformat(), 0, [], error=f"packument: {type(exc).__name__}")]
         if not doc:
             return []
+        todo = [v for v in packument.recent_versions(doc, window, now=now)
+                if not v.is_security_holder and f"{v.name}@{v.version}" not in seen]
+        # Newest first, and only a few per name: a package that pushed 190 versions in a day (CI canaries,
+        # spam) otherwise ties up a worker for minutes. Malware rarely comes as more than a handful.
+        todo.sort(key=lambda v: v.published_at or now, reverse=True)
         out = []
-        for info in packument.recent_versions(doc, window, now=now):
-            if info.is_security_holder or f"{info.name}@{info.version}" in seen:
-                continue
+        for info in todo[:MAX_VERSIONS_PER_NAME]:
+            if out and deadline is not None and time.monotonic() > deadline:
+                break  # keep what is done; the rest is picked up when the name changes again
             out.append(process_version(client, info, popular, now, fast, mal_index))
         return out
 

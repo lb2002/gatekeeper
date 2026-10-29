@@ -49,7 +49,7 @@ HTTP_TIMEOUT_S = 15
 MAX_CHANGES_PER_RUN = 4000
 MAX_PENDING = 8000
 LIVE_SAMPLE_CAP = 40_000
-MAX_WINDOW = timedelta(hours=24)
+MAX_WINDOW = timedelta(hours=6)  # a longer window makes every name bring more old versions: the backlog feeds itself
 SEEN_MAX = 60000
 
 
@@ -229,6 +229,14 @@ def poll() -> dict:
         _poll_failed(f"{type(exc).__name__}: {exc}"[:200])
         raise
     state["poll_started"] = None
+    # A run can finish without doing anything useful (everything deferred, the feed not read): that is
+    # a failure too, or a stuck monitor stays silent for hours.
+    if stats.get("deferred", 0) > 0 and stats.get("versions", 0) == 0:
+        _poll_failed(f"no progress: 0 versions processed, {stats['deferred']} names deferred")
+        return stats
+    if stats.get("lag_changes", 0) > LAG_ALERT_CHANGES:
+        _poll_failed(f"falling behind: {stats['lag_changes']} feed changes not read yet")
+        return stats
     if state.get("poll_fail_streak", 0) >= POLL_ALERT_AFTER:
         _notify("Gatekeeper: monitor recovered", f"poll works again after {state['poll_fail_streak']} failed runs.", tags="white_check_mark")
     state["poll_fail_streak"] = 0
@@ -237,6 +245,7 @@ def poll() -> dict:
 
 
 POLL_ALERT_AFTER = 3  # failed runs in a row (6 minutes) before a push
+LAG_ALERT_CHANGES = 20_000  # ~1.5 h of npm changes
 
 
 def _poll_failed(reason: str) -> None:
