@@ -16,7 +16,7 @@ import httpx
 
 from gatekeeper.evidence.bundle import build_bundle
 from gatekeeper.npm import packument
-from gatekeeper.npm.tarball import ArchiveTooLarge, read_tarball
+from gatekeeper.npm.tarball import MAX_COMPRESSED_BYTES, ArchiveTooLarge, read_tarball
 from gatekeeper.triage.content import score_content
 from gatekeeper.triage.meta import score_metadata
 
@@ -67,6 +67,21 @@ def should_scan(info: packument.VersionInfo, meta_score: int, popular: set[str],
 FastScorer = Callable[[str, str, str, list[str]], tuple[float, bool]]
 
 
+def download_capped(client: httpx.Client, url: str, limit: int = MAX_COMPRESSED_BYTES) -> bytes:
+    """Stream an archive and stop as soon as it exceeds `limit`: large binary packages would otherwise
+    tie up a worker for the whole download only to be rejected afterwards."""
+    with client.stream("GET", url) as resp:
+        resp.raise_for_status()
+        if int(resp.headers.get("content-length") or 0) > limit:
+            raise ArchiveTooLarge(f"compressed size {resp.headers['content-length']} > {limit}")
+        buf = bytearray()
+        for chunk in resp.iter_bytes(64 * 1024):
+            buf += chunk
+            if len(buf) > limit:
+                raise ArchiveTooLarge(f"compressed size > {limit}")
+    return bytes(buf)
+
+
 def process_version(
     client: httpx.Client, info: packument.VersionInfo, popular: set[str], now: datetime,
     fast: FastScorer | None = None,
@@ -84,9 +99,7 @@ def process_version(
     if not info.tarball_url or not should_scan(info, meta.score, popular, now):
         return rec
     try:
-        resp = client.get(info.tarball_url)
-        resp.raise_for_status()
-        pkg = read_tarball(resp.content)
+        pkg = read_tarball(download_capped(client, info.tarball_url))
     except (httpx.HTTPError, ArchiveTooLarge, OSError, EOFError) as exc:
         rec.error = f"archive: {type(exc).__name__}: {exc}"[:300]
         return rec
