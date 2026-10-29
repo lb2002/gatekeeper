@@ -29,6 +29,10 @@ MAX_VERSIONS_PER_NAME = 6
 SMALL_PACKAGE_VERSIONS = 20
 FLAG_CONTENT_THRESHOLD = 6
 FLAG_TOTAL_THRESHOLD = 9
+# A package younger than this that runs code at install time always goes to a model: live recall's real
+# misses were all new packages with a postinstall hook scoring 4-7, below the rules threshold. It is
+# only ~100-150 versions a day (~70 packages), a third of which the rules flag anyway.
+NEW_PACKAGE_HOURS = 72
 
 
 @dataclass
@@ -127,7 +131,9 @@ def process_version(
     # Llama Guard pass, which catches malware the rules and the classifier both miss.
     bundle = build_bundle(info.name, info.version, pkg, content, meta_reasons=meta.reasons)
     text = bundle.render()
-    rec.flagged = rules_flag or fast_flag
+    young = info.package_created_at is not None and now - info.package_created_at <= timedelta(hours=NEW_PACKAGE_HOURS)
+    new_with_hook = young and bool(info.install_scripts or info.gypfile)
+    rec.flagged = rules_flag or fast_flag or new_with_hook
     rec.bundle = text
     rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
     rec.excerpts = [e.ref() for e in bundle.excerpts]
@@ -162,7 +168,7 @@ def process_names(
         if not doc:
             return [], False
         todo = [v for v in packument.recent_versions(doc, window, now=now)
-                if not v.is_security_holder and f"{v.name}@{v.version}" not in seen]
+                if not v.is_npm_placeholder and f"{v.name}@{v.version}" not in seen]
         # Newest first, and only a few per name: a package that pushed 190 versions in a day (CI canaries,
         # spam) otherwise ties up a worker for minutes. Malware rarely comes as more than a handful.
         # Versions past the cap still get the metadata check (install hooks, dependencies), just no download.

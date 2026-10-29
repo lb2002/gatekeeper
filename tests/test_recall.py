@@ -84,3 +84,48 @@ def test_dependency_names_cannot_lower_the_weight():
     deps += [("from a URL", "npm:evil@1.0.0"), ("evil", "1.0.0"), ("evil", "^1")]  # also: same name, two sections
     meta = score_metadata(VersionInfo("w", "1.0.0", None, None, has_repository=True, dependencies=deps), set(), mal_index=index)
     assert meta.score == 11 and any(r.startswith("+9 depends on from a URL (alias of evil)") for r in meta.reasons)
+
+
+def test_a_queued_flag_the_models_called_benign_is_a_miss():
+    from datetime import datetime, timezone
+
+    from gatekeeper.confirm.recall import classify
+
+    vuln = {"id": "MAL-1", "published": "2026-10-29T15:00:00Z",
+            "affected": [{"package": {"ecosystem": "npm", "name": "spam"}, "versions": ["1.0.0"]}],
+            "database_specific": {"malicious-packages-origins": [{"import_time": "2026-10-29T15:30:00Z"}]}}
+    seen = {"spam": [{"version": "1.0.0", "published_at": "2026-10-29T15:00:00Z", "seen_at": "2026-10-29T15:01:00Z",
+                      "scanned": True, "flagged": True, "meta_score": 2, "content_score": 0, "error": None}]}
+    start = datetime(2026, 10, 27, tzinfo=timezone.utc)
+    [o] = classify(vuln, seen, {}, start, queued={"spam@1.0.0": "2026-10-29T15:01:00Z"})
+    assert o.status == "missed" and "benign" in o.detail
+    [o] = classify(vuln, seen, {"spam@1.0.0": "2026-10-29T15:01:00Z"}, start)
+    assert o.status == "flagged"
+
+
+def test_seeing_only_npms_takedown_placeholders_means_before_monitor():
+    from datetime import datetime, timezone
+
+    from gatekeeper.confirm.recall import classify
+
+    vuln = {"id": "MAL-2", "published": "2026-10-28T14:40:00Z",
+            "affected": [{"package": {"ecosystem": "npm", "name": "camelot-x"}, "versions": ["99.0.0", "0.0.0-stage"]}]}
+    seen = {"camelot-x": [{"version": "0.0.0-stage", "published_at": "2026-10-28T14:32:18Z", "seen_at": "2026-10-28T14:34:00Z",
+                           "scanned": True, "flagged": False, "meta_score": 2, "content_score": 0, "error": None}]}
+    times = {"camelot-x": {"created": "2026-10-28T14:32:18Z", "99.0.0": "2026-05-07T05:20:59Z",
+                           "0.0.0-stage": "2026-10-28T14:32:18Z", "0.0.1-security": "2026-10-28T14:32:55Z"}}
+    start = datetime(2026, 10, 27, tzinfo=timezone.utc)
+    [o] = classify(vuln, seen, {"camelot-x@0.0.0-stage": "2026-10-28T14:34:00Z"}, start, npm_times=times)
+    assert o.status == "before_monitor" and o.published_at.startswith("2026-05-07")
+    times["camelot-x"]["99.0.0"] = "2026-10-28T10:00:00Z"
+    [o] = classify(vuln, seen, {}, start, npm_times=times)
+    assert o.status == "not_seen"
+
+
+def test_npm_placeholders_are_never_scanned():
+    from gatekeeper.npm.packument import VersionInfo
+
+    for version, publisher, expected in (("0.0.0-stage", "npm", True), ("0.0.1-security", "npm", True),
+                                         ("1.0.0", "npm", True), ("1.0.0", "someone", False)):
+        info = VersionInfo(name="x", version=version, published_at=None, package_created_at=None, publisher=publisher)
+        assert info.is_npm_placeholder is expected

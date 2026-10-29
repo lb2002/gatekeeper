@@ -309,6 +309,7 @@ def _enqueue(rows: list[dict]) -> int:
 def _record_catches() -> None:
     """Confirmed detections, kept beyond the queue TTL: the public numbers are built from these."""
     from gatekeeper.confirm.tracker import flag_lead_minutes, publish_to_flag_minutes
+    from gatekeeper.npm.packument import is_placeholder_version
 
     catches = state.get("catches", {})
     for key, it in queue.items():
@@ -317,8 +318,9 @@ def _record_catches() -> None:
             continue
         verdicts = {b: v.get("verdict") for b, v in (it.get("verdicts") or {}).items()}
         review = (it.get("review") or {}).get("decision")
-        # Queued but judged benign by every model is not a detection, even if OSV lists it later.
-        if not ({"malicious", "suspicious"} & set(verdicts.values()) or review == "malicious"):
+        # Queued but judged benign by every model is not a detection, even if OSV lists it later; nor is
+        # a placeholder npm itself published while taking the package down.
+        if is_placeholder_version(it["version"]) or not ({"malicious", "suspicious"} & set(verdicts.values()) or review == "malicious"):
             catches.pop(key, None)
             continue
         catches[key] = {
@@ -735,13 +737,15 @@ def _autoreport_breaker() -> bool:
     last = state.get("autoreport_breaker_at")
     if last and now - datetime.fromisoformat(last) < timedelta(minutes=30):
         return False
-    urls = [r["pr"] for r in state.get("autoreports", {}).values() if r.get("pr")] + state.get("reports_watch", [])
+    urls = [r["pr"] for r in state.get("autoreports", {}).values() if r.get("pr") and not r.get("closed_as_duplicate")] + state.get("reports_watch", [])
     with _github() as gh:
         for url in urls:
             r = gh.get(f"/repos/{auto.UPSTREAM}/pulls/{url.rsplit('/', 1)[-1]}")
             r.raise_for_status()
             pr = r.json()
             if pr["state"] == "closed" and not pr.get("merged_at"):
+                if _closed_as_duplicate(pr):
+                    continue
                 state["autoreport_enabled"] = False
                 _notify("Gatekeeper: automatic reporting stopped",
                         f"OpenSSF closed {url} without merging it. Nothing is reported automatically until you have "
@@ -749,6 +753,32 @@ def _autoreport_breaker() -> bool:
                 return True
     state["autoreport_breaker_at"] = now.isoformat()
     return False
+
+
+def _closed_as_duplicate(pr: dict) -> bool:
+    """A report closed because someone else's entry for the same package landed first (another scanner often
+    reports the same package within hours) is not a rejection: the package is malicious either way. True when
+    OSV now lists the package as malicious; the PR is then dropped from the watch list."""
+    import httpx
+
+    from gatekeeper.confirm import osv as osv_api
+
+    prefix = "Add malicious npm package "
+    title = pr.get("title") or ""
+    if not title.startswith(prefix):
+        return False
+    name = title[len(prefix):].strip()
+    with httpx.Client(timeout=20) as client:
+        listed = any(str(v.get("id", "")).startswith("MAL-") and not v.get("withdrawn") for v in osv_api.query(client, name))
+    if listed:
+        url = pr.get("html_url", "")
+        state["reports_watch"] = [u for u in state.get("reports_watch", []) if u != url]
+        for r in state.get("autoreports", {}).values():
+            if r.get("pr") == url:
+                r["closed_as_duplicate"] = True
+        _notify("Gatekeeper: report closed as duplicate", f"{url} was closed without merging, but OSV lists {name} as "
+                "malicious (another report landed first). Automatic reporting stays on.", click=url, tags="information_source")
+    return listed
 
 
 def _autoreport_package(name: str, entries: list, live: bool) -> dict:
@@ -1107,7 +1137,9 @@ def live_recall() -> dict:
     from gatekeeper.npm import feed
 
     volume.reload()
-    start = datetime.fromisoformat(min(state.get("daily", {"2026-10-27": 0})) + "T00:00:00+00:00")
+    # the first poll run's log (events/<day>/<HHMMSS>-<id>.jsonl), not midnight of the first day
+    first = min((DATA / "events").glob("*/*.jsonl"), key=lambda p: (p.parent.name, p.name))
+    start = datetime.strptime(f"{first.parent.name} {first.name[:6]}", "%Y-%m-%d %H%M%S").replace(tzinfo=timezone.utc)
     with feed.make_client(timeout=30) as client:
         vulns = recall.fetch_recent(client, start)
     names = {name for v in vulns for name, _ in recall._targets(v)}
@@ -1126,9 +1158,19 @@ def live_recall() -> dict:
             if line.strip():
                 row = json.loads(line)
                 flags.setdefault(row["key"], json.loads(row["line"])["flagged_at"])
+    # A detection is a flag at least one model called malicious or suspicious (or a reviewer confirmed);
+    # remembered here because queue items expire after QUEUE_TTL.
+    bad = set(state.get("judged_bad", []))
     for key, it in queue.items():
         flags.setdefault(key, it["seen_at"])
-    outcomes = [o for v in vulns for o in recall.classify(v, seen, flags, start)]
+        verdicts = {v.get("verdict") for v in (it.get("verdicts") or {}).values()}
+        if {"malicious", "suspicious"} & verdicts or (it.get("review") or {}).get("decision") == "malicious":
+            bad.add(key)
+    state["judged_bad"] = sorted(bad)
+    detections = {k: v for k, v in flags.items() if k in bad}
+    real_seen = {n for n, rows in seen.items() if any(not recall.is_placeholder_version(r["version"]) for r in rows)}
+    npm_times = recall.fetch_times(sorted(names - real_seen))  # when the malicious versions really came out
+    outcomes = [o for v in vulns for o in recall.classify(v, seen, detections, start, queued=flags, npm_times=npm_times)]
     result = {"at": datetime.now(timezone.utc).isoformat(), "since": start.isoformat(), **recall.summarize(outcomes),
               "outcomes": [o.as_dict() for o in sorted(outcomes, key=lambda o: o.first_public or "")]}
     state["recall"] = result

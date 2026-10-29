@@ -11,6 +11,11 @@ import httpx
 REGISTRY_URL = "https://registry.npmjs.org"
 INSTALL_HOOKS = ("preinstall", "install", "postinstall")
 SECURITY_HOLDER_VERSION = "0.0.1-security"
+STAGE_PLACEHOLDER_VERSION = "0.0.0-stage"
+
+
+def is_placeholder_version(version: str) -> bool:
+    return version == STAGE_PLACEHOLDER_VERSION or version.endswith("-security")
 
 
 @dataclass
@@ -39,6 +44,12 @@ class VersionInfo:
     @property
     def is_security_holder(self) -> bool:
         return self.version == SECURITY_HOLDER_VERSION
+
+    @property
+    def is_npm_placeholder(self) -> bool:
+        """Published by npm itself, never by the package's author: the security holder and the
+        `0.0.0-stage` staged-publishing placeholder npm also writes when it takes malware down."""
+        return is_placeholder_version(self.version) or self.publisher == "npm"
 
     @property
     def install_hook_added(self) -> bool:

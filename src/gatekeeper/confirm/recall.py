@@ -11,6 +11,7 @@ import httpx
 from gatekeeper.confirm import parse_ts
 from gatekeeper.confirm.osv import first_public
 from gatekeeper.confirm.tracker import flag_lead_minutes, publish_to_flag_minutes
+from gatekeeper.npm.packument import is_placeholder_version, packument_url
 
 MODIFIED_CSV = "https://osv-vulnerabilities.storage.googleapis.com/npm/modified_id.csv"
 ENTRY_URL = "https://osv-vulnerabilities.storage.googleapis.com/npm/{id}.json"
@@ -53,6 +54,27 @@ def fetch_recent(client: httpx.Client, since: datetime) -> list[dict]:
     return out
 
 
+def fetch_times(names: list[str], workers: int = 16) -> dict[str, dict]:
+    """npm `time` objects (they keep the publish times of removed versions). Missing names map to {}."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with httpx.Client(timeout=20, follow_redirects=True) as client:
+        def one(name: str) -> dict:
+            try:
+                r = client.get(packument_url(name))  # the abbreviated format has no `time`
+                return (r.json().get("time") or {}) if r.status_code == 200 else {}
+            except (httpx.HTTPError, ValueError):
+                return {}
+
+        with ThreadPoolExecutor(workers) as ex:
+            return dict(zip(names, ex.map(one, names)))
+
+
+def _real_publish_times(versions: list[str], times: dict) -> list[datetime]:
+    real = [v for v in versions if not is_placeholder_version(v)] or         [v for v in times if v not in ("created", "modified", "unpublished") and not is_placeholder_version(v)]
+    return [t for t in (parse_ts(times.get(v)) if isinstance(times.get(v), str) else None for v in real) if t]
+
+
 @dataclass
 class Outcome:
     id: str
@@ -79,15 +101,24 @@ def _targets(vuln: dict) -> list[tuple[str, list[str]]]:
     return out
 
 
-def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], start: datetime) -> list[Outcome]:
+def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], start: datetime,
+             queued: dict[str, str] | None = None, npm_times: dict[str, dict] | None = None) -> list[Outcome]:
     """One outcome per affected package.
     seen: name -> event rows {version, published_at, seen_at, scanned, flagged, content_score, meta_score, error}
-    flags: "name@version" -> flagged_at (every flag, from any stage)."""
+    flags: "name@version" -> flagged_at, detections only (a model said malicious or suspicious).
+    queued: every key that reached the models, to tell "judged benign" apart from "never queued".
+    npm_times: name -> npm `time`, to date versions the monitor never saw.
+    Versions npm itself published (`0.0.0-stage`, `0.0.1-security`, written when it takes a package down)
+    are ignored: seeing only those means the malware itself came out before we looked."""
+    queued = queued or {}
+    npm_times = npm_times or {}
     public = first_public(vuln) or vuln.get("published")
     out = []
     for name, versions in _targets(vuln):
-        rows = [r for r in seen.get(name, []) if not versions or r["version"] in versions]
+        rows = [r for r in seen.get(name, []) if (not versions or r["version"] in versions)
+                and not is_placeholder_version(r["version"])]
         keys = [f"{name}@{v}" for v in versions] if versions else [k for k in flags if k.rpartition("@")[0] == name]
+        keys = [k for k in keys if not is_placeholder_version(k.rpartition("@")[2])]
         hit = sorted((flags[k], k) for k in keys if k in flags)
         o = Outcome(vuln["id"], name, "", versions, public)
         if rows:
@@ -102,13 +133,20 @@ def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], sta
         elif rows:
             o.status = "missed"
             r = rows[0]
-            o.detail = ("error: " + str(r["error"])[:80]) if r.get("error") else \
+            q = [k for k in queued if (k in keys if versions else k.rpartition("@")[0] == name)]
+            o.detail = "queued, but every model said benign" if q else ("error: " + str(r["error"])[:80]) if r.get("error") else \
                 f"scanned={bool(r.get('scanned'))} meta={r.get('meta_score')} content={r.get('content_score')}"
         else:
             # never in our feed window: published before the monitor started, or a coverage gap
-            pub = parse_ts(vuln.get("published"))
-            o.status = "before_monitor" if pub is not None and pub < start else "not_seen"
-            o.detail = f"osv published {vuln.get('published')}"
+            pubs = _real_publish_times(versions, npm_times.get(name) or {})
+            if pubs:
+                o.status = "before_monitor" if max(pubs) < start else "not_seen"
+                o.published_at = max(pubs).isoformat()
+                o.detail = f"npm published {o.published_at[:16]}"
+            else:  # removed without a trace on npm: OSV's own (often backdated) date is all there is
+                pub = parse_ts(vuln.get("published"))
+                o.status = "before_monitor" if pub is not None and pub < start else "not_seen"
+                o.detail = f"osv published {vuln.get('published')}"
         out.append(o)
     return out
 
