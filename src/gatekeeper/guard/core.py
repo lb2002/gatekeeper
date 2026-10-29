@@ -33,6 +33,10 @@ ALLOW_FLAG = "--gk-allow"
 BUSY_FILE = Path(os.environ.get("USERPROFILE") or Path.home()) / ".gatekeeper" / "guard.busy"
 FAST_MODEL_FILE = BUSY_FILE.parent / "fastclf.json"  # exported by modal_app/fastclf.py::export
 CACHE_FILE = BUSY_FILE.parent / "verdicts.json"
+MAL_INDEX_FILE = BUSY_FILE.parent / "mal_npm.json"  # `gk guard update-osv`: npm names OSV lists as malicious
+# Versions younger than this are held back even when every check is clean: 82% of October's npm malware
+# was publicly reported within an hour of publication, 89% within a day (OSV, 785 entries).
+MIN_AGE_HOURS = float(os.environ.get("GK_MIN_AGE_HOURS", "24"))
 
 
 def _cache_key(meta: dict) -> str | None:
@@ -102,6 +106,54 @@ class Decision:
     verdict: dict | None = None
     rules: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    kind: str = "analysis"  # analysis | osv | dependency | too_new
+    suggestion: str = ""
+
+
+_MAL_CACHE: dict = {}
+
+
+def load_mal_index() -> dict:
+    try:
+        mtime = MAL_INDEX_FILE.stat().st_mtime
+    except OSError:
+        return {}
+    if _MAL_CACHE.get("mtime") != mtime:
+        _MAL_CACHE.update(mtime=mtime, index=json.loads(MAL_INDEX_FILE.read_text(encoding="utf-8")))
+    return _MAL_CACHE["index"]
+
+
+def reported_malicious(meta: dict, index: dict) -> str | None:
+    if meta["version"].endswith("-security"):
+        return f"npm removed {meta['name']} as malware (only its {meta['version']} placeholder is left)"
+    e = index.get(meta["name"])
+    if e and (e["all"] or meta["version"] in e["versions"]):
+        return f"{meta['name']}@{meta['version']} is listed as malicious in OSV (reported {e['public'][:10]})"
+    return None
+
+
+def age_hours(meta: dict, now: float | None = None) -> float | None:
+    from gatekeeper.confirm import parse_ts
+
+    published = parse_ts((meta.get("time") or {}).get(meta["version"]))
+    if published is None:
+        return None
+    return ((now or time.time()) - published.timestamp()) / 3600
+
+
+def older_version(meta: dict, min_age_h: float, now: float | None = None) -> str | None:
+    """The newest stable version that is already older than `min_age_h`, to suggest instead."""
+    from gatekeeper.confirm import parse_ts
+
+    cutoff = (now or time.time()) - min_age_h * 3600
+    best = None
+    for ver, ts in (meta.get("time") or {}).items():
+        t = parse_ts(ts)
+        if ver in ("created", "modified") or "-" in ver or t is None or t.timestamp() > cutoff:
+            continue
+        if best is None or t > best[1]:
+            best = (ver, t)
+    return best[0] if best else None
 
 
 def package_specs(tool: str, args: list[str]) -> list[str]:
@@ -146,7 +198,8 @@ def _is_registry_spec(a: str) -> bool:
 def resolve(npm_cmd: list[str], spec: str) -> dict:
     """Use the real npm (read-only) to resolve a spec to name, version, tarball and integrity."""
     out = subprocess.run(
-        npm_cmd + ["view", spec, "name", "version", "dist.tarball", "dist.integrity", "--json"],
+        npm_cmd + ["view", spec, "name", "version", "dist.tarball", "dist.integrity", "time", "dependencies",
+                   "optionalDependencies", "peerDependencies", "--json"],
         capture_output=True, text=True, timeout=60,
     )
     if out.returncode != 0:
@@ -159,6 +212,9 @@ def resolve(npm_cmd: list[str], spec: str) -> dict:
         "version": data["version"],
         "tarball": data.get("dist.tarball") or (data.get("dist") or {}).get("tarball"),
         "integrity": data.get("dist.integrity") or (data.get("dist") or {}).get("integrity"),
+        "time": data.get("time") if isinstance(data.get("time"), dict) else {},
+        "dependencies": [(str(k), str(v)) for section in ("dependencies", "optionalDependencies", "peerDependencies")
+                         for k, v in (data.get(section) or {}).items()],
     }
 
 
@@ -169,9 +225,34 @@ def verify_integrity(data: bytes, integrity: str | None) -> bool:
     return digest == integrity.split("-", 1)[1]
 
 
-def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, use_cache: bool = True) -> Decision:
+def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, use_cache: bool = True,
+               min_age_hours: float | None = None) -> Decision:
+    from gatekeeper.confirm.malindex import KNOWN_MALICIOUS, TAKEN_DOWN, bad_dependencies
+
     started = time.monotonic()
     meta = resolve(npm_cmd, spec)
+    index = load_mal_index()
+    listed = reported_malicious(meta, index)
+    if listed:
+        return Decision(spec, False, listed, meta["name"], meta["version"], kind="osv", seconds=time.monotonic() - started)
+    bad = [r for k, r in bad_dependencies(meta.get("dependencies") or [], index) if k in (KNOWN_MALICIOUS, TAKEN_DOWN)]
+    if bad:
+        return Decision(spec, False, "; ".join(bad[:3]), meta["name"], meta["version"], kind="dependency",
+                        seconds=time.monotonic() - started)
+    decision = _analyse(meta, spec, started, classify, fast_model, use_cache)
+    # Every check is clean, but nobody else has had time to look at this version yet.
+    limit = MIN_AGE_HOURS if min_age_hours is None else min_age_hours
+    age = age_hours(meta)
+    if decision.allowed and limit > 0 and age is not None and age < limit:
+        older = older_version(meta, limit)
+        return Decision(spec, False, f"published {age:.1f} h ago; Gatekeeper holds versions newer than {limit:.0f} h "
+                        f"(most npm malware is reported within hours). Checks so far: {decision.reason}",
+                        meta["name"], meta["version"], decision.verdict, decision.rules, time.monotonic() - started,
+                        kind="too_new", suggestion=f"{meta['name']}@{older}" if older else "")
+    return decision
+
+
+def _analyse(meta: dict, spec: str, started: float, classify, fast_model, use_cache: bool) -> Decision:
     cached = _cache_get(meta) if use_cache else None
     if cached:
         return Decision(spec, cached["allowed"], "cached: " + cached["reason"], meta["name"], meta["version"],

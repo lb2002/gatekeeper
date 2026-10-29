@@ -210,6 +210,18 @@ def guard_update_model() -> None:
     console.print(f"local classifier: {len(model.index):,} terms, threshold {model.threshold:.3f}", markup=False)
 
 
+@guard_app.command("update-osv")
+def guard_update_osv() -> None:
+    """Download the list of npm packages OSV reports as malicious (~20 MB, refreshed daily by the monitor)."""
+    import subprocess
+
+    from gatekeeper.guard.core import MAL_INDEX_FILE, load_mal_index
+
+    MAL_INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["modal", "volume", "get", "--force", "gatekeeper-data", "osv/mal_npm.json", str(MAL_INDEX_FILE)], check=True)
+    console.print(f"known malicious npm packages: {len(load_mal_index()):,}", markup=False)
+
+
 @guard_app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or npx")) -> None:
     """Called by the shims: check the packages, then run the real npm/npx with the same arguments."""
@@ -249,6 +261,15 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
                 lines.append("indicators: " + ", ".join(iocs))
             if (d.verdict or {}).get("injection_attempt_observed"):
                 lines.append("the package contains text trying to talk the AI reviewer out of blocking it")
+            if d.kind == "too_new":
+                if d.suggestion:
+                    lines += ["", f"An older version passes the waiting period: npm install {d.suggestion}"]
+                lines += ["", f"Nothing was installed. Install it anyway (only if you are sure): add {ALLOW_FLAG}"]
+                console.print(Panel("\n".join(lines), title=f"HELD by Gatekeeper: {d.name}@{d.version} is too new", border_style="yellow"), markup=False)
+                typer.echo("Gatekeeper held this install because the version was published very recently. "
+                           + (f"You may install the older version {d.suggestion} instead, " if d.suggestion else "")
+                           + "or ask the user.", err=True)
+                raise typer.Exit(1)
             lines += ["", f"Nothing was installed. Override (only if you are sure): add {ALLOW_FLAG}"]
             console.print(Panel("\n".join(lines), title=f"BLOCKED by Gatekeeper: {d.name}@{d.version}", border_style="red"), markup=False)
             # message for AI coding agents reading stderr

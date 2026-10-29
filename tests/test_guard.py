@@ -72,3 +72,41 @@ def test_model_decisions_are_cached_by_integrity(tmp_path, monkeypatch):
     assert core._cache_get(meta)["allowed"] is False
     assert core._cache_get({**meta, "integrity": "sha512-other"}) is None  # different bytes, no reuse
     assert core._cache_get({**meta, "integrity": None}) is None
+
+
+def _fake_install(monkeypatch, tmp_path, meta, index=None):
+    import json as js
+
+    import gatekeeper.guard.core as core
+
+    monkeypatch.setattr(core, "CACHE_FILE", tmp_path / "verdicts.json")
+    monkeypatch.setattr(core, "MAL_INDEX_FILE", tmp_path / "mal.json")
+    core._MAL_CACHE.clear()
+    (tmp_path / "mal.json").write_text(js.dumps(index or {}))
+    monkeypatch.setattr(core, "resolve", lambda cmd, spec: meta)
+    monkeypatch.setattr(core, "_analyse", lambda *a: core.Decision("x", True, "static rules clean", meta["name"], meta["version"]))
+    return core
+
+
+def test_osv_listed_and_bad_dependency_are_blocked(monkeypatch, tmp_path):
+    evil = {"evil": {"public": "2026-10-01T00:00:00Z", "all": True, "versions": []}}
+    meta = {"name": "evil", "version": "1.0.0", "integrity": None, "time": {}, "dependencies": []}
+    assert _fake_install(monkeypatch, tmp_path, meta, evil).check_spec(["npm"], "evil").kind == "osv"
+    meta2 = {"name": "wrapper", "version": "1.0.0", "integrity": None, "time": {}, "dependencies": [("libsignal", "npm:evil@1")]}
+    d = _fake_install(monkeypatch, tmp_path, meta2, evil).check_spec(["npm"], "wrapper")
+    assert not d.allowed and d.kind == "dependency"
+
+
+def test_brand_new_version_is_held_with_an_older_suggestion(monkeypatch, tmp_path):
+    import time as t
+    from datetime import datetime, timezone
+
+    def iso(hours_ago):
+        return datetime.fromtimestamp(t.time() - hours_ago * 3600, timezone.utc).isoformat()
+
+    meta = {"name": "lib", "version": "2.0.0", "integrity": None, "dependencies": [],
+            "time": {"created": iso(500), "1.9.0": iso(100), "2.0.0-beta.1": iso(30), "2.0.0": iso(2)}}
+    core = _fake_install(monkeypatch, tmp_path, meta)
+    d = core.check_spec(["npm"], "lib", min_age_hours=24)
+    assert not d.allowed and d.kind == "too_new" and d.suggestion == "lib@1.9.0"
+    assert core.check_spec(["npm"], "lib", min_age_hours=0).allowed
