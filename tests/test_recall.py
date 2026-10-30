@@ -26,7 +26,7 @@ def test_flagged_missed_not_seen_before_monitor():
            for o in recall.classify(v, seen, flags, START)]
     assert [o.status for o in out] == ["flagged", "missed", "not_seen", "before_monitor"]
     assert out[0].publish_to_flag_min == 2.0 and out[0].lead_over_osv_min == 120.0
-    assert "scanned=False" in out[1].detail
+    assert "not downloaded" in out[1].detail
     s = recall.summarize(out)
     assert s["in_scope"] == 3 and s["flagged"] == 1 and s["recall"] == 0.333 and s["flagged_before_osv"] == 1
 

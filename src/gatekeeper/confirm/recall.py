@@ -102,6 +102,13 @@ def _targets(vuln: dict) -> list[tuple[str, list[str]]]:
     return out
 
 
+def _seen_detail(r: dict) -> str:
+    meta, content = r.get("meta_score") or 0, r.get("content_score") or 0
+    if not r.get("scanned"):
+        return f"metadata only, score {meta}: archive not downloaded"
+    return f"archive scanned, score {meta + content} (metadata {meta}, code {content}); not sent to a model"
+
+
 def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], start: datetime,
              queued: dict[str, str] | None = None, npm_times: dict[str, dict] | None = None) -> list[Outcome]:
     """One outcome per affected package.
@@ -136,7 +143,7 @@ def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], sta
             r = rows[0]
             q = [k for k in queued if (k in keys if versions else k.rpartition("@")[0] == name)]
             o.detail = "queued, but every model said benign" if q else ("error: " + str(r["error"])[:80]) if r.get("error") else \
-                f"scanned={bool(r.get('scanned'))} meta={r.get('meta_score')} content={r.get('content_score')}"
+                _seen_detail(r)
         else:
             # never in our feed window: published before the monitor started, or a coverage gap
             pubs = _real_publish_times(versions, npm_times.get(name) or {})
