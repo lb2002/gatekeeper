@@ -37,7 +37,7 @@ state = modal.Dict.from_name("gatekeeper-state", create_if_missing=True)
 queue = modal.Dict.from_name("gatekeeper-queue", create_if_missing=True)  # key "name@version" -> item
 worker_secret = modal.Secret.from_name("gatekeeper-worker")  # GK_WORKER_TOKEN
 NTFY_SECRET = modal.Secret.from_name("ntfy", required_keys=["NTFY_TOPIC"])  # reviewer push notifications
-QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk", "low_priority", "publisher")
+QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk", "low_priority", "publisher", "found_by")
 
 DATA = Path("/data")
 # Time budget of one poll run (the function is killed at 115 s): every network step has a short timeout
@@ -61,6 +61,10 @@ def _append_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 _FAST: dict = {}
+# The models' final say is precise (0.2-0.5% false positives) and their credits are mostly unused, so the
+# first stage should let more through: on the time-split test this gate reaches 77% of the malware at 5%
+# false positives on later live npm days, against 41-49% at the old 1-2%. Rules and fast stage only route.
+FAST_GATE = 0.18
 
 
 def _fast_scorer():
@@ -75,7 +79,7 @@ def _fast_scorer():
         return None
     if _FAST.get("mtime") != path.stat().st_mtime:
         _FAST.update(pickle.loads(path.read_bytes()), mtime=path.stat().st_mtime, lock=threading.Lock())
-    model, threshold, lock = _FAST["model"], _FAST["threshold"], _FAST["lock"]
+    model, threshold, lock = _FAST["model"], min(_FAST["threshold"], FAST_GATE), _FAST["lock"]
 
     def score(name: str, version: str, text: str, rules: list[str]) -> tuple[float, bool]:
         with lock:
@@ -573,6 +577,7 @@ def confirm() -> dict:
     lap("reveal")
     volume.commit()
     live_recall.spawn()  # separate container: reads all event logs and the OSV feed
+    sweep.spawn()
     last = (state.get("mal_index") or {}).get("at")
     if not last or now - datetime.fromisoformat(last) > timedelta(hours=24):
         refresh_mal_index.spawn()
@@ -589,13 +594,13 @@ SPARK_TOTAL_CAP_USD = 130.0
 SPARK_PER_RUN = 20
 SPARK_SECRET = modal.Secret.from_name("meta-api", required_keys=["MODEL_API_KEY"])
 # Muse Spark Open on Fireworks serverless (paid from Fireworks credits): judges every flag, ~$0.007 per package
-FIREWORKS_DAILY_CAP_USD = 5.0
+FIREWORKS_DAILY_CAP_USD = 8.0
 FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine-tuning tests
 FIREWORKS_PER_RUN = 60
 FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
 # Baseten serves the same Spark Open weights from the hackathon credits ($100): it takes over when
 # Fireworks reached its daily cap, so every flag still gets a Spark Open verdict
-BASETEN_DAILY_CAP_USD = 8.0
+BASETEN_DAILY_CAP_USD = 14.0
 BASETEN_TOTAL_CAP_USD = 85.0  # of $100; the rest stays for the time-split evaluation baseline
 BASETEN_SECRET = modal.Secret.from_name("baseten-api", required_keys=["BASETEN_API_KEY"])
 # classic token, public_repo only: opens the automatic OpenSSF reports as lb2002
@@ -1034,11 +1039,12 @@ def _spark_open_host() -> tuple[str, str, float, float] | None:
 
 
 LG_MAX_PER_RUN = 3000
-# v2: trained with real npm releases as negatives (v1 flagged 37% of live npm). Validation threshold
-# 0.10; 0.30 keeps live false positives at ~1.2% on held-out later days (55% time-split recall).
+# v2: trained with real npm releases as negatives (v1 flagged 37% of live npm). It only routes to the
+# Muse models, so it runs wide: 0.02 sends ~5% of live npm on and reaches 70% of the time-split malware
+# (with the fast gate, 82%); 0.30 sent 1.2% and reached 55%.
 LG_ADAPTER = "llamaguard1b-gatekeeper-v2"
-LG_MIN_THRESHOLD = 0.3
-LG_KILL_RATE = 0.04  # a run is "hot" if it flags more than 4% of the distinct packages it scores
+LG_GATE = 0.02
+LG_KILL_RATE = 0.12  # a run is "hot" if it flags more than 12% of the distinct packages it scores
 LG_STRONG = 0.9  # in a hot run, weaker hits are queued as low priority
 
 
@@ -1068,7 +1074,7 @@ def llamaguard() -> dict:
     if not candidates and not queued:
         return {"scored": 0}
     scorer = LlamaGuardScorer(DATA / "models" / LG_ADAPTER)
-    scorer.threshold = max(scorer.threshold, LG_MIN_THRESHOLD)
+    scorer.threshold = LG_GATE
     texts = [prepare(r["bundle"], r["name"], r["version"], r.get("rules") or []) for r in candidates]
     texts += [prepare(it["bundle"], it["name"], it["version"], it.get("rules") or []) for _, it in queued]
     risks = scorer.risk(texts)
@@ -1095,7 +1101,7 @@ def llamaguard() -> dict:
                 r["priority"] = min(r.get("priority") or 0, 0)
     if hot_runs == 1:
         _notify("Gatekeeper: unusual Llama Guard rate",
-                f"It flagged {len(names_flagged)} of {len(names_scored)} scanned packages (expected about 1%). "
+                f"It flagged {len(names_flagged)} of {len(names_scored)} scanned packages (expected about 5%). "
                 "Weaker hits are queued as low priority. Switch it off with set_lg if this continues.", tags="warning")
     added = _enqueue(new_flags) if new_flags else 0
     for r in new_flags:  # record the score as a verdict on the new queue items
@@ -1281,7 +1287,8 @@ def live_recall() -> dict:
                 r = json.loads(line)
                 if r.get("name") in names:
                     seen.setdefault(r["name"], []).append({k: r.get(k) for k in (
-                        "version", "published_at", "seen_at", "scanned", "flagged", "meta_score", "content_score", "error")})
+                        "version", "published_at", "seen_at", "scanned", "flagged", "meta_score", "content_score", "error", "publisher")})
+    state["reported_publishers"] = {n: p for n, rows in seen.items() for p in {r.get("publisher") for r in rows} if p}
     flags: dict[str, str] = {}
     salts = DATA / "ledger" / "salts.jsonl"
     if salts.exists():
@@ -1309,6 +1316,130 @@ def live_recall() -> dict:
     out.write_text(json.dumps(result, indent=1), encoding="utf-8")
     volume.commit()
     return result
+
+
+SWEEP_WINDOW = timedelta(days=45)  # how far back a suspect account's versions are read
+SWEEP_ACCOUNTS_PER_RUN = 15
+SWEEP_BUDGET_S = 420
+
+
+@app.function(image=image, volumes={str(DATA): volume}, timeout=600, cpu=1.0, memory=2048)
+def sweep(days: int = 2) -> dict:
+    """Follow every report to the account behind it. A public OSV report, or two Muse models agreeing, marks
+    the npm account; its endpoints join the campaign memory; and its other packages are read now, because
+    campaigns keep clean-looking siblings that nobody has reported yet. Spawned by `confirm` every hour."""
+    from gatekeeper.confirm import recall
+    from gatekeeper.monitor import process_names
+    from gatekeeper.npm import feed, packument
+    from gatekeeper.popular import load_popular
+    from gatekeeper.triage.campaign import account_names, packages_of, report_iocs
+
+    volume.reload()
+    now = datetime.now(timezone.utc)
+    started = time.monotonic()
+    popular = load_popular(DATA / "popular.txt")
+    accounts = state.get("campaign_publishers", {}) or {}
+    iocs = state.get("campaign_iocs", {}) or {}
+    reported = state.get("reported_publishers", {}) or {}
+    swept = state.get("swept_accounts", {}) or {}
+    stats = {"reports": 0, "new_accounts": 0, "new_iocs": 0, "packages": 0, "flagged": 0, "too_big": 0}
+    with feed.make_client(timeout=20) as client:
+        vulns = recall.fetch_recent(client, now - timedelta(days=days))
+        stats["reports"] = len(vulns)
+        for vuln in vulns:
+            for ioc in report_iocs(vuln):
+                if ioc not in iocs:
+                    iocs[ioc] = vuln["id"]
+                    stats["new_iocs"] += 1
+            for name, _ in recall._targets(vuln):
+                try:
+                    doc = packument.fetch_packument(client, name) or {}
+                except Exception as exc:
+                    print(f"sweep: {name}: {type(exc).__name__}"[:200])
+                    continue
+                for account in account_names(doc) | ({reported[name]} if name in reported else set()):
+                    if account not in accounts:
+                        accounts[account] = f"{name} ({vuln['id']})"
+                        stats["new_accounts"] += 1
+        state["campaign_iocs"] = iocs
+        state["campaign_publishers"] = accounts
+        names: list[str] = []
+        done_now = []
+        for account in [a for a in accounts if a not in swept][:SWEEP_ACCOUNTS_PER_RUN]:
+            try:
+                found = packages_of(client, account)
+            except Exception as exc:
+                print(f"sweep search {account}: {type(exc).__name__}"[:200])
+                continue
+            done_now.append(account)
+            if found is None:
+                stats["too_big"] += 1
+                swept[account] = "too many packages"
+            else:
+                swept[account] = now.isoformat()
+                names += [n for n in found if n not in popular]
+        names = list(dict.fromkeys(names))
+        stats["packages"] = len(names)
+        records, deferred = process_names(
+            client, names, popular, set(queue.keys()), now=now, window=SWEEP_WINDOW, deadline=started + SWEEP_BUDGET_S,
+            fast=_fast_scorer(), mal_index=_mal_index(), campaign=iocs, publishers=accounts, workers=8,
+        )
+    rows = [r.to_json() | {"found_by": "sweep"} for r in records]
+    flagged = [r for r in rows if r["flagged"]]
+    day = f"{now:%Y-%m-%d}"
+    if rows:
+        _append_jsonl(DATA / "events" / day / f"sweep-{now:%H%M%S}.jsonl",
+                      [r if r["flagged"] else {k: v for k, v in r.items() if k not in ("bundle", "excerpts")} for r in rows])
+    if flagged:
+        _append_jsonl(DATA / "flagged" / day / f"sweep-{now:%H%M%S}.jsonl", flagged)
+        stats["flagged"] = _enqueue(flagged)
+        daily = state.get("daily", {})
+        d = daily.setdefault(day, {"versions": 0, "scanned": 0, "flagged": 0})
+        d["flagged"] += stats["flagged"]
+        state["daily"] = daily
+    if deferred:  # the search is cheap, so a name that did not fit is simply found again next hour
+        for account in done_now:
+            swept.pop(account, None)
+    state["swept_accounts"] = swept
+    volume.commit()
+    state["last_sweep"] = {"at": now.isoformat(), **stats, "seconds": round(time.monotonic() - started)}
+    print(json.dumps(stats))
+    return stats
+
+
+@app.function(image=image, volumes={str(DATA): volume}, timeout=900, cpu=1.0, memory=4096)
+def requeue_stream(min_risk: float = FAST_GATE, days: int = 5, limit: int = 3000) -> dict:
+    """One pass over the evidence kept for scanned versions: what the wider gate would have sent to a model
+    goes there now, newest version of each package. Flag times are honest: they are the time of this pass."""
+    from gatekeeper.evidence.bundle import excerpt_refs
+
+    volume.reload()
+    now = datetime.now(timezone.utc)
+    best: dict[str, dict] = {}
+    for folder in sorted((DATA / "bundles").glob("*"))[-days:]:
+        for path in sorted(folder.glob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                if r.get("flagged") or (r.get("fast_risk") or 0) < min_risk or not r.get("bundle"):
+                    continue
+                if r["name"] not in best or (r.get("published_at") or "") > (best[r["name"]].get("published_at") or ""):
+                    best[r["name"]] = r
+    known = set(queue.keys())
+    todo = sorted((r for r in best.values() if f"{r['name']}@{r['version']}" not in known),
+                  key=lambda r: -r["fast_risk"])[:limit]
+    rows = [r | {"seen_at": now.isoformat(), "excerpts": excerpt_refs(r["bundle"]), "priority": round(10 * r["fast_risk"]),
+                 "flagged": True, "found_by": "stream-replay"} for r in todo]
+    added = _enqueue(rows)
+    if rows:
+        _append_jsonl(DATA / "flagged" / f"{now:%Y-%m-%d}" / f"replay-{now:%H%M%S}.jsonl", rows)
+    daily = state.get("daily", {})
+    d = daily.setdefault(f"{now:%Y-%m-%d}", {"versions": 0, "scanned": 0, "flagged": 0})
+    d["flagged"] += added
+    state["daily"] = daily
+    volume.commit()
+    return {"packages_over_gate": len(best), "queued": added}
 
 
 MAL_INDEX = DATA / "osv" / "mal_npm.json"

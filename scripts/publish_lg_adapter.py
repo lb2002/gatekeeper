@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VOLUME_DIR = "models/llamaguard1b-gatekeeper-v2"
 FILES = ("adapter_config.json", "adapter_model.safetensors", "threshold.json", "tokenizer.json", "tokenizer_config.json",
          "special_tokens_map.json")
-DEFAULT_REPO = "lb2002/Llama-Guard-3-1B-Gatekeeper-npm"
+DEFAULT_REPO = "lbaumberger/Llama-Guard-3-1B-Gatekeeper-npm"
 
 
 def main() -> None:

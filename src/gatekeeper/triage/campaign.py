@@ -8,6 +8,7 @@ webhook.site token, a tunnel subdomain). Only endpoints specific enough to name 
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 from urllib.parse import urlsplit
 
@@ -51,6 +52,36 @@ def specific_iocs(text: str) -> set[str]:
         elif any(host.endswith("." + s) and len(host) > len(s) + 1 for s in _SUBDOMAIN_HOSTS):
             out.add(host)
     return out
+
+
+def report_iocs(vuln: dict) -> set[str]:
+    """Endpoints named in a public OSV malware report: the text, and its OpenSSF `iocs` block."""
+    extra = vuln.get("database_specific") or {}
+    found = specific_iocs(f"{vuln.get('details') or ''} {json.dumps(extra)}")
+    ips = (extra.get("iocs") or {}).get("ips") or [] if isinstance(extra.get("iocs"), dict) else []
+    return found | {ip for ip in ips if isinstance(ip, str) and _public_ip(ip)}
+
+
+def account_names(doc: dict) -> set[str]:
+    """npm accounts behind a package: whoever published a version, and the maintainers. `npm` itself takes
+    over removed packages, so it never counts."""
+    names = {(v.get("_npmUser") or {}).get("name") for v in (doc.get("versions") or {}).values() if isinstance(v, dict)}
+    names |= {m.get("name") for m in doc.get("maintainers") or [] if isinstance(m, dict)}
+    return {n for n in names if n and n != "npm"}
+
+
+# A throwaway campaign account has a handful of packages. Hundreds mean a real maintainer whose one
+# package was hijacked: their other packages are no more suspect than anyone's.
+SWEEP_MAX_PACKAGES = 60
+
+
+def packages_of(client, account: str) -> list[str] | None:
+    """All packages of an npm account, or None if it has too many to be a throwaway account."""
+    r = client.get("https://registry.npmjs.org/-/v1/search",
+                   params={"text": f"maintainer:{account}", "size": SWEEP_MAX_PACKAGES + 1})
+    r.raise_for_status()
+    names = [o["package"]["name"] for o in r.json().get("objects", [])]
+    return None if len(names) > SWEEP_MAX_PACKAGES else names
 
 
 def matches(text: str, known: dict[str, str]) -> list[tuple[str, str]]:

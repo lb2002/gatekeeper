@@ -8,6 +8,7 @@ comparisons are fair. Every excerpt has an ID and numbered lines; models must ci
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from gatekeeper.npm.tarball import PackageFiles
@@ -121,6 +122,15 @@ def _windows(hit_lines: list[int], total: int) -> list[tuple[int, int]]:
         else:
             spans.append((start, end))
     return spans
+
+
+_EXCERPT_HEADER = re.compile(r"^\[(E\d+)\] (.*?)(?: \([^()]*\))? \(lines (\d+)-(\d+)\)$", re.MULTILINE)
+
+
+def excerpt_refs(text: str) -> list[dict]:
+    """The excerpt list of a rendered bundle, for stored bundles that kept only the text."""
+    return [{"excerpt_id": m[1], "path": m[2], "kind": "manifest" if "(selected fields)" in m[0] else "code",
+             "first_line": int(m[3]), "last_line": int(m[4])} for m in _EXCERPT_HEADER.finditer(text)]
 
 
 def build_bundle(

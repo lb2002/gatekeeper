@@ -358,3 +358,94 @@ def build_deep(split: str = "test", max_chars: int = 24000) -> dict:
              "mean_chars": round(sum(len(x["bundle"]) for x in good) / max(len(good), 1))}
     print(json.dumps(stats))
     return stats
+
+
+INVESTIGATE_SECRETS = [modal.Secret.from_name("baseten-api", required_keys=["BASETEN_API_KEY"]),
+                       modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"]),
+                       modal.Secret.from_name("meta-api", required_keys=["MODEL_API_KEY"])]
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=INVESTIGATE_SECRETS, timeout=3 * 3600, cpu=2.0, memory=4096)
+def eval_investigator(subset: str = "missed", backend: str = "spark-open-baseten", tag: str = "v1", max_usd: float = 6.0,
+                      parallel: int = 3, limit: int = 0) -> dict:
+    """The investigator on time-split test packages. Subsets: `missed` (malware all three one-shot models passed),
+    `caught` (40 they found), `hard` (benign with install scripts), `benign` (60 others). Needs the archives, so it
+    lives here next to the decryption; rows already done are skipped. Outputs are for evaluation only."""
+    import random
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gatekeeper.evidence.bundle import build_bundle
+    from gatekeeper.investigate import investigate
+    from gatekeeper.npm import feed, packument
+    from gatekeeper.npm.tarball import read_tarball
+    from gatekeeper.triage.content import score_content
+
+    def load(path: Path) -> list[dict]:
+        return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+    key = lambda r: (r["name"], r["version"])  # noqa: E731
+    rows = [r for f in ("malicious.jsonl", "benign.jsonl") for r in load(DATA / "datasets" / f) if r["split"] == "test"]
+    oneshot = [{key(r): r for r in load(DATA / "eval" / f)} for f in
+               ("glimmer-zeroshot-test.jsonl", "spark-open-baseten-zeroshot-test.jsonl", "spark-zeroshot-test.jsonl")]
+    caught = lambda r: any(e.get(key(r), {}).get("verdict") in ("malicious", "suspicious") for e in oneshot)  # noqa: E731
+    mal = [r for r in rows if r["label"] == "malicious"]
+    ben = [r for r in rows if r["label"] != "malicious"]
+    rng = random.Random(7)
+    chosen = {"missed": [r for r in mal if not caught(r)],
+              "caught": rng.sample([r for r in mal if caught(r)], 40),
+              "hard": [r for r in ben if r.get("hard_negative")],
+              "benign": rng.sample([r for r in ben if not r.get("hard_negative")], 60)}[subset]
+    out_path = DATA / "eval" / f"investigator-{tag}-{subset}.jsonl"
+    # failed rows are retried: only usable answers stay in the file
+    kept = [r for r in load(out_path) if r["verdict"]] if out_path.exists() else []
+    out_path.write_text("".join(json.dumps(r, ensure_ascii=False) + chr(10) for r in kept), encoding="utf-8")
+    done = {key(r) for r in kept}
+    todo = [r for r in chosen if key(r) not in done]
+    todo = todo[:limit] if limit else todo
+    paths = {(m["name"], m["version"]): m["path"] for m in map(_parse, _list_paths())}
+    lock = threading.Lock()
+    spent = [0.0]
+    started = time.time()
+
+    def work(r: dict) -> dict | None:
+        with lock:
+            if spent[0] >= max_usd:
+                return None
+        base = {"name": r["name"], "version": r["version"], "label": r["label"], "subset": subset}
+        try:
+            if r["label"] == "malicious":
+                pkg, _ = _package_from_zip(_blob(paths[key(r)]))
+            else:
+                with feed.make_client() as client:
+                    info = packument.version_info(packument.fetch_packument(client, r["name"]), r["version"])
+                    pkg = read_tarball(client.get(info.tarball_url).content)
+            content = score_content(pkg)
+            res = investigate(pkg, build_bundle(r["name"], r["version"], pkg, content), content, backend=backend)
+        except Exception as exc:
+            return base | {"verdict": None, "errors": [f"{type(exc).__name__}: {exc}"[:200]], "cost_usd": 0.0}
+        v = res.verdict
+        with lock:
+            spent[0] += res.cost_usd
+        return base | {"verdict": v.verdict.value if v else None, "confidence": v.confidence if v else None,
+                       "category": v.category.value if v else None, "trigger": v.trigger.value if v else None,
+                       "summary": v.summary if v else "", "errors": res.errors, "steps": res.steps,
+                       "input_tokens": res.input_tokens, "cached_tokens": res.cached_tokens, "output_tokens": res.output_tokens,
+                       "cost_usd": res.cost_usd}
+
+    n = 0
+    with ThreadPoolExecutor(max_workers=parallel) as ex, out_path.open("a", encoding="utf-8") as fh:
+        for rec in ex.map(work, todo):
+            if rec is None:
+                continue
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            n += 1
+            if n % 20 == 0:
+                fh.flush()
+                volume.commit()
+                print(f"{n}/{len(todo)} done, ${spent[0]:.2f}, {time.time() - started:.0f}s")
+    volume.commit()
+    stats = {"subset": subset, "new_rows": n, "todo": len(todo), "spent_usd": round(spent[0], 2), "seconds": round(time.time() - started)}
+    print(json.dumps(stats))
+    return stats
