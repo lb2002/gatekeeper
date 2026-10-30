@@ -11,6 +11,8 @@ Open-source malware detection for npm, built on Meta's models. It never runs pac
 
 Built for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 2026). See [PRIOR_WORK.md](PRIOR_WORK.md) for what we reuse.
 
+**Contents:** [How it works](#how-it-works) · [Install guard](#install-guard-decisions) · [Proving when we saw something](#proving-when-we-saw-something) · [Live results](#live-results-oct-27-30-2026) · [Evaluation](#evaluation) · [Try the guard](#try-the-install-guard) · [Run it](#run-it)
+
 ## How it works
 
 ![Gatekeeper architecture](docs/architecture.svg)
@@ -87,6 +89,8 @@ In its first three days the monitor read 238,117 new npm versions, scanned 38,17
 **Live recall.** Every hour the monitor takes each new OSV npm malware report and checks it against its own logs. Since it started (Oct 27, 14:02 UTC), OSV reported 18 malicious npm packages whose malware was published while it was watching: **it flagged 10 (56%), all before the report.** Of the 8 misses, OSV's own write-ups for 5 say no harmful behaviour was found (keyword matches in pentest tools and agent CLIs); the other 3 were brand-new packages with a `postinstall` hook whose code did not trip the rules (scores 4-7 of the 9 needed). Since Oct 30, every package younger than 72 hours that runs code at install time goes to a model regardless of its score: about 100-150 versions a day, under $1 a day with Muse Spark Open.
 
 Two traps in measuring this: OSV's `published` date is often backdated (see above), and most of the 81 reports about older malware list npm's own placeholder versions (`0.0.0-stage`, `0.0.1-security`, published by npm when it removes a package). Seeing only those means the malware came out before the monitor started, so they are excluded rather than counted as misses, and the monitor no longer scans them. The monitor was down from about 15:00 to 22:00 UTC on Oct 29 (it stalled on packages with hundreds of new versions; fixed, with alerts since).
+
+### Evaluation
 
 Time-split evaluation: train on samples discovered up to May 2026, test on samples discovered from July 2026 (June left out as a gap; campaign clusters deduplicated, no test cluster in training). Test set: 212 malicious, 590 benign packages including 71 hard negatives with install scripts. Thresholds are fixed on training data before the test set is scored once.
 
