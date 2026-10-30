@@ -27,3 +27,7 @@ jobs:
       - uses: ./
         with:
           path: tests/fixtures/clean-lock
+      - uses: ./
+        with:
+          path: tests/fixtures/clean-lock
+          since: HEAD

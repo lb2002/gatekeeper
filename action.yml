@@ -1,5 +1,5 @@
 name: Gatekeeper audit
-description: Fail the build if a locked npm package is reported malware or comes from outside the registry.
+description: Fail the build if a locked npm package is reported malware, comes from outside the registry, or a Muse agent finds a package added by a pull request malicious.
 branding:
   icon: shield
   color: red
@@ -7,6 +7,9 @@ inputs:
   path:
     description: Project folder or lockfile
     default: .
+  since:
+    description: Git ref to compare with. On a pull request this defaults to the base commit, and up to 5 added public versions are read by the hosted investigator.
+    default: ""
 runs:
   using: composite
   steps:
@@ -15,6 +18,11 @@ runs:
       env:
         AUDIT_PATH: ${{ inputs.path }}
         GATEKEEPER: ${{ github.action_path }}
+        SINCE: ${{ inputs.since || github.event.pull_request.base.sha }}
       run: |
         uvx --from "$GATEKEEPER" gk guard update-osv
-        uvx --from "$GATEKEEPER" gk audit "$AUDIT_PATH"
+        if [ -n "$SINCE" ]; then
+          git fetch --quiet --depth=1 origin "$SINCE" || true
+          set -- --since "$SINCE"
+        fi
+        uvx --from "$GATEKEEPER" gk audit "$AUDIT_PATH" "$@"

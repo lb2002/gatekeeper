@@ -574,18 +574,23 @@ def audit(
     path: str = typer.Argument(".", help="A project folder or a lockfile"),
     offline: bool = typer.Option(False, help="Use only the local list, send nothing to OSV"),
     as_json: bool = typer.Option(False, "--json", help="Print the report as JSON"),
+    since: str = typer.Option("", help="Git ref: also have the hosted investigator read up to 5 public versions added since then"),
 ) -> None:
     """Am I already affected? Checks every version in a project's lockfile. Exit code 1 if something is wrong.
 
-    Reads only the lockfile: nothing is installed or executed. Online it sends package names and versions to OSV."""
+    Reads only the lockfile: nothing is installed or executed. Online it sends package names and versions to OSV,
+    and with --since the names and versions of added public packages to the hosted investigator."""
     import json
     from pathlib import Path
 
-    from gatekeeper.audit import SEVERE, audit as run_audit, read_lockfile
-    from gatekeeper.guard.core import OSV_ONLINE, index_age_days, load_mal_index
+    import httpx
+
+    from gatekeeper.audit import SEVERE, added_since, audit as run_audit, locked_at, read_lockfile, review_added
+    from gatekeeper.guard.core import BLOCK_CONFIDENCE, OSV_ONLINE, cloud_verdict, index_age_days, load_mal_index
 
     try:
         file, locked = read_lockfile(Path(path))
+        before = locked_at(file, since) if since else []
     except (FileNotFoundError, ValueError, OSError) as exc:
         console.print(plain(f"cannot read a lockfile: {exc}"), markup=False)
         raise typer.Exit(2) from None
@@ -594,6 +599,11 @@ def audit(
         raise typer.Exit(2)
     index = load_mal_index()
     report = run_audit(locked, index, online=OSV_ONLINE and not offline)
+    if since and OSV_ONLINE and not offline:
+        with httpx.Client(timeout=20) as client:
+            report["since"] = review_added(added_since(locked, before), cloud_verdict, client, BLOCK_CONFIDENCE)
+        report["findings"] += report["since"].pop("findings")
+        report["severe"] = any(f["kind"] in SEVERE for f in report["findings"])
     if as_json:
         print(json.dumps(report, indent=1))
         raise typer.Exit(1 if report["severe"] else 0)
@@ -607,6 +617,14 @@ def audit(
     for f in report["findings"]:
         color = "red" if f["kind"] in SEVERE else "yellow"
         console.print(f"[{color}]{escape(plain(f['name'] + '@' + f['version']))}[/{color}]  {escape(plain(f['detail']))}")
+    if "since" in report:
+        review = report["since"]
+        console.print(plain(f"{review['added']} versions added since {since}"), markup=False)
+        for row in review["read"]:
+            console.print(plain(f"  {row['name']}@{row['version']}: read by the investigator, {row['verdict']} ({row['confidence']:.2f})"), markup=False)
+        if review["unread"]:
+            shown = ", ".join(review["unread"][:8])
+            console.print(plain(f"  not read (private, over the limit of 5, or no answer): {shown}"), markup=False)
     if not report["findings"]:
         console.print("[green]No known malware, no foreign sources.[/green] That covers what is reported so far, not what nobody has found yet.")
     raise typer.Exit(1 if report["severe"] else 0)

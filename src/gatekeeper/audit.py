@@ -3,20 +3,27 @@
 The install guard protects the next install; after an incident the question is about what is already there. The
 lockfile answers it without touching node_modules or running anything. Works offline from the local copy of OSV's list;
 online it also asks OSV about the exact versions, because the list can be a day old.
+
+With `--since <git ref>` it also asks what a change brought in. Nobody has reported a package that came out this morning,
+so those versions go to the hosted investigator, which reads them. That is the pull request check of the GitHub Action.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 from urllib.parse import unquote
 
 import httpx
 import yaml
 
 from gatekeeper.confirm.osv import OSV_QUERY_URL
+from gatekeeper.npm.packument import packument_url
 
 _YamlLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 OSV_BATCH_URL = OSV_QUERY_URL + "batch"
@@ -26,7 +33,10 @@ LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn
 # Projects do pin forks on code hosts, so that is a note; it would fail too many builds to be an error
 CODE_HOSTS = ("github.com", "codeload.github.com", "raw.githubusercontent.com", "gitlab.com", "bitbucket.org")
 MALICIOUS, UNTRUSTED_SOURCE, CODE_HOST_SOURCE, NO_INTEGRITY = "malicious", "untrusted_source", "code_host_source", "no_integrity"
-SEVERE = {MALICIOUS, UNTRUSTED_SOURCE}
+MODEL_FLAGGED = "model_flagged"
+SEVERE = {MALICIOUS, UNTRUSTED_SOURCE, MODEL_FLAGGED}
+MAX_REVIEWED = 5
+REVIEW_WORKERS = 3
 
 
 @dataclass
@@ -174,15 +184,72 @@ def parse_pnpm(text: str) -> list[Locked]:
     return out
 
 
+def _parser_of(file: Path) -> Callable[[str], list[Locked]]:
+    return parse_yarn if file.name == "yarn.lock" else parse_pnpm if file.suffix == ".yaml" else parse_npm
+
+
 def read_lockfile(path: Path) -> tuple[Path, list[Locked]]:
     """The lockfile at `path`, or the first one in that folder. Raises FileNotFoundError if there is none."""
     candidates = [path] if path.is_file() else [path / n for n in LOCKFILES]
     for file in candidates:
         if file.exists():
-            text = file.read_text(encoding="utf-8")
-            parse = parse_yarn if file.name == "yarn.lock" else parse_pnpm if file.suffix == ".yaml" else parse_npm
-            return file, parse(text)
+            return file, _parser_of(file)(file.read_text(encoding="utf-8"))
     raise FileNotFoundError(f"no lockfile in {path}")
+
+
+def locked_at(file: Path, ref: str) -> list[Locked]:
+    """The same lockfile at git `ref`; empty if it did not exist there. ValueError if git does not know the ref."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(file.parent.resolve()), *args], capture_output=True, encoding="utf-8", errors="replace")
+
+    if ref.startswith("-") or git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode:
+        raise ValueError(f"git does not know {ref}")
+    shown = git("show", f"{ref}:./{file.name}")
+    return _parser_of(file)(shown.stdout) if shown.returncode == 0 else []
+
+
+def added_since(locked: list[Locked], before: list[Locked]) -> list[Locked]:
+    """Versions that were not there before. A new version of an old dependency counts: that is what a hijack looks
+    like. First what runs at install, then names the project never had."""
+    had = {(p.name, p.version) for p in before}
+    names = {p.name for p in before}
+    new = {(p.name, p.version): p for p in locked if (p.name, p.version) not in had}
+    return sorted(new.values(), key=lambda p: (not p.install_script, p.name in names, p.name))
+
+
+def public_release(client: httpx.Client, p: Locked) -> dict | None:
+    """The public registry's record of exactly this version. None for anything else: a private package is not sent on."""
+    if p.resolved and not on_registry(p.resolved):
+        return None
+    try:
+        resp = client.get(f"{packument_url(p.name)}/{p.version}")
+        tarball = (resp.json().get("dist") or {}).get("tarball") if resp.status_code == 200 else None
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+    return {"name": p.name, "version": p.version, "tarball": tarball} if tarball else None
+
+
+def review_added(added: list[Locked], ask: Callable[[dict], dict | None], client: httpx.Client, block_at: float) -> dict:
+    """Have up to MAX_REVIEWED of the `added` versions read. `ask` returns a verdict, or None if it has no answer."""
+    releases = []
+    for p in added:
+        if len(releases) == MAX_REVIEWED:
+            break
+        if release := public_release(client, p):
+            releases.append(release)
+    with ThreadPoolExecutor(REVIEW_WORKERS) as pool:
+        answers = list(pool.map(ask, releases))
+    read, findings = [], []
+    for release, v in zip(releases, answers):
+        if not v:
+            continue
+        row = {"name": release["name"], "version": release["version"], "verdict": v["verdict"], "confidence": v["confidence"], "summary": v.get("summary", "")}
+        read.append(row)
+        if v["verdict"] == "malicious" or (v["verdict"] == "suspicious" and v["confidence"] >= block_at):
+            findings.append(Finding(MODEL_FLAGGED, row["name"], row["version"], f"Muse Spark Open read it: {v['verdict']} ({v['confidence']:.2f}), {row['summary'][:300]}"))
+    done = {(r["name"], r["version"]) for r in read}
+    return {"added": len(added), "read": read, "unread": [f"{p.name}@{p.version}" for p in added if (p.name, p.version) not in done],
+            "findings": [asdict(f) for f in findings]}
 
 
 def parse_text(text: str) -> list[Locked]:

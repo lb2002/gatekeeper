@@ -1,6 +1,7 @@
 """`gk audit`: lockfile parsing and the checks. Package names here are invented; nothing is installed."""
 
 import json
+import subprocess
 
 import httpx
 import pytest
@@ -278,3 +279,66 @@ def test_only_a_real_url_counts_as_the_registry():
 def test_a_foreign_resolved_field_wins_over_registry_urls_elsewhere():
     text = '"a@https://registry.npmjs.org/a.tgz":\n  version "1.0.0"\n  resolved "evil.example/a.tgz"\n'
     assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def _p(name, version="1.0.0", **kw):
+    return au.Locked(name, version, **kw)
+
+
+def test_added_versions_start_with_what_runs_at_install():
+    before = [_p("old"), _p("kept")]
+    now = [_p("kept"), _p("old", "2.0.0"), _p("brand-new"), _p("hook", install_script=True)]
+    assert [p.name for p in au.added_since(now, before)] == ["hook", "brand-new", "old"]
+
+
+def _registry(*public):
+    def answer(request):
+        path = httpx.URL(str(request.url)).raw_path.decode()
+        name = path.rsplit("/", 1)[0].lstrip("/").replace("%2F", "/")
+        if name in public:
+            return httpx.Response(200, json={"dist": {"tarball": f"https://registry.npmjs.org/{name}/-/x.tgz"}})
+        return httpx.Response(404)
+
+    return httpx.Client(transport=httpx.MockTransport(answer))
+
+
+def test_private_packages_are_never_sent_on():
+    asked = []
+
+    def ask(release):
+        asked.append(release["name"])
+        return {"verdict": "benign", "confidence": 0.9, "summary": "fine"}
+
+    added = [_p("@acme/private"), _p("foreign", resolved="https://npm.acme.example/foreign.tgz"), _p("left-pad")]
+    review = au.review_added(added, ask, _registry("left-pad", "foreign"), 0.6)
+    assert asked == ["left-pad"] and review["unread"] == ["@acme/private@1.0.0", "foreign@1.0.0"] and review["findings"] == []
+
+
+def test_a_bad_verdict_fails_the_check_and_no_answer_stays_unread():
+    verdicts = {"bad": {"verdict": "malicious", "confidence": 0.9, "summary": "steals"}, "odd": {"verdict": "suspicious", "confidence": 0.5, "summary": "?"}}
+    review = au.review_added([_p("bad"), _p("odd"), _p("gone")], lambda r: verdicts.get(r["name"]), _registry("bad", "odd", "gone"), 0.6)
+    assert [f["name"] for f in review["findings"]] == ["bad"] and review["findings"][0]["kind"] in au.SEVERE
+    assert review["unread"] == ["gone@1.0.0"] and len(review["read"]) == 2
+
+
+def test_only_five_versions_are_read():
+    names = [f"p{i}" for i in range(9)]
+    review = au.review_added([_p(n) for n in names], lambda r: {"verdict": "benign", "confidence": 1, "summary": ""}, _registry(*names), 0.6)
+    assert len(review["read"]) == 5 and len(review["unread"]) == 4
+
+
+def test_the_lockfile_of_an_earlier_commit_is_read(tmp_path):
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.com", *args], check=True, capture_output=True)
+
+    lock = tmp_path / "yarn.lock"
+    lock.write_text('a@^1:\n  version "1.0.0"\n', encoding="utf-8")
+    git("init")
+    git("add", ".")
+    git("commit", "-m", "one")
+    lock.write_text('a@^1:\n  version "1.0.0"\nb@^1:\n  version "2.0.0"\n', encoding="utf-8")
+    assert [p.name for p in au.locked_at(lock, "HEAD")] == ["a"]
+    with pytest.raises(ValueError):
+        au.locked_at(lock, "no-such-ref")
+    with pytest.raises(ValueError):
+        au.locked_at(lock, "--output=x")

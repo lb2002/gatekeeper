@@ -48,6 +48,10 @@ Verdicts are cached per tarball integrity. `--gk-allow` skips every check for on
 - **The model can be wrong.** On the time-split test set the Muse models block 55-57% of malware (Muse Glimmer with no
   false blocks out of 590 benign packages); the OSV list and the waiting period exist because of the rest.
 
+## What `gk audit --since` sends
+
+The names and versions of up to 5 added packages go to the hosted investigator, and only if the public registry has exactly that version; each lookup asks the public registry about that name. Nothing else about the project is sent. A private package has no public release, or comes from another host, and stays out. `--offline` and `GK_NO_CLOUD=1` turn this off.
+
 ## Code behind a URL dependency
 
 A package can name a URL instead of a version. The guard and the hosted investigator fetch that archive and read it as text; nothing from it is run. The URL is chosen by the package author, so the fetch accepts only public addresses, follows no redirect it has not checked, verifies the address it actually reached, and gives up after 20 seconds or 5 MB. On the guard this means your machine contacts the URL, which `npm install` would do anyway. A URL dependency that cannot be read is blocked, not waved through.
