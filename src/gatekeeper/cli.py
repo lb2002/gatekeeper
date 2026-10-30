@@ -54,7 +54,7 @@ def poll_once(
                 return []
             out = []
             for info in packument.recent_versions(doc, timedelta(minutes=window_minutes)):
-                if info.is_security_holder:
+                if info.is_npm_placeholder:
                     continue
                 out.append(("ok", info, score_metadata(info, popular)))
             return out

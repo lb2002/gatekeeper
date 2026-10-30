@@ -126,6 +126,7 @@ def test_npm_placeholders_are_never_scanned():
     from gatekeeper.npm.packument import VersionInfo
 
     for version, publisher, expected in (("0.0.0-stage", "npm", True), ("0.0.1-security", "npm", True),
-                                         ("1.0.0", "npm", True), ("1.0.0", "someone", False)):
+                                         ("0.0.1-security", "attacker", False), ("0.0.0-stage", "attacker", False),
+                                         ("1.0.0-security", None, False), ("1.0.0", "someone", False)):
         info = VersionInfo(name="x", version=version, published_at=None, package_created_at=None, publisher=publisher)
         assert info.is_npm_placeholder is expected

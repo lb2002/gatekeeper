@@ -71,7 +71,8 @@ def fetch_times(names: list[str], workers: int = 16) -> dict[str, dict]:
 
 
 def _real_publish_times(versions: list[str], times: dict) -> list[datetime]:
-    real = [v for v in versions if not is_placeholder_version(v)] or         [v for v in times if v not in ("created", "modified", "unpublished") and not is_placeholder_version(v)]
+    real = [v for v in versions if not is_placeholder_version(v)]
+    real = real or [v for v in times if v not in ("created", "modified", "unpublished") and not is_placeholder_version(v)]
     return [t for t in (parse_ts(times.get(v)) if isinstance(times.get(v), str) else None for v in real) if t]
 
 

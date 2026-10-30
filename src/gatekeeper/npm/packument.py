@@ -15,7 +15,9 @@ STAGE_PLACEHOLDER_VERSION = "0.0.0-stage"
 
 
 def is_placeholder_version(version: str) -> bool:
-    return version == STAGE_PLACEHOLDER_VERSION or version.endswith("-security")
+    """The exact version strings npm uses for its placeholders. Anyone can publish these strings too, so
+    this alone only serves bookkeeping (recall, catch counts); skipping a scan needs `is_npm_placeholder`."""
+    return version in (STAGE_PLACEHOLDER_VERSION, SECURITY_HOLDER_VERSION)
 
 
 @dataclass
@@ -47,9 +49,10 @@ class VersionInfo:
 
     @property
     def is_npm_placeholder(self) -> bool:
-        """Published by npm itself, never by the package's author: the security holder and the
-        `0.0.0-stage` staged-publishing placeholder npm also writes when it takes malware down."""
-        return is_placeholder_version(self.version) or self.publisher == "npm"
+        """Published by npm itself (the security holder, and the `0.0.0-stage` staged-publishing placeholder
+        npm also writes when it takes malware down). Decided by the publishing account, which the registry
+        sets, never by the version string, which the author picks: `evil@0.0.1-security` is still scanned."""
+        return self.publisher == "npm"
 
     @property
     def install_hook_added(self) -> bool:
