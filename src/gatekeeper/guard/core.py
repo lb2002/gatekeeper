@@ -188,6 +188,15 @@ def older_version(meta: dict, min_age_h: float, now: float | None = None) -> str
 
 
 RESOLVE_COMMANDS = INSTALL_COMMANDS | {"update", "up", "upgrade", "udpate"}
+# read-only commands where --before would change what the user sees
+VIEW_COMMANDS = {"view", "v", "info", "show", "outdated", "search", "s", "se", "find"}
+# commands that never fetch a package from the registry: if npm's own parse fails, these may still run
+SAFE_COMMANDS = {"run", "run-script", "rum", "urn", "test", "t", "tst", "start", "stop", "restart", "ls", "list", "ll", "la",
+                 "version", "help", "help-search", "config", "c", "get", "set", "whoami", "ping", "root", "prefix",
+                 "docs", "home", "bugs", "repo", "issues", "explain", "why", "query", "fund", "doctor", "completion",
+                 "login", "logout", "adduser", "profile", "token", "owner", "access", "team", "org", "star", "unstar",
+                 "stars", "hook", "dist-tag", "deprecate", "undeprecate", "unpublish", "prune", "edit", "sbom", "pkg",
+                 "uninstall", "un", "unlink", "remove", "rm", "r"}
 # npm options that take the next argument as their value (`--registry URL`); `--flag=value` needs no entry. Only
 # options that take a value everywhere: at the top level `-p` is the boolean --parseable, so `npm -p install x`
 # must still be read as an install. The exec-only ones (-p/--package, -c/--call) are handled in _exec_specs.
@@ -329,13 +338,17 @@ NPM_ARGV_JS = Path(__file__).with_name("npm_argv.js")
 def npm_root(npm_exe: str) -> Path | None:
     """The npm package directory behind an npm executable (Windows npm.cmd, a unix symlink to npm-cli.js, ...)."""
     exe = Path(npm_exe)
-    candidates = [exe.parent / "node_modules" / "npm", exe.parent.parent / "lib" / "node_modules" / "npm"]
+    candidates = []
+    if os.name == "nt" and os.environ.get("APPDATA"):
+        # npm.cmd runs a globally upgraded npm from %APPDATA%\npm when there is one (bin/npm-prefix.js)
+        candidates.append(Path(os.environ["APPDATA"]) / "npm" / "node_modules" / "npm")
+    candidates += [exe.parent / "node_modules" / "npm", exe.parent.parent / "lib" / "node_modules" / "npm"]
     with contextlib.suppress(OSError):
         candidates.append(exe.resolve().parent.parent)
     return next((c for c in candidates if (c / "lib" / "utils" / "cmd-list.js").exists()), None)
 
 
-def npm_native_parse(npm_exe: str, tool: str, args: list[str], timeout: float = 90) -> dict | None:
+def npm_native_parse(npm_exe: str, tool: str, args: list[str], timeout: float = 90, before: str | None = None) -> dict | None:
     """Ask the installed npm itself what this command line installs or runs: npm's config loader (options,
     shorthands, abbreviations, .npmrc, npm_config_* variables), its command aliases, npm-package-arg for the
     spec type and pacote for the exact version, with the user's registry, tag and before settings. Re-parsing
@@ -346,8 +359,9 @@ def npm_native_parse(npm_exe: str, tool: str, args: list[str], timeout: float = 
         return None
     node = next((str(p) for p in (Path(npm_exe).parent / "node.exe", Path(npm_exe).parent / "node") if p.exists()), "node")
     try:
+        env = {**os.environ, "GK_BEFORE": before} if before else None
         out = subprocess.run([node, str(NPM_ARGV_JS), str(root), tool, *args], capture_output=True, text=True,
-                             timeout=timeout, encoding="utf-8")
+                             timeout=timeout, encoding="utf-8", env=env)
         data = json.loads(out.stdout or "{}")
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -368,8 +382,10 @@ def with_before(tool: str, args: list[str], min_age_hours: float | None = None, 
     # first, so it is always read as an option (after `--`, or after npx's package, it would be an argument)
     if tool == "npx":
         return [flag, *args]
+    # Every other npm command gets it: harmless where nothing is resolved, and deciding "does this install?" in
+    # Python is exactly the guesswork npm_native_parse replaced (audit fix, dedupe, link, it, ... all resolve).
     i = command_index(args)
-    if tool != "npm" or i is None or _canonical(args[i]) not in RESOLVE_COMMANDS | EXEC_COMMANDS | {"init", "create", "innit"}:
+    if tool != "npm" or (i is not None and _canonical(args[i]) in VIEW_COMMANDS):
         return list(args)
     return [flag, *args]
 

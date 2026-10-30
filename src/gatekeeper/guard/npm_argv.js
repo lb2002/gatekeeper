@@ -21,6 +21,28 @@ const { deref } = require(path.join(npmRoot, 'lib', 'utils', 'cmd-list.js'))
 const INSTALL = new Set(['install', 'install-test', 'update'])
 const EXEC = new Set(['exec'])
 const INIT = new Set(['init'])
+// commands that fetch (and, for git specs, build) packages without installing them: only remote specs matter here,
+// because pacote runs `npm install` and the `prepare` script inside a git clone to pack it
+const INSPECT = new Set(['pack', 'cache', 'diff', 'view'])
+const fs = require('fs')
+
+// what `npm install <bare name>` really resolves when the project already has it: arborist keeps the lockfile's
+// version, or else the range saved in package.json (build-ideal-tree: "if it's just @'' ... reload what's there")
+function projectSpec (spec) {
+  let r
+  try { r = npa(spec) } catch (e) { return spec }
+  if (!r.registry || (r.rawSpec !== '' && r.rawSpec !== '*')) return spec
+  const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch (e) { return null } }
+  const lock = read('package-lock.json') || read('npm-shrinkwrap.json')
+  const locked = lock && lock.packages && lock.packages['node_modules/' + r.name]
+  if (locked && locked.version && !locked.link) return `${r.name}@${locked.version}`
+  const pkg = read('package.json') || {}
+  for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    const range = (pkg[section] || {})[r.name]
+    if (typeof range === 'string') return `${r.name}@${range}`
+  }
+  return spec
+}
 
 // npx -> `npm exec ...`, the same rewriting as npm's bin/npx-cli.js
 function npxToExec (args) {
@@ -100,8 +122,14 @@ async function main () {
   const raw = remain.shift()
   const command = raw === undefined ? null : (deref(raw) || null)
   let specs = []
+  const inspect = []
   if (command && INSTALL.has(command)) {
-    specs = remain
+    specs = remain.map(projectSpec)
+  } else if (command === 'link') {
+    // `npm link <name>` installs <name> globally from the registry when it is not linked yet (link.js)
+    specs = remain.filter((x) => { try { return npa(x).type !== 'directory' } catch (e) { return true } })
+  } else if (command && INSPECT.has(command)) {
+    inspect.push(...(command === 'cache' ? remain.slice(1) : remain), ...[].concat(config.get('diff') || []))
   } else if (command && EXEC.has(command)) {
     const pkgs = [].concat(config.get('package') || [])
     specs = pkgs.length ? pkgs : remain.slice(0, 1)
@@ -109,9 +137,23 @@ async function main () {
     specs = [createPackage(remain[0])]
   }
   const flat = { ...config.flat }
-  const before = config.get('before')
+  let before = null
+  try {
+    before = config.get('before') ? new Date(config.get('before')).toISOString() : null
+  } catch (e) {
+    before = 'invalid'
+  }
   const resolved = []
+  for (const spec of inspect) {
+    let type
+    try { type = kind(spec) } catch (e) { type = 'invalid' }
+    if (type === 'remote' || type === 'invalid') resolved.push({ spec, type })
+  }
   for (const spec of specs) {
+    if (!spec) {
+      resolved.push({ spec, type: 'invalid', error: 'empty package spec' })
+      continue
+    }
     let type
     try {
       type = kind(spec)
@@ -125,7 +167,20 @@ async function main () {
     }
     try {
       // the version npm would pick, with the user's registry, scoped registries, tag and before settings
-      const mani = await pacoteMod().manifest(spec, { ...flat, fullMetadata: true })
+      let mani = await pacoteMod().manifest(spec, { ...flat, fullMetadata: true })
+      let requested = null
+      // Gatekeeper's waiting period (GK_BEFORE) goes onto the real install as --before unless the user set one:
+      // resolve with it too, so the version checked is the version npm will install. If nothing old enough
+      // matches, keep the requested one: the guard holds it and suggests an older version.
+      if (process.env.GK_BEFORE && !before) {
+        try {
+          const old = await pacoteMod().manifest(spec, { ...flat, before: new Date(process.env.GK_BEFORE), fullMetadata: true })
+          if (old.version !== mani.version) {
+            requested = mani.version
+            mani = old
+          }
+        } catch (e) {}
+      }
       const pack = await pacoteMod().packument(mani.name, { ...flat, fullMetadata: true })
       const deps = []
       for (const section of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
@@ -140,6 +195,7 @@ async function main () {
         integrity: mani._integrity || (mani.dist && mani.dist.integrity),
         time: pack.time || {},
         dependencies: deps,
+        requested_version: requested,
       })
     } catch (e) {
       resolved.push({ spec, type, error: String(e.code || '') + ' ' + String(e.message || e).slice(0, 300) })
@@ -147,7 +203,7 @@ async function main () {
   }
   process.stdout.write(JSON.stringify({
     command, raw: raw === undefined ? null : raw, positionals: remain, specs: resolved,
-    before: before ? new Date(before).toISOString() : null,
+    before,
   }))
 }
 

@@ -156,7 +156,9 @@ def test_waiting_period_reaches_the_whole_dependency_tree():
     assert with_before("npm", ["--", "install", "evil"], 24, now) == [flag, "--", "install", "evil"]  # never after --
     assert with_before("npm", ["create", "vite"], 24, now) == [flag, "create", "vite"]
     assert with_before("npx", ["cowsay", "--x"], 24, now) == [flag, "cowsay", "--x"]
-    assert with_before("npm", ["run", "build"], 24, now) == ["run", "build"]
+    assert with_before("npm", ["run", "build"], 24, now) == [flag, "run", "build"]  # harmless; nested installs inherit it
+    assert with_before("npm", ["view", "x", "time"], 24, now) == ["view", "x", "time"]  # would change the answer
+    assert with_before("npm", ["it", "x"], 24, now)[0] == flag and with_before("npm", ["audit", "fix"], 24, now)[0] == flag
     assert with_before("npm", ["install", "x", "--before=2020-01-01"], 24, now) == ["install", "x", "--before=2020-01-01"]
     assert with_before("npm", ["install", "x"], 0, now) == ["install", "x"]
 

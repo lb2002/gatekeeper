@@ -312,8 +312,8 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import (ALLOW_FLAG, check_spec, index_age_days, load_fast_model, npm_native_parse,
-                                       package_specs, registry_args, remote_specs, with_before)
+    from gatekeeper.guard.core import (ALLOW_FLAG, SAFE_COMMANDS, check_spec, command_index, index_age_days,
+                                       load_fast_model, npm_native_parse, registry_args, with_before)
 
     # the shims call `gk guard run npm -- <args>`: drop that one separator, keep the user's own `--`
     args = list(ctx.args[1:] if ctx.args[:1] == ["--"] else ctx.args)
@@ -321,14 +321,27 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     real = shim.npm_command(cfg, tool)
     allow = ALLOW_FLAG in args
     plain = [a for a in args if a != ALLOW_FLAG]
-    native = None if allow else npm_native_parse(shim.npm_command(cfg, tool)[0], tool, plain)
+    # the waiting period the real install will run with: resolve with the same cutoff, check what gets installed
+    final = plain if allow else with_before(tool, plain)
+    before = [a for a in final if a not in plain]
+    native = None if allow else npm_native_parse(shim.npm_command(cfg, tool)[0], tool, plain,
+                                                 before=before[0][9:] if before else None)
     if native is not None:
         remote = [x["spec"] for x in native["specs"] if x["type"] in ("remote", "invalid")]
         resolved = {x["spec"]: x for x in native["specs"] if x["type"] == "registry"}
+    elif not allow:
+        # Never fall back to guessing: a broken .npmrc or a slow registry must not reopen what npm's own parse closed.
+        i = command_index(plain)
+        if tool == "npx" or i is None or plain[i] not in SAFE_COMMANDS:
+            console.print(Panel("Gatekeeper could not ask npm which packages this command would install or run (npm's "
+                                "own argument parsing failed or timed out), so nothing was run.\n\n"
+                                f"Check your .npmrc / npm_config_* settings, or add {ALLOW_FLAG} if you are sure.",
+                                title="BLOCKED by Gatekeeper: could not check", border_style="red"), markup=False)
+            typer.echo("Gatekeeper could not check this npm command. Do not retry with other flags; ask the user.", err=True)
+            raise typer.Exit(1)
+        remote, resolved = [], {}
     else:
-        console.print("[yellow]gatekeeper[/] could not ask npm how it reads this command; using Gatekeeper's own parser",
-                      highlight=False)
-        remote, resolved = remote_specs(tool, args), {}
+        remote, resolved = [], {}
     if remote and not allow:
         console.print(Panel("\n".join([f"{', '.join(remote)} would be fetched from git or a URL: no registry metadata and no",
                                         "integrity hash, so Gatekeeper cannot check it before its install scripts run.",
@@ -337,7 +350,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
         typer.echo("Gatekeeper blocked an install from git or a URL it cannot check. Do not retry with other flags; ask the user.",
                    err=True)
         raise typer.Exit(1)
-    specs = list(resolved) if native is not None else package_specs(tool, args)
+    specs = list(resolved)
     if specs and not allow:
         fast_model = load_fast_model()
         stale = index_age_days()
@@ -351,6 +364,9 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
                 if r is not None and r.get("error"):
                     raise RuntimeError(f"npm could not resolve it ({r['error'].strip()[:200]})")
                 meta = None if r is None else {k: r[k] for k in ("name", "version", "tarball", "integrity", "time", "dependencies")}
+                if r is not None and r.get("requested_version"):
+                    console.print(f"[dim]gatekeeper: npm will install {escape(r['name'])}@{escape(r['version'])}, the newest match "
+                                  f"older than the waiting period ({escape(r['requested_version'])} is newer)[/]", highlight=False)
                 d = check_spec(shim.npm_command(cfg, "npm") + registry_args(args), spec, fast_model=fast_model, meta=meta)
             except Exception as exc:
                 # Fail closed: a package must not get through just because checking it failed
@@ -384,9 +400,9 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
             # message for AI coding agents reading stderr
             typer.echo("Gatekeeper blocked this install because the package looks malicious. Do not retry with other flags or names; ask the user.", err=True)
             raise typer.Exit(1)
-    final = plain if allow else with_before(tool, plain)
-    before = [a for a in final if a not in plain]
-    if before:
+    resolving = native is not None and native.get("command") in ("install", "install-test", "update", "dedupe", "link",
+                                                                 "exec", "init", "audit", "ci", "install-ci-test")
+    if before and resolving:
         console.print(f"[dim]gatekeeper: dependencies limited to versions published {before[0][9:]} or earlier "
                       f"(waiting period; GK_MIN_AGE_HOURS=0 turns it off)[/]", highlight=False)
     result = subprocess.run(real + final)
