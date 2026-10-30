@@ -291,8 +291,8 @@ def guard_setup() -> None:
         httpx.get(f"{LOCAL_URL}/models", timeout=2).raise_for_status()
         console.print(f"Muse Glimmer: running at {LOCAL_URL}", markup=False)
     except httpx.HTTPError:
-        console.print("Muse Glimmer: not running. Known malware, private dependencies and brand-new versions are still "
-                      "stopped; a package the rules flag is blocked until the model can judge it (see the README).", markup=False)
+        console.print("Muse Glimmer: not running, so a package the rules flag goes to the hosted investigator instead "
+                      "(sends its name and version; GK_NO_CLOUD=1 turns this off and blocks such packages).", markup=False)
     if os.name == "nt":
         console.print("Ready. Start a guarded shell with: gk guard shell", markup=False)
     else:

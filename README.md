@@ -6,7 +6,7 @@ Open-source malware detection for npm, built on Meta's models. It never runs pac
 |---|---|---|
 | **Investigator** | A Muse agent reads a package like an analyst: picks files, searches, has strings decoded, compares with the previous version or the original of a fork. Code checks its claims. | [**Watch it work on any npm package**](https://lb2002--gatekeeper-api.us-east.modal.run/try), no account |
 | **Audit** | Am I already affected? Checks every version in your lockfile, and finds poisoned lockfiles. | [Paste a lockfile](https://lb2002--gatekeeper-api.us-east.modal.run/try), or `gk audit`, or the [GitHub Action](#check-your-project) |
-| **Install guard** | Sits in front of `npm install` and `npx`, for you or your AI coding agent, and stops malware before any install script runs. | [Three commands](#try-the-install-guard), under a minute |
+| **Install guard** | Sits in front of `npm install` and `npx`, for you or your AI coding agent, and stops malware before any install script runs. No GPU needed. | [Three commands](#try-the-install-guard), under a minute |
 | **Live monitor** | Reads every new npm release (~250 changes a minute), has Meta models judge the suspicious ones with cited lines, and reports to OpenSSF. | [Live numbers](https://lb2002--gatekeeper-api.us-east.modal.run/) |
 
 It never runs package code.
@@ -215,7 +215,7 @@ gk guard shell                # Windows: a PowerShell with the shims first on PA
 npm install <package>         # checked before anything is installed
 ```
 
-Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. Archives the static rules flag go to Muse Glimmer through a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja -fa on -c 8192 --port 8080 --reasoning-format deepseek --reasoning-budget 48 --alias muse-glimmer`, the [official GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF); `GK_LOCAL_URL` points elsewhere). Without it those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
+Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. **No GPU needed:** an archive the static rules flag goes to the hosted investigator (about 30 seconds; it sends the package name and version, nothing about your machine, and `GK_NO_CLOUD=1` turns it off). For full privacy and offline use, run Muse Glimmer on your own machine instead: such archives then go to a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja -fa on -c 8192 --port 8080 --reasoning-format deepseek --reasoning-budget 48 --alias muse-glimmer`, the [official GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF); `GK_LOCAL_URL` points elsewhere). With neither available, those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
 
 ## Run it
 

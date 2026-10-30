@@ -372,3 +372,64 @@ def test_guard_skips_the_lookup_offline(monkeypatch):
     monkeypatch.setattr(core, "OSV_ONLINE", False)
     monkeypatch.setattr(core, "unreadable_imports", lambda *a: [("@evil/payload", ("a.js", 1, "x"))])
     assert core.private_dependencies(_public_meta(), PackageFiles()) == []
+
+
+class _Cloud:
+    """Stands in for the demo API: one started run that finishes on the second look."""
+
+    def __init__(self, start_status=200, result=None):
+        self.start_status, self.result, self.looks, self.sent = start_status, result, 0, None
+
+    def __call__(self, request):
+        import json
+
+        import httpx
+
+        if request.url.path == "/try/start":
+            self.sent = json.loads(request.content)
+            return httpx.Response(self.start_status, json={"key": "tailwind-thing@1.0.0"})
+        self.looks += 1
+        return httpx.Response(200, json={"status": "running"} if self.looks < 2 else {"status": "done", **(self.result or {})})
+
+
+def _with_cloud(monkeypatch, cloud):
+    import httpx
+
+    from gatekeeper.guard import core
+
+    real = httpx.Client
+    monkeypatch.setattr(core, "OSV_ONLINE", True)
+    monkeypatch.delenv("GK_NO_CLOUD", raising=False)
+    monkeypatch.setattr(core.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(cloud)))
+    return core
+
+
+VERDICT = {"verdict": "malicious", "confidence": 0.9, "summary": "steals", "evidence": [], "iocs": []}
+
+
+def test_cloud_verdict_sends_only_name_and_version(monkeypatch):
+    cloud = _Cloud(result={"verdict": VERDICT})
+    core = _with_cloud(monkeypatch, cloud)
+    assert core.cloud_verdict(_public_meta(version="1.0.0", integrity="x"), poll_s=0) == VERDICT
+    assert cloud.sent == {"package": "tailwind-thing@1.0.0"}
+
+
+def test_cloud_is_never_asked_about_a_private_registry(monkeypatch):
+    cloud = _Cloud(result={"verdict": VERDICT})
+    core = _with_cloud(monkeypatch, cloud)
+    meta = _public_meta(version="1.0.0", tarball="https://npm.acme.example/t.tgz")
+    assert core.cloud_verdict(meta, poll_s=0) is None and cloud.sent is None
+
+
+def test_cloud_can_be_switched_off(monkeypatch):
+    cloud = _Cloud(result={"verdict": VERDICT})
+    core = _with_cloud(monkeypatch, cloud)
+    monkeypatch.setenv("GK_NO_CLOUD", "1")
+    assert core.cloud_verdict(_public_meta(version="1.0.0"), poll_s=0) is None and cloud.sent is None
+
+
+def test_no_cloud_answer_means_none_so_the_guard_fails_closed(monkeypatch):
+    core = _with_cloud(monkeypatch, _Cloud(start_status=429))
+    assert core.cloud_verdict(_public_meta(version="1.0.0"), poll_s=0) is None
+    core = _with_cloud(monkeypatch, _Cloud(result={"error": "run failed"}))
+    assert core.cloud_verdict(_public_meta(version="1.0.0"), poll_s=0) is None

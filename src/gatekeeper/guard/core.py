@@ -41,6 +41,8 @@ MAL_INDEX_URL = os.environ.get("GK_MAL_INDEX_URL", "https://lb2002--gatekeeper-a
 FAST_MODEL_URL = os.environ.get("GK_FAST_MODEL_URL", MAL_INDEX_URL.rsplit("/osv/", 1)[0] + "/models/fastclf.json")
 OSV_ONLINE = os.environ.get("GK_OFFLINE", "") != "1"  # GK_OFFLINE=1: never contact OSV, local list only
 CACHE_VERSION = "v2"
+CLOUD_URL = MAL_INDEX_URL.rsplit("/osv/", 1)[0]
+CLOUD_WAIT_S = 120
 
 
 def _cache_key(meta: dict) -> str | None:
@@ -312,6 +314,38 @@ def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, us
     return decision
 
 
+def local_model_up(timeout: float = 1.0) -> bool:
+    from gatekeeper.models.backends import LOCAL_URL
+
+    try:
+        return httpx.get(f"{LOCAL_URL}/models", timeout=timeout).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def cloud_verdict(meta: dict, wait_s: float = CLOUD_WAIT_S, poll_s: float = 2.0) -> dict | None:
+    """The hosted investigator, for machines without Muse Glimmer: the 17 GB model should not be the price of being
+    protected. Sends the package name and version, nothing about this machine, and only for public npm packages.
+    None if it is off (GK_NO_CLOUD=1, GK_OFFLINE=1), unreachable or out of daily runs: the caller then fails closed."""
+    if not OSV_ONLINE or os.environ.get("GK_NO_CLOUD") == "1" or urlsplit(meta.get("tarball") or "").hostname != "registry.npmjs.org":
+        return None
+    try:
+        with httpx.Client(timeout=20) as client:
+            start = client.post(f"{CLOUD_URL}/try/start", json={"package": f"{meta['name']}@{meta['version']}"})
+            if start.status_code != 200:
+                return None
+            key = start.json()["key"]
+            deadline = time.monotonic() + wait_s
+            while time.monotonic() < deadline:
+                state = client.get(f"{CLOUD_URL}/try/result", params={"key": key}).json()
+                if state.get("status") == "done":
+                    return state.get("verdict") or None
+                time.sleep(poll_s)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
+    return None
+
+
 def _analyse(meta: dict, spec: str, started: float, classify, fast_model, use_cache: bool) -> Decision:
     cached = _cache_get(meta) if use_cache else None
     if cached:
@@ -338,6 +372,14 @@ def _analyse(meta: dict, spec: str, started: float, classify, fast_model, use_ca
         why += f", classifier clean (risk {fast_risk:.2f})" if fast_risk is not None else ", no local classifier installed"
         return Decision(spec, True, why, meta["name"], meta["version"], rules=rules, seconds=time.monotonic() - started)
     if classify is None:
+        if not local_model_up():
+            cloud = cloud_verdict(meta)
+            if cloud:
+                risky = cloud["verdict"] == "malicious" or (cloud["verdict"] == "suspicious" and cloud["confidence"] >= BLOCK_CONFIDENCE)
+                reason = f"Muse Spark Open investigator: {cloud['verdict']} ({cloud['confidence']:.2f}) - {cloud['summary']}"
+                decision = Decision(spec, not risky, reason, meta["name"], meta["version"], cloud, rules, time.monotonic() - started)
+                _cache_put(meta, decision)
+                return decision
         from gatekeeper.models.backends import classify_local as classify
     with model_priority():
         result = classify(bundle)

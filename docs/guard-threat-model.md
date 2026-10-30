@@ -43,6 +43,7 @@ Verdicts are cached per tarball integrity. `--gk-allow` skips every check for on
   lockfile check and `--before` apply; nothing is model-checked.
 - **A `--before` the user sets to a future date** turns off the dependency cutoff (the named package is still held).
 - **Running npm by its full path**, or another package manager (pnpm, yarn, bun), bypasses the shims.
+- **Without Muse Glimmer running, flagged packages go to the hosted investigator.** That sends the package name and version to our server and trusts its answer. `GK_NO_CLOUD=1` or `GK_OFFLINE=1` turns it off; flagged packages are then blocked.
 - **The local classifier is public.** It has to be, to run on your machine, so an attacker can test malware against it offline. A package that passes both it and the rules is allowed without a model verdict; the OSV list, the 24 h waiting period and the monitor still apply.
 - **The model can be wrong.** On the time-split test set the Muse models block 55-57% of malware (Muse Glimmer with no
   false blocks out of 590 benign packages); the OSV list and the waiting period exist because of the rest.
