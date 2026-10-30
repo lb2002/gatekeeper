@@ -295,6 +295,9 @@ def poll_once() -> dict:
 
 
 QUEUE_TTL = timedelta(days=7)
+# Bundles leave the queue after this (they stay in the volume's event logs): every cron reads the whole
+# queue, and with bundles a week of flags is 50+ MB per read.
+BUNDLE_KEEP = timedelta(hours=48)
 
 
 def _enqueue(rows: list[dict]) -> int:
@@ -456,9 +459,19 @@ def confirm() -> dict:
             newly += 1
             _notify(f"Gatekeeper: confirmed {key}", f"Public records: {', '.join(conf.osv_ids + conf.ghsa_ids) or conf.npm_takedown_at}\n"
                     f"We flagged it at {item['seen_at'][:16]} UTC.", click=f"https://osv.dev/list?q={item['name']}", tags="white_check_mark")
+        prev = item.get("confirmation") or {}
         item["confirmation"] = {k: row[k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at", "checked_at")}
-        queue[key] = item
+        # write only on a change: rewriting every pending item each hour made this job slow
+        if not prev or any(prev.get(k) != item["confirmation"][k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at")):
+            queue[key] = item
     _append_jsonl(DATA / "confirmations" / f"{now:%Y-%m-%d}.jsonl", rows)
+    for key, it in items.items():
+        if it.get("bundle") and datetime.fromisoformat(it["seen_at"]) < now - BUNDLE_KEEP:
+            fresh = queue.get(key, None)
+            if fresh is not None:
+                fresh.pop("bundle", None)
+                fresh["bundle_archived"] = f"events/{fresh['seen_at'][:10]}/ (flagged rows keep their bundle)"
+                queue[key] = fresh
     _record_catches()
     revealed = _reveal_confirmed()
     volume.commit()
@@ -503,7 +516,7 @@ def _spark_candidates(items: dict, now: datetime) -> list[str]:
     first, second = [], []
     for key, it in items.items():
         verdicts = it.get("verdicts", {})
-        if "spark" in verdicts:
+        if "spark" in verdicts or not it.get("bundle"):
             continue
         if any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in FIRST_OPINION_BACKENDS):
             first.append((it["priority"], key))
@@ -517,6 +530,8 @@ def _fireworks_candidates(items: dict) -> list[str]:
     Spark Open answer was unusable, once more."""
     todo = []
     for key, it in items.items():
+        if not it.get("bundle"):
+            continue
         tried = [it.get("verdicts", {})[b] for b in SPARK_OPEN_BACKENDS if b in it.get("verdicts", {})]
         if not tried:
             todo.append((True, not it.get("low_priority"), it["seen_at"], key))
@@ -1429,7 +1444,7 @@ def api():
         items = dict(queue.items())
         judged = {it.get("bundle_sha256"): it["verdicts"][backend] for it in items.values() if backend in it.get("verdicts", {})}
         for key, item in items.items():
-            if backend in item.get("verdicts", {}):
+            if backend in item.get("verdicts", {}) or not item.get("bundle"):
                 continue
             same = judged.get(item.get("bundle_sha256"))
             if same is not None:  # identical evidence already judged: reuse instead of recomputing

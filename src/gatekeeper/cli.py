@@ -339,7 +339,8 @@ def review(
     for row in rows[:limit]:
         it = api.item(row["key"])
         console.rule(f"{row['key']}  priority {row['priority']}  published {row.get('published_at')}")
-        console.print(Panel(it["bundle"], title="evidence bundle", expand=False), markup=False, highlight=False)
+        console.print(Panel(it.get("bundle") or f"(archived after 48 h: {it.get('bundle_archived', 'see the event logs')})",
+                            title="evidence bundle", expand=False), markup=False, highlight=False)
         for backend, v in (row.get("verdicts") or {}).items():
             console.print(f"{backend}: {v.get('verdict')} ({v.get('confidence')})  {v.get('errors') or ''}", markup=False)
         if row.get("confirmation"):
