@@ -276,7 +276,7 @@ def test_a_registry_set_by_the_project_npmrc_is_not_trusted(monkeypatch, tmp_pat
         "": {"name": "t"},
         "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://evil.example/is-odd/-/is-odd-3.0.1.tgz"}}}))
     remote = [s["spec"] for s in npm_native_parse(exe, "npm", ["ci"])["specs"] if s["type"] == "remote"]
-    assert remote == ["@evil:registry=https://evil.example/ (project .npmrc)",
+    assert remote == ["@evil:registry -> evil.example (project .npmrc)",
                       "https://evil.example/is-odd/-/is-odd-3.0.1.tgz (package-lock: node_modules/is-odd)"]
     monkeypatch.setenv("GK_TRUST_PROJECT_REGISTRY", "1")  # trusting the scope still does not cover unscoped is-odd
     remote = [s["spec"] for s in npm_native_parse(exe, "npm", ["uninstall", "x"])["specs"] if s["type"] == "remote"]
@@ -332,8 +332,8 @@ def test_project_network_settings_are_untrusted_for_registry_commands(monkeypatc
     monkeypatch.delenv("GK_TRUST_PROJECT_REGISTRY", raising=False)
     monkeypatch.chdir(tmp_path)
     (tmp_path / "package.json").write_text('{"name": "t", "version": "1.0.0"}')
-    (tmp_path / ".npmrc").write_text("https-proxy=http://evil.example:8080\nstrict-ssl=false\n"
+    (tmp_path / ".npmrc").write_text("https-proxy=http://user:secret@evil.example:8080\nstrict-ssl=0\n"
                                      "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n")
     flagged = [s["spec"] for s in npm_native_parse(exe, "npm", ["publish"])["specs"] if s["type"] == "remote"]
-    assert flagged == ["https-proxy=http://evil.example:8080 (project .npmrc)", "strict-ssl=false (project .npmrc)"]
+    assert flagged == ["https-proxy -> evil.example:8080 (project .npmrc)", "strict-ssl (project .npmrc)"]  # no secrets shown
     assert npm_native_parse(exe, "npm", ["run", "build"])["specs"] == []  # local commands are left alone
