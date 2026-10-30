@@ -616,7 +616,7 @@ FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREW
 # Baseten serves the same Spark Open weights from the hackathon credits ($100): it takes over when
 # Fireworks reached its daily cap, so every flag still gets a Spark Open verdict
 BASETEN_DAILY_CAP_USD = 14.0
-BASETEN_TOTAL_CAP_USD = 85.0  # of $100; the rest stays for the time-split evaluation baseline
+BASETEN_TOTAL_CAP_USD = 80.0  # of $100: the time-split evaluations (~$16 so far) are not counted in these totals
 BASETEN_SECRET = modal.Secret.from_name("baseten-api", required_keys=["BASETEN_API_KEY"])
 # classic token, public_repo only: opens the automatic OpenSSF reports as lb2002
 REPORTER_SECRET = modal.Secret.from_name("github-reporter", required_keys=["GITHUB_REPORT_TOKEN"])
