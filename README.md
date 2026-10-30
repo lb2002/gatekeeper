@@ -28,7 +28,7 @@ npm replication feed (every 2 min, on Modal)
      so does any package that loads a dependency the public registry does not have,
      any update that adds a package created days ago (the shape of a hijacked release),
      and any package with a file identical to one in a reported package
-  -> every 30 min: fine-tuned Llama Guard 3 1B (v2) over everything the cheap stages let through
+  -> in batches: fine-tuned Llama Guard 3 1B (v2) over everything the cheap stages let through
      (both learned stages only route, so they run wide: ~5% of live npm each)
   -> evidence bundle: numbered excerpts of the code that matters (max 8000 chars)
   -> Muse Spark Open (Fireworks, Baseten) judges every flag; Muse Spark (Meta API) gives second opinions;

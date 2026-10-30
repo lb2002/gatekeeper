@@ -22,7 +22,7 @@ Meta's models, made for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 
 
 ## How it is used
 
-In Gatekeeper's live monitor it runs every 30 minutes over every npm version the rules and a small TF-IDF classifier
+In Gatekeeper's live monitor it runs in batches over every npm version the rules and a small TF-IDF classifier
 let through, as a cheap safety net in front of the Muse models (Muse Spark Open judges every flag; Muse Glimmer
 runs locally). Its flags are never reported on their own: a detection needs a Muse verdict or a human, so it can run
 wide, at a threshold that passes about 5% of live npm.

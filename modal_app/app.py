@@ -530,7 +530,7 @@ def backfill_queue() -> dict:
     return {"flagged_records": total, "added": added}
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET, NTFY_SECRET], schedule=modal.Period(hours=1), timeout=1800, cpu=2.0, memory=2048)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET, NTFY_SECRET], schedule=modal.Period(hours=1), timeout=1800, cpu=1.0, memory=2048)
 def confirm() -> dict:
     """Hourly: check every queued flag against OSV, GitHub malware advisories and npm takedowns."""
     from gatekeeper.confirm.batch import confirm_many
@@ -1195,8 +1195,9 @@ LG_STRONG = 0.9  # in a hot run, weaker hits are queued as low priority
 
 
 @app.function(image=lg_image, gpu="L4", volumes={str(DATA): volume, "/models": model_volume},
-              # every 30 min (was 15): the L4 start-up dominates the cost and Modal's monthly limit is $30
-              secrets=[modal.Secret.from_name("huggingface"), NTFY_SECRET], schedule=modal.Period(minutes=30), timeout=900,
+              # every 3 h until the credits reset on Nov 1 (then every 15 min): the L4 start-up dominates the cost,
+              # Modal's monthly limit is $30, and hitting it would stop the whole monitor. Versions wait, none are lost.
+              secrets=[modal.Secret.from_name("huggingface"), NTFY_SECRET], schedule=modal.Period(hours=3), timeout=900,
               cpu=2.0, memory=16384)
 def llamaguard() -> dict:
     """Batched pass of the fine-tuned Llama Guard 3 1B over every scanned version the rules and the
@@ -1577,7 +1578,7 @@ SWEEP_ACCOUNTS_PER_RUN = 15
 SWEEP_BUDGET_S = 420
 
 
-@app.function(image=image, volumes={str(DATA): volume}, timeout=600, cpu=1.0, memory=2048)
+@app.function(image=image, volumes={str(DATA): volume}, timeout=600, cpu=0.5, memory=2048)
 def sweep(days: int = 2) -> dict:
     """Follow every report to the account behind it. A public OSV report, or two Muse models agreeing, marks
     the npm account; its endpoints join the campaign memory; and its other packages are read now, because
