@@ -68,7 +68,13 @@ def test_npm_security_placeholder_means_it_was_removed():
 def test_a_poisoned_lockfile_entry_is_severe():
     found = au.check_index([au.Locked("lodash", "4.17.21", "https://evil.example/lodash.tgz", True)], {})
     assert found[0].kind == au.UNTRUSTED_SOURCE and "evil.example" in found[0].detail
-    assert au.check_index([au.Locked("a", "1.0.0", "git+ssh://git@github.com/x/y.git#abc", True)], {})[0].kind == au.UNTRUSTED_SOURCE
+    assert au.check_index([au.Locked("a", "1.0.0", "git+ssh://git@evil.example/x/y.git#abc", True)], {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_a_code_host_is_a_note_not_a_failure():
+    locked = [au.Locked("a", "1.0.0", "https://codeload.github.com/x/y/tar.gz/abc", True), au.Locked("b", "1.0.0", "git+ssh://git@github.com/x/y.git#abc", True)]
+    report = au.audit(locked, {}, online=False)
+    assert {f["kind"] for f in report["findings"]} == {au.CODE_HOST_SOURCE} and not report["severe"]
 
 
 def test_registry_sources_and_local_files_are_fine():
@@ -133,7 +139,7 @@ def test_pnpm_sources_are_read_from_the_resolution():
     locked = {p.name: p for p in au.parse_pnpm(text)}
     assert set(locked) == {"good", "bad", "gitdep", "unsigned"}
     found = {(f.kind, f.name) for f in au.check_index(list(locked.values()), {})}
-    assert found == {(au.UNTRUSTED_SOURCE, "bad"), (au.UNTRUSTED_SOURCE, "gitdep"), (au.NO_INTEGRITY, "gitdep"), (au.NO_INTEGRITY, "unsigned")}
+    assert found == {(au.UNTRUSTED_SOURCE, "bad"), (au.CODE_HOST_SOURCE, "gitdep"), (au.NO_INTEGRITY, "gitdep"), (au.NO_INTEGRITY, "unsigned")}
 
 
 def test_yarn_berry_lockfile():
@@ -143,3 +149,37 @@ def test_yarn_berry_lockfile():
     locked = {p.name: p for p in au.parse_yarn(text)}
     assert locked["good"].version == "1.2.3" and locked["good"].resolved == ""
     assert au.check_index([locked["bad"]], {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_a_yarn_alias_counts_as_the_package_it_installs():
+    # real entries from facebook/react and babel/babel: flagging the alias name would be a false alarm
+    text = '''"eslint-v7@npm:eslint@^7.7.0", eslint@^7.7.0:
+  version "7.32.0"
+  resolved "https://registry.yarnpkg.com/eslint/-/eslint-7.32.0.tgz#c6d3"
+  integrity sha512-x
+
+"eslint-plugin-react-internal@link:./scripts/eslint-rules":
+  version "0.0.0"
+  uid ""
+
+"npm-babel-parser@npm:@babel/parser@^7.14.0":
+  version: 7.29.3
+  resolution: "@babel/parser@npm:7.29.3"
+  checksum: 10c0/abc
+
+"@babel/core@npm:^7.0.0":
+  version: 7.1.0
+  resolution: "@babel/core@npm:7.1.0"
+
+"typescript@patch:typescript@npm%3A5.0.0#~builtin":
+  version: 5.0.0
+  resolution: "typescript@patch:typescript@npm%3A5.0.0#~builtin"
+'''
+    assert [(p.name, p.version) for p in au.parse_yarn(text)] == [("eslint", "7.32.0"), ("@babel/parser", "7.29.3"), ("@babel/core", "7.1.0")]
+
+
+def test_a_pnpm_file_with_two_documents_is_read_whole():
+    text = ("---\nlockfileVersion: '9.0'\n\npackages:\n\n  pnpm@9.0.0:\n    resolution: {integrity: sha512-a}\n\nsnapshots:\n\n  pnpm@9.0.0: {}\n"
+            "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n\npackages:\n\n  a@1.0.0:\n    resolution: {integrity: sha512-b}\n\n"
+            "  b@2.0.0:\n    resolution: {integrity: sha512-c}\n\nsnapshots:\n\n  c@3.0.0: {}\n")
+    assert [(p.name, p.version) for p in au.parse_pnpm(text)] == [("pnpm", "9.0.0"), ("a", "1.0.0"), ("b", "2.0.0")]

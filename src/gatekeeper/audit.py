@@ -20,7 +20,9 @@ OSV_BATCH_URL = OSV_QUERY_URL + "batch"
 OSV_BATCH_SIZE = 500
 TRUSTED_HOSTS = ("registry.npmjs.org", "registry.yarnpkg.com")
 LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock")
-MALICIOUS, UNTRUSTED_SOURCE, NO_INTEGRITY = "malicious", "untrusted_source", "no_integrity"
+# Projects do pin forks on code hosts, so that is a note; it would fail too many builds to be an error
+CODE_HOSTS = ("github.com", "codeload.github.com", "raw.githubusercontent.com", "gitlab.com", "bitbucket.org")
+MALICIOUS, UNTRUSTED_SOURCE, CODE_HOST_SOURCE, NO_INTEGRITY = "malicious", "untrusted_source", "code_host_source", "no_integrity"
 SEVERE = {MALICIOUS, UNTRUSTED_SOURCE}
 
 
@@ -67,34 +69,61 @@ def parse_npm(text: str) -> list[Locked]:
     return out
 
 
-_YARN_ENTRY = re.compile(r'^"?((?:@[^/\s"]+/)?[^@\s"]+)@[^\n]*:\n(?:  [^\n]*\n)*?  version:? "?([^"\n]+)"?\n((?:  [^\n]*\n)*)', re.M)
+_YARN_ALIAS = re.compile(r"(@?[A-Za-z][^@\s]*)@")
+_YARN_VERSION = re.compile(r'\s+version:? "?([^"\s]+)"?\s*$')
+_YARN_LOCAL = ("@link:", "@file:", "@workspace:", "@portal:", "@patch:")
+_PNPM_SECTION = re.compile(r"^packages:\n(.*?)(?=^\S|\Z)", re.M | re.S)
 _YARN_BERRY_SOURCE = re.compile(r'resolution: "[^"]*?@((?:https?:|git)[^"]*)"')
 _PNPM_BLOCK = re.compile(r"^  '?/?([^\s':][^'\n]*?)'?:\s*\n((?:    [^\n]*\n)+)", re.M)
 _PNPM_SOURCE = re.compile(r"(?:tarball|repo): ([^,}\s]+)")
 _SEMVER_START = re.compile(r"[0-9]")
 
 
+def _yarn_package(key: str) -> str:
+    """The package a yarn.lock key installs. An alias is the local name of another package: in
+    `"eslint-v7@npm:eslint@^7.7.0"` the code comes from `eslint`, and the name `eslint-v7` is only a label, which on
+    npm may even belong to someone else."""
+    key = key.strip().strip('"')
+    at = key.find("@", 1)
+    name, spec = key[:at], key[at + 1:]
+    if spec.startswith("npm:"):
+        alias = _YARN_ALIAS.match(spec[4:])
+        if alias:
+            return alias.group(1)
+    return name
+
+
 def parse_yarn(text: str) -> list[Locked]:
+    """yarn.lock, classic and berry. Entries for local code (workspaces, links, patches) are not packages from npm."""
     out = []
-    for m in _YARN_ENTRY.finditer(text if text.endswith("\n") else text + "\n"):
-        body = m.group(3)
+    for block in re.split(r"\n\s*\n", text):
+        lines = [line for line in block.splitlines() if line.strip() and not line.startswith("#")]
+        if not lines or lines[0].startswith((" ", "__metadata")) or not lines[0].endswith(":"):
+            continue
+        header = lines[0][:-1]
+        version = next((m.group(1) for m in map(_YARN_VERSION.match, lines[1:]) if m), None)
+        if version is None or any(protocol in header for protocol in _YARN_LOCAL):
+            continue
+        body = "\n".join(lines[1:])
         resolved = re.search(r'resolved "?([^"\n]+)"?', body) or _YARN_BERRY_SOURCE.search(body)
-        out.append(Locked(m.group(1), m.group(2), resolved.group(1) if resolved else "", "integrity " in body or "checksum: " in body))
+        out.append(Locked(_yarn_package(header.split(",")[0]), version, resolved.group(1) if resolved else "",
+                          "integrity " in body or "checksum: " in body))
     return out
 
 
 def parse_pnpm(text: str) -> list[Locked]:
-    section = text.split("\npackages:", 1)[-1].split("\nsnapshots:", 1)[0] + "\n"
+    """pnpm-lock.yaml. One file can hold several YAML documents (pnpm's own tooling comes first), each with its section."""
     out = []
-    for m in _PNPM_BLOCK.finditer(section):
-        name, _, version = m.group(1).split("(")[0].rpartition("@")
-        if not name:
-            continue
-        source = _PNPM_SOURCE.search(m.group(2))
-        resolved = source.group(1) if source else ""
-        if not _SEMVER_START.match(version):  # `pkg@https://...` or `pkg@github.com/...`: the key names the source
-            resolved = resolved or version
-        out.append(Locked(name, version, resolved, "integrity:" in m.group(2)))
+    for section in _PNPM_SECTION.findall(text + "\n"):
+        for m in _PNPM_BLOCK.finditer(section):
+            name, _, version = m.group(1).split("(")[0].rpartition("@")
+            if not name:
+                continue
+            source = _PNPM_SOURCE.search(m.group(2))
+            resolved = source.group(1) if source else ""
+            if not _SEMVER_START.match(version):  # `pkg@https://...` or `pkg@github.com/...`: the key names the source
+                resolved = resolved or version
+            out.append(Locked(name, version, resolved, "integrity:" in m.group(2)))
     return out
 
 
@@ -128,9 +157,11 @@ def check_index(locked: list[Locked], index: dict) -> list[Finding]:
             out.append(Finding(MALICIOUS, p.name, p.version, f"listed as malicious in OSV (reported {str(e.get('public'))[:10]})"))
         host = re.match(r"https?://([^/]+)", p.resolved)
         if host and host.group(1).lower() not in TRUSTED_HOSTS:
-            out.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, f"resolved from {host.group(1)[:80]}, not the npm registry"))
+            kind = CODE_HOST_SOURCE if host.group(1).lower() in CODE_HOSTS else UNTRUSTED_SOURCE
+            out.append(Finding(kind, p.name, p.version, f"resolved from {host.group(1)[:80]}, not the npm registry"))
         elif p.resolved and not host and not p.resolved.startswith(("file:", "workspace:")):
-            out.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, f"resolved from {p.resolved[:80]}"))
+            kind = CODE_HOST_SOURCE if any(h in p.resolved for h in CODE_HOSTS) else UNTRUSTED_SOURCE
+            out.append(Finding(kind, p.name, p.version, f"resolved from {p.resolved[:80]}"))
         if host and not p.integrity:
             out.append(Finding(NO_INTEGRITY, p.name, p.version, "no integrity hash in the lockfile"))
     return out
