@@ -23,7 +23,7 @@ def render(stats: dict, source: str = "") -> str:
     t1 = max(ts(c["earliest_public"]) for c in rows) + timedelta(hours=2)
     hours = (t1 - t0).total_seconds() / 3600
 
-    left, right, top, row_h = 250, 110, 70, 34
+    left, right, top, row_h = 270, 110, 70, 34
     width = 1100
     height = top + row_h * len(rows) + 70
     span = width - left - right
@@ -37,7 +37,7 @@ def render(stats: dict, source: str = "") -> str:
            f'<rect width="{width}" height="{height}" fill="#fbfbf9"/>',
            '<text x="24" y="34" font-size="20" font-weight="700" fill="#1d1d1b">Flagged by Gatekeeper vs. first public report</text>',
            f'<text x="24" y="56" font-size="14" fill="#6b6b66">Confirmed malicious npm packages, {t0:%b %d}-{t1:%b %d} (UTC). '
-           'Dot: our flag (committed to the public ledger). Bar end: the report\'s import into OSV / GitHub / npm takedown.</text>']
+           'Dot: our flag, in the public ledger. Bar end: first public report (OSV, GitHub or npm).</text>']
     day = t0.replace(hour=0) + timedelta(days=1)
     while day < t1:
         out.append(f'<line x1="{x(day):.1f}" y1="{top - 8}" x2="{x(day):.1f}" y2="{height - 50}" stroke="#e3e3dd"/>')
