@@ -21,6 +21,7 @@ import httpx
 
 from gatekeeper.evidence.bundle import build_bundle
 from gatekeeper.npm.tarball import read_tarball
+from gatekeeper.triage.phantom import unreadable_imports
 from gatekeeper.triage.content import score_content
 
 RULES_ALLOW_BELOW = 4  # content score under this: allow without asking the model
@@ -269,6 +270,17 @@ def verify_integrity(data: bytes, integrity: str | None) -> bool:
     return digest == integrity.split("-", 1)[1]
 
 
+def private_dependencies(meta: dict, pkg) -> list[str]:
+    """Packages this public package loads that do not exist for the public (a live campaign hides its payload that
+    way). Only for packages from the public registry: on a company registry, private dependencies are normal."""
+    if not OSV_ONLINE or "registry.npmjs.org" not in (meta.get("tarball") or ""):
+        return []
+    deps = meta.get("dependencies") or []
+    deps = list(deps.items()) if isinstance(deps, dict) else [tuple(d) for d in deps]
+    with httpx.Client(timeout=4, follow_redirects=True) as client:
+        return [name for name, _ in unreadable_imports(client, pkg, meta.get("name", ""), set(), deps)]
+
+
 def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, use_cache: bool = True,
                min_age_hours: float | None = None, meta: dict | None = None) -> Decision:
     from gatekeeper.confirm.malindex import KNOWN_MALICIOUS, TAKEN_DOWN, bad_dependencies
@@ -305,6 +317,11 @@ def _analyse(meta: dict, spec: str, started: float, classify, fast_model, use_ca
     if not verify_integrity(data, meta["integrity"]):
         return Decision(spec, False, "tarball integrity mismatch", meta["name"], meta["version"])
     pkg = read_tarball(data)
+    hidden = private_dependencies(meta, pkg)
+    if hidden:
+        return Decision(spec, False, f"loads {hidden[0]}, which nobody can read on the public registry: the code that "
+                        "would run on this machine cannot be checked by anyone", meta["name"], meta["version"],
+                        kind="dependency", seconds=time.monotonic() - started)
     content = score_content(pkg)
     rules = sorted(content.rules)
     bundle = build_bundle(meta["name"], meta["version"], pkg, content)

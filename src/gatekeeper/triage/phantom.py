@@ -128,8 +128,8 @@ def unreadable_imports(client, pkg: PackageFiles, own_name: str, popular: set[st
             lookups += 1
             try:
                 readable = _lookup(client, name)
-            except Exception:
-                continue
+            except Exception:  # no network: the remaining lookups would only wait for the same timeout
+                break
             if readable is None:
                 continue
             _KNOWN[name] = readable

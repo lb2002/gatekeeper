@@ -22,6 +22,7 @@ If that fails for any reason (missing node, malformed config, timeout), the comm
 |---|---|
 | Package or a dependency listed as malicious by OSV (live lookup; offline copy of 222k names) | blocked |
 | Registry package the static rules or local classifier flag | Muse Glimmer judges it locally; malicious or suspicious (>= 0.6) blocks |
+| Public package that loads or declares a package nobody can read on the public registry | blocked (needs network; `--gk-allow` for a known case) |
 | Exact version younger than 24 h | held, newest older version suggested |
 | Tag or range (`@next`, `^1`) | resolved with the 24 h cutoff; that version is checked |
 | Dependencies npm resolves itself | the real npm runs with `--before=<24 h ago>`, so no dependency younger than 24 h is installed |

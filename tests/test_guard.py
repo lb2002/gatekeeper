@@ -337,3 +337,38 @@ def test_project_network_settings_are_untrusted_for_registry_commands(monkeypatc
     flagged = [s["spec"] for s in npm_native_parse(exe, "npm", ["publish"])["specs"] if s["type"] == "remote"]
     assert flagged == ["https-proxy -> evil.example:8080 (project .npmrc)", "strict-ssl (project .npmrc)"]  # no secrets shown
     assert npm_native_parse(exe, "npm", ["run", "build"])["specs"] == []  # local commands are left alone
+
+
+def _public_meta(**kw):
+    return {"name": "tailwind-thing", "tarball": "https://registry.npmjs.org/tailwind-thing/-/tailwind-thing-1.0.0.tgz", **kw}
+
+
+def test_guard_stops_a_public_package_that_loads_an_unreadable_one(monkeypatch):
+    from gatekeeper.guard import core
+    from gatekeeper.npm.tarball import PackageFiles
+    from gatekeeper.triage import phantom
+
+    phantom._KNOWN.clear()
+    monkeypatch.setattr(core, "OSV_ONLINE", True)
+    monkeypatch.setattr(core, "unreadable_imports", lambda client, pkg, name, popular, deps: [("@evil/payload", ("a.js", 1, "x"))])
+    pkg = PackageFiles(files={"a.js": b"require('@evil/payload')"}, sizes={"a.js": 24})
+    assert core.private_dependencies(_public_meta(), pkg) == ["@evil/payload"]
+
+
+def test_guard_leaves_a_company_registry_alone(monkeypatch):
+    from gatekeeper.guard import core
+    from gatekeeper.npm.tarball import PackageFiles
+
+    monkeypatch.setattr(core, "OSV_ONLINE", True)
+    monkeypatch.setattr(core, "unreadable_imports", lambda *a: [("@acme/internal", ("a.js", 1, "x"))])
+    meta = _public_meta(tarball="https://npm.acme.example/tailwind-thing-1.0.0.tgz")
+    assert core.private_dependencies(meta, PackageFiles()) == []
+
+
+def test_guard_skips_the_lookup_offline(monkeypatch):
+    from gatekeeper.guard import core
+    from gatekeeper.npm.tarball import PackageFiles
+
+    monkeypatch.setattr(core, "OSV_ONLINE", False)
+    monkeypatch.setattr(core, "unreadable_imports", lambda *a: [("@evil/payload", ("a.js", 1, "x"))])
+    assert core.private_dependencies(_public_meta(), PackageFiles()) == []
