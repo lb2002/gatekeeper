@@ -23,7 +23,7 @@ app = modal.App("gatekeeper")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("httpx>=0.27", "pydantic>=2.7", "typer>=0.12", "rich>=13.7", "fastapi[standard]>=0.115", "scikit-learn==1.5.2")
+    .pip_install("httpx>=0.27", "pydantic>=2.7", "typer>=0.12", "rich>=13.7", "pyyaml>=6.0", "fastapi[standard]>=0.115", "scikit-learn==1.5.2")
     .add_local_python_source("gatekeeper")
 )
 lg_image = (

@@ -11,11 +11,14 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
+import yaml
 
 from gatekeeper.confirm.osv import OSV_QUERY_URL
 
+_YamlLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 OSV_BATCH_URL = OSV_QUERY_URL + "batch"
 OSV_BATCH_SIZE = 500
 TRUSTED_HOSTS = ("registry.npmjs.org", "registry.yarnpkg.com")
@@ -69,61 +72,91 @@ def parse_npm(text: str) -> list[Locked]:
     return out
 
 
-_YARN_ALIAS = re.compile(r"(@?[A-Za-z][^@\s]*)@")
-_YARN_VERSION = re.compile(r'\s+version:? "?([^"\s]+)"?\s*$')
-_YARN_LOCAL = ("@link:", "@file:", "@workspace:", "@portal:", "@patch:")
-_PNPM_SECTION = re.compile(r"^packages:\n(.*?)(?=^\S|\Z)", re.M | re.S)
-_YARN_BERRY_SOURCE = re.compile(r'resolution: "[^"]*?@((?:https?:|git)[^"]*)"')
-_PNPM_BLOCK = re.compile(r"^  '?/?([^\s':][^'\n]*?)'?:\s*\n((?:    [^\n]*\n)+)", re.M)
-_PNPM_SOURCE = re.compile(r"(?:tarball|repo): ([^,}\s]+)")
+# `git@` only as an ssh address: `simple-git@^3.10.0` and `@npmcli/git@5.0.8` are package names
+_ANY_SOURCE = re.compile(r"""(?:https?://|git\+|ssh://|(?<![\w-])git@[\w.-]+[:/])[^\s"',}#&]*""", re.I)
+_YARN_ALIAS = re.compile(r"((?:@[^/@\s]+/)?[^/@\s]+)(?:@.*)?\Z")
+_YARN_FIELD = re.compile(r'  ("?[\w-]+"?):? "?([^"]*)"?\s*\Z')
+_YARN_LOCAL = ("link:", "file:", "workspace:", "portal:", "patch:")
+_RANGE = re.compile(r"[\^~<>=*0-9]|latest\Z|next\Z")
 _SEMVER_START = re.compile(r"[0-9]")
 
 
-def _yarn_package(key: str) -> str:
-    """The package a yarn.lock key installs. An alias is the local name of another package: in
+def _source_of(*fields: str) -> str:
+    """Where lockfile fields say the code comes from: any URL in them, percent-encoded ones too (yarn berry hides them
+    in `::__archiveUrl=` bindings), a foreign one first. Deny by default: anything that looks like a source counts."""
+    urls = _ANY_SOURCE.findall(unquote("\n".join(fields)))
+    foreign = [u for u in urls if host_of(u) not in TRUSTED_HOSTS]
+    return (foreign or urls or [""])[0]
+
+
+def host_of(source: str) -> str:
+    """The host of a URL, git+ssh address or scp-like `git@host:path`, compared exactly, never as a substring."""
+    m = re.match(r"(?:[a-z][a-z0-9+.-]*://)?(?:[^@/]*@)?([^/:#?]+)", source.strip(), re.I)
+    return m.group(1).lower() if m else ""
+
+
+def _yarn_key(key: str) -> tuple[str, str]:
+    """(package a yarn.lock key installs, its spec). An alias is the local name of another package: in
     `"eslint-v7@npm:eslint@^7.7.0"` the code comes from `eslint`, and the name `eslint-v7` is only a label, which on
     npm may even belong to someone else."""
     key = key.strip().strip('"')
     at = key.find("@", 1)
     name, spec = key[:at], key[at + 1:]
-    if spec.startswith("npm:"):
-        alias = _YARN_ALIAS.match(spec[4:])
+    target = spec[4:] if spec.startswith("npm:") else ""
+    if target and not _RANGE.match(target):
+        alias = _YARN_ALIAS.match(target)
         if alias:
-            return alias.group(1)
-    return name
+            return alias.group(1), spec
+    return name, spec
 
 
 def parse_yarn(text: str) -> list[Locked]:
-    """yarn.lock, classic and berry. Entries for local code (workspaces, links, patches) are not packages from npm."""
+    """yarn.lock, classic and berry, by structure: every unindented line ending in `:` starts an entry. An entry counts
+    as local code only if all its keys are local and it names no remote source."""
+    entries: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            entries.append((line.rstrip().rstrip(":"), []))
+        elif entries:
+            entries[-1][1].append(line)
     out = []
-    for block in re.split(r"\n\s*\n", text):
-        lines = [line for line in block.splitlines() if line.strip() and not line.startswith("#")]
-        if not lines or lines[0].startswith((" ", "__metadata")) or not lines[0].endswith(":"):
+    for header, body in entries:
+        if header.strip('"') == "__metadata":
             continue
-        header = lines[0][:-1]
-        version = next((m.group(1) for m in map(_YARN_VERSION.match, lines[1:]) if m), None)
-        if version is None or any(protocol in header for protocol in _YARN_LOCAL):
+        keys = [_yarn_key(k) for k in re.findall(r'"[^"]*"|[^,\s][^,]*', header)]
+        fields = dict(m.groups() for m in map(_YARN_FIELD.match, body) if m)
+        fields = {k.strip('"'): v for k, v in fields.items()}
+        source = _source_of(header, fields.get("resolved", ""), fields.get("resolution", ""))
+        if not keys or (not source and all(spec.startswith(_YARN_LOCAL) for _, spec in keys)):
             continue
-        body = "\n".join(lines[1:])
-        resolved = re.search(r'resolved "?([^"\n]+)"?', body) or _YARN_BERRY_SOURCE.search(body)
-        out.append(Locked(_yarn_package(header.split(",")[0]), version, resolved.group(1) if resolved else "",
-                          "integrity " in body or "checksum: " in body))
+        version = fields.get("version") or "?"
+        # berry says outright what was resolved; it wins over a key that could be crafted
+        named = re.match(r'((?:@[^/@\s]+/)?[^/@\s]+)@npm:', fields.get("resolution", ""))
+        names = [named.group(1)] if named else list(dict.fromkeys(n for n, _ in keys))
+        integrity = "integrity" in fields or "checksum" in fields
+        out += [Locked(n, version, source, integrity) for n in names]
     return out
 
 
 def parse_pnpm(text: str) -> list[Locked]:
     """pnpm-lock.yaml. One file can hold several YAML documents (pnpm's own tooling comes first), each with its section."""
     out = []
-    for section in _PNPM_SECTION.findall(text + "\n"):
-        for m in _PNPM_BLOCK.finditer(section):
-            name, _, version = m.group(1).split("(")[0].rpartition("@")
-            if not name:
+    for doc in yaml.load_all(text, Loader=_YamlLoader):
+        packages = doc.get("packages") if isinstance(doc, dict) else None
+        for key, entry in (packages or {}).items():
+            key = str(key).lstrip("/").split("(")[0]
+            name, _, version = key.rpartition("@")
+            resolution = entry.get("resolution") if isinstance(entry, dict) else None
+            resolution = resolution if isinstance(resolution, dict) else {}
+            if not name:  # an entry nobody can name must not vanish from the report
+                out.append(Locked(key[:80], "?", "unreadable lockfile entry"))
                 continue
-            source = _PNPM_SOURCE.search(m.group(2))
-            resolved = source.group(1) if source else ""
-            if not _SEMVER_START.match(version):  # `pkg@https://...` or `pkg@github.com/...`: the key names the source
-                resolved = resolved or version
-            out.append(Locked(name, version, resolved, "integrity:" in m.group(2)))
+            source = _source_of(key, *(str(v) for k, v in resolution.items() if k != "integrity"))
+            if not source and not _SEMVER_START.match(version):  # `pkg@github.com/x/y/abc`: the key names the source
+                source = version
+            out.append(Locked(name, version, source, bool(resolution.get("integrity"))))
     return out
 
 
@@ -155,15 +188,14 @@ def check_index(locked: list[Locked], index: dict) -> list[Finding]:
             out.append(Finding(MALICIOUS, p.name, p.version, "npm's placeholder for a package it removed as malware"))
         elif e and (e.get("all") or p.version in (e.get("versions") or [])):
             out.append(Finding(MALICIOUS, p.name, p.version, f"listed as malicious in OSV (reported {str(e.get('public'))[:10]})"))
-        host = re.match(r"https?://([^/]+)", p.resolved)
-        if host and host.group(1).lower() not in TRUSTED_HOSTS:
-            kind = CODE_HOST_SOURCE if host.group(1).lower() in CODE_HOSTS else UNTRUSTED_SOURCE
-            out.append(Finding(kind, p.name, p.version, f"resolved from {host.group(1)[:80]}, not the npm registry"))
-        elif p.resolved and not host and not p.resolved.startswith(("file:", "workspace:")):
-            kind = CODE_HOST_SOURCE if any(h in p.resolved for h in CODE_HOSTS) else UNTRUSTED_SOURCE
-            out.append(Finding(kind, p.name, p.version, f"resolved from {p.resolved[:80]}"))
-        if host and not p.integrity:
-            out.append(Finding(NO_INTEGRITY, p.name, p.version, "no integrity hash in the lockfile"))
+        if p.resolved and not p.resolved.startswith(("file:", "workspace:")):
+            host = host_of(p.resolved)
+            if host in CODE_HOSTS:
+                out.append(Finding(CODE_HOST_SOURCE, p.name, p.version, f"resolved from {host[:80]}, not the npm registry"))
+            elif host not in TRUSTED_HOSTS:
+                out.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, f"resolved from {p.resolved[:80]}, not the npm registry"))
+            if not p.integrity:
+                out.append(Finding(NO_INTEGRITY, p.name, p.version, "no integrity hash in the lockfile"))
     return out
 
 

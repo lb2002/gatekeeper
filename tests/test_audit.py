@@ -183,3 +183,62 @@ def test_a_pnpm_file_with_two_documents_is_read_whole():
             "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n\npackages:\n\n  a@1.0.0:\n    resolution: {integrity: sha512-b}\n\n"
             "  b@2.0.0:\n    resolution: {integrity: sha512-c}\n\nsnapshots:\n\n  c@3.0.0: {}\n")
     assert [(p.name, p.version) for p in au.parse_pnpm(text)] == [("pnpm", "9.0.0"), ("a", "1.0.0"), ("b", "2.0.0")]
+
+
+def test_a_yarn_berry_archive_url_binding_is_seen_through():
+    text = ('"good@npm:^1.0.0":\n  version: 1.0.0\n'
+            '  resolution: "good@npm:1.0.0::__archiveUrl=https%3A%2F%2Fevil.example%2Fgood-1.0.0.tgz"\n  checksum: 10c0/a\n')
+    assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_a_pnpm_source_is_found_whatever_its_field_or_order():
+    text = ("lockfileVersion: '9.0'\n\npackages:\n\n"
+            '  "quoted@1.0.0":\n    resolution: {integrity: sha512-x, "tarball": "https://evil.example/q.tgz"}\n\n'
+            "  odd@1.0.0:\n    engines: {node: '>=8'}\n    resolution:\n      integrity: sha512-y\n      tarball: https://evil.example/o.tgz\n")
+    kinds = {(f.name, f.kind) for f in au.check_index(au.parse_pnpm(text), {})}
+    assert kinds == {("quoted", au.UNTRUSTED_SOURCE), ("odd", au.UNTRUSTED_SOURCE)}
+
+
+def test_a_host_is_compared_exactly_not_as_a_substring():
+    assert au.host_of("git+ssh://git@github.com/x/y.git") == "github.com"
+    assert au.host_of("git@github.com:x/y.git") == "github.com"
+    assert au.host_of("https://user:pw@evil.example:8443/a.tgz") == "evil.example"
+    found = au.check_index([au.Locked("a", "1.0.0", "git+https://evil.example/github.com/x.git", True)], {})
+    assert found[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_a_remote_entry_cannot_hide_behind_a_local_key():
+    text = '"a@workspace:.", "a@npm:^1.0.0":\n  version: 1.0.0\n  resolution: "a@npm:1.0.0"\n'
+    assert [p.name for p in au.parse_yarn(text)] == ["a"]
+    text = '"a@link:./x":\n  version "1.0.0"\n  resolved "https://evil.example/a.tgz"\n'
+    assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_yarn_entries_need_no_blank_line_between_them():
+    text = 'a@^1:\n  version "1.0.0"\nb@^2:\n  version "2.0.0"\n  resolved "https://evil.example/b.tgz"\n'
+    assert [p.name for p in au.parse_yarn(text)] == ["a", "b"]
+
+
+def test_a_nested_version_field_cannot_stand_in_for_the_entry():
+    text = 'a@^1:\n  dependencies:\n    version "9.9.9"\n  version "1.0.0"\n'
+    assert au.parse_yarn(text)[0].version == "1.0.0"
+
+
+def test_a_crafted_key_loses_to_what_berry_says_it_resolved():
+    text = '"innocent@npm:^1.0.0":\n  version: 1.0.0\n  resolution: "evil-pkg@npm:1.0.0"\n'
+    assert au.parse_yarn(text)[0].name == "evil-pkg"
+
+
+def test_an_alias_without_a_version_is_still_an_alias():
+    assert au.parse_yarn('"x@npm:evil-pkg":\n  version "1.0.0"\n')[0].name == "evil-pkg"
+
+
+def test_an_unreadable_pnpm_entry_is_reported_not_dropped():
+    text = "lockfileVersion: '9.0'\n\npackages:\n\n  no-version-here:\n    resolution: {integrity: sha512-x}\n"
+    assert au.check_index(au.parse_pnpm(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_package_names_and_deprecation_notes_are_not_sources():
+    assert au._source_of("simple-git@^3.10.0") == ""
+    assert au._source_of("@npmcli/git@5.0.8") == ""
+    assert au._source_of("git@evil.example:x/y.git") == "git@evil.example:x/y.git"
