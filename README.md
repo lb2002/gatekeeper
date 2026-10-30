@@ -13,6 +13,8 @@ Built for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 2026). See [PR
 
 ## How it works
 
+![Gatekeeper architecture](docs/architecture.svg)
+
 ```
 npm replication feed (every 2 min, on Modal)
   -> metadata triage (install hooks, typosquats, maintainer changes, new packages)
