@@ -76,6 +76,62 @@ def poll_once(
     console.print(f"score >= 3 (would go to archive scan): {flagged} of {len(scored)}")
 
 
+@app.command("watch")
+def watch(
+    interval: float = typer.Option(5.0, help="Seconds between feed reads."),
+    show_names: bool = typer.Option(False, "--show-names", help="Also print names of versions with notable signals "
+                                    "(by default they are masked: a metadata signal is not an accusation)."),
+    workers: int = typer.Option(8, help="Parallel packument fetches."),
+) -> None:
+    """Live view of new npm releases with their metadata signals, as the monitor sees them (nothing is downloaded)."""
+    import hashlib
+    import time
+
+    popular = load_popular()
+    seen: set[str] = set()
+    total = notable = 0
+    with feed.make_client() as client, ThreadPoolExecutor(max_workers=workers) as pool:
+        since = feed.current_seq(client)
+        console.print(f"[cyan]watching the npm registry feed from seq {since:,}[/] (Ctrl+C to stop)", highlight=False)
+
+        def versions(name: str):
+            try:
+                doc = packument.fetch_packument(client, name)
+            except Exception:
+                return []
+            if not doc:
+                return []
+            return [(i, score_metadata(i, popular)) for i in packument.recent_versions(doc, timedelta(minutes=10))
+                    if not i.is_npm_placeholder]
+
+        try:
+            while True:
+                batch, nxt = feed.fetch_changes(client, since, limit=200)
+                names = list(dict.fromkeys(ch.name for ch in batch if not ch.deleted))
+                since = max(since, nxt)
+                for rows in pool.map(versions, names):
+                    for info, s in rows:
+                        key = f"{info.name}@{info.version}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        total += 1
+                        when = info.published_at.strftime("%H:%M:%S") if info.published_at else "--:--:--"
+                        if s.score >= 5:
+                            notable += 1
+                            shown = key if show_names else "pkg-" + hashlib.sha256(key.encode()).hexdigest()[:8]
+                            console.print(f"{when}  [bold red]{s.score:>2}[/]  {shown:<48} [red]{'; '.join(s.reasons)[:70]}[/]",
+                                          highlight=False, markup=True)
+                        elif s.score >= 2:
+                            console.print(f"{when}  [yellow]{s.score:>2}[/]  {key[:48]:<48} [dim]{'; '.join(s.reasons)[:70]}[/]",
+                                          highlight=False)
+                        else:
+                            console.print(f"[dim]{when}  {s.score:>2}  {key[:48]}[/]", highlight=False)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            console.print(f"\n{total:,} new versions, {notable:,} with notable metadata signals (score >= 5)", highlight=False)
+
+
 @app.command("check")
 def check(
     target: str = typer.Argument(..., help="A package spec 'name' or 'name@version', or a local .tgz file."),
