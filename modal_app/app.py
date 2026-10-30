@@ -129,10 +129,10 @@ def _refresh_campaign_cache() -> None:
 def _update_campaign_iocs(items: dict) -> int:
     """Remember the specific endpoints of packages at least two Muse models call malicious (kept after the
     bundles leave the queue). Returns how many are known."""
-    from gatekeeper.triage.campaign import specific_iocs
-
     from gatekeeper.npm import feed, packument
+    from gatekeeper.triage.campaign import is_person, specific_iocs
 
+    cleared_accounts = state.get("swept_accounts", {}) or {}
     known = state.get("campaign_iocs", {}) or {}
     accounts = state.get("campaign_publishers", {}) or {}
     lookups = 0
@@ -155,7 +155,7 @@ def _update_campaign_iocs(items: dict) -> int:
                     publisher = (((doc.get("versions") or {}).get(it["version"]) or {}).get("_npmUser") or {}).get("name")
                 except Exception:
                     publisher = None
-            if publisher and publisher != "npm":
+            if publisher and is_person(publisher) and cleared_accounts.get(publisher) != "too many packages":
                 accounts.setdefault(publisher, key)
     if len(known) > 5000:  # keep the newest entries (dicts keep insertion order)
         known = dict(list(known.items())[-5000:])
@@ -1581,7 +1581,7 @@ def sweep(days: int = 2) -> dict:
                     print(f"sweep: {name}: {type(exc).__name__}"[:200])
                     continue
                 for account in account_names(doc) | ({reported[name]} if name in reported else set()):
-                    if account not in accounts:
+                    if account not in accounts and swept.get(account) != "too many packages":
                         accounts[account] = f"{name} ({vuln['id']})"
                         stats["new_accounts"] += 1
         state["campaign_iocs"] = iocs
