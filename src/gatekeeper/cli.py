@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from gatekeeper.npm import feed, packument
@@ -70,7 +71,7 @@ def poll_once(
     table.add_column("package")
     table.add_column("reasons")
     for info, s in scored[:top]:
-        table.add_row(str(s.score), f"{info.name}@{info.version}", "; ".join(s.reasons))
+        table.add_row(str(s.score), escape(f"{info.name}@{info.version}"), escape("; ".join(s.reasons)))
     console.print(table)
     flagged = sum(1 for _, s in scored if s.score >= 3)
     console.print(f"score >= 3 (would go to archive scan): {flagged} of {len(scored)}")
@@ -117,16 +118,17 @@ def watch(
                         seen.add(key)
                         total += 1
                         when = info.published_at.strftime("%H:%M:%S") if info.published_at else "--:--:--"
+                        # names and reasons are the publisher's text: escaped, never parsed as markup
+                        reasons = escape("; ".join(s.reasons)[:70])
                         if s.score >= 5:
                             notable += 1
-                            shown = key if show_names else "pkg-" + hashlib.sha256(key.encode()).hexdigest()[:8]
-                            console.print(f"{when}  [bold red]{s.score:>2}[/]  {shown:<48} [red]{'; '.join(s.reasons)[:70]}[/]",
-                                          highlight=False, markup=True)
+                            shown = escape(key if show_names else "pkg-" + hashlib.sha256(key.encode()).hexdigest()[:8])
+                            console.print(f"{when}  [bold red]{s.score:>2}[/]  {shown:<48} [red]{reasons}[/]", highlight=False)
                         elif s.score >= 2:
-                            console.print(f"{when}  [yellow]{s.score:>2}[/]  {key[:48]:<48} [dim]{'; '.join(s.reasons)[:70]}[/]",
+                            console.print(f"{when}  [yellow]{s.score:>2}[/]  {escape(key[:48]):<48} [dim]{reasons}[/]",
                                           highlight=False)
                         else:
-                            console.print(f"[dim]{when}  {s.score:>2}  {key[:48]}[/]", highlight=False)
+                            console.print(f"[dim]{when}  {s.score:>2}  {escape(key[:48])}[/]", highlight=False)
                 time.sleep(interval)
         except KeyboardInterrupt:
             console.print(f"\n{total:,} new versions, {notable:,} with notable metadata signals (score >= 5)", highlight=False)
@@ -165,7 +167,7 @@ def check(
     pkg = read_tarball(data)
     content = score_content(pkg)
     bundle = build_bundle(name, version, pkg, content, meta_reasons=meta_reasons)
-    console.print(f"[bold]{name}@{version}[/]  rules score {content.score}  ({', '.join(sorted(content.rules)) or 'no rule hits'})")
+    console.print(f"[bold]{escape(name)}@{escape(version)}[/]  rules score {content.score}  ({', '.join(sorted(content.rules)) or 'no rule hits'})")
     if show_bundle:
         console.print(bundle.render(), markup=False, highlight=False)
     classify = {"spark": classify_spark, "fireworks": classify_spark_open_fireworks,
@@ -173,7 +175,7 @@ def check(
     result = classify(bundle)
     v = result.verdict
     if v is None:
-        console.print(f"[red]model output unusable[/]: {result.errors}")
+        console.print(f"[red]model output unusable[/]: {escape(str(result.errors))}")
         raise typer.Exit(2)
     color = {"malicious": "red", "suspicious": "yellow", "benign": "green"}[v.verdict.value]
     console.print(
@@ -186,7 +188,7 @@ def check(
     if v.injection_attempt_observed:
         console.print("[magenta]prompt-injection attempt observed in package data[/]")
     if result.errors:
-        console.print(f"[yellow]validation issues:[/] {result.errors}")
+        console.print(f"[yellow]validation issues:[/] {escape(str(result.errors))}")
 
 
 @app.command("worker")
@@ -310,7 +312,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, index_age_days, load_fast_model, package_specs
+    from gatekeeper.guard.core import ALLOW_FLAG, before_flag, check_spec, index_age_days, load_fast_model, package_specs
 
     args = [a for a in ctx.args if a != "--"]
     cfg = shim.config()
@@ -324,18 +326,18 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
             console.print("[yellow]gatekeeper[/] the offline OSV malware list is "
                           + ("missing" if stale is None else f"{stale:.0f} days old") + "; run `gk guard update-osv`", highlight=False)
         for spec in specs:
-            console.print(f"[cyan]gatekeeper[/] checking {spec} ...", highlight=False)
+            console.print(f"[cyan]gatekeeper[/] checking {escape(spec)} ...", highlight=False)
             try:
                 d = check_spec(shim.npm_command(cfg, "npm"), spec, fast_model=fast_model)
             except Exception as exc:
                 # Fail closed: a package must not get through just because checking it failed
                 # (an attacker could craft an archive that makes the check error out).
-                console.print(f"[red]gatekeeper could not check {spec}: {exc}; blocked[/]", highlight=False)
+                console.print(f"[red]gatekeeper could not check {escape(spec)}: {escape(str(exc))}; blocked[/]", highlight=False)
                 console.print(f"If you are sure the package is safe, re-run with {ALLOW_FLAG}.", markup=False)
                 typer.echo("Gatekeeper could not verify this package, so nothing was installed. Do not retry with other flags; ask the user.", err=True)
                 raise typer.Exit(1)
             if d.allowed:
-                console.print(f"[green]allowed[/] {d.name}@{d.version}: {d.reason} ({d.seconds:.1f}s)", highlight=False)
+                console.print(f"[green]allowed[/] {escape(d.name)}@{escape(d.version)}: {escape(d.reason)} ({d.seconds:.1f}s)", highlight=False)
                 continue
             lines = [f"{d.reason}", ""]
             for ev in (d.verdict or {}).get("evidence", []):
@@ -359,7 +361,14 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
             # message for AI coding agents reading stderr
             typer.echo("Gatekeeper blocked this install because the package looks malicious. Do not retry with other flags or names; ask the user.", err=True)
             raise typer.Exit(1)
-    result = subprocess.run(real + [a for a in args if a != ALLOW_FLAG])
+    before = [] if allow else before_flag(tool, args)
+    if before:
+        console.print(f"[dim]gatekeeper: dependencies limited to versions published {before[0][9:]} or earlier "
+                      f"(waiting period; GK_MIN_AGE_HOURS=0 turns it off)[/]", highlight=False)
+    result = subprocess.run(real + [a for a in args if a != ALLOW_FLAG] + before)
+    if result.returncode and before:
+        console.print("[yellow]gatekeeper[/] if npm could not find a version (ETARGET), a dependency may require a release "
+                      f"younger than the waiting period. If you trust it, re-run with {ALLOW_FLAG}.", highlight=False)
     raise typer.Exit(result.returncode)
 
 

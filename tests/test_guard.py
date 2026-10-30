@@ -141,3 +141,18 @@ def test_offline_osv_check_fails_open_to_the_other_checks(monkeypatch, tmp_path)
 
     monkeypatch.setattr(core.httpx, "post", no_network)
     assert core.check_spec(["npm"], "lib", min_age_hours=0).allowed
+
+
+def test_waiting_period_reaches_the_whole_dependency_tree():
+    from gatekeeper.guard.core import ALLOW_FLAG, before_flag
+
+    now = 1_793_318_400.0  # 2026-10-30T00:00:00Z
+    assert before_flag("npm", ["install", "lodash"], 24, now) == ["--before=2026-10-29T00:00:00Z"]
+    assert before_flag("npm", ["install"], 24, now) == ["--before=2026-10-29T00:00:00Z"]  # from package.json
+    assert before_flag("npm", ["update"], 72, now) == ["--before=2026-10-27T00:00:00Z"]
+    assert before_flag("npm", ["run", "build"], 24, now) == []
+    assert before_flag("npx", ["cowsay"], 24, now) == []
+    assert before_flag("npm", ["install", "x", "--before=2020-01-01"], 24, now) == []  # the user's own choice wins
+    assert before_flag("npm", ["install", "x"], 0, now) == []
+    # the override flag is not npm's; guard_run skips the waiting period altogether when it is given
+    assert before_flag("npm", [ALLOW_FLAG, "install", "x"], 24, now) == ["--before=2026-10-29T00:00:00Z"]

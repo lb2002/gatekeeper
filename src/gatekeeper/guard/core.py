@@ -186,6 +186,25 @@ def older_version(meta: dict, min_age_h: float, now: float | None = None) -> str
     return best[0] if best else None
 
 
+RESOLVE_COMMANDS = INSTALL_COMMANDS | {"update", "up", "upgrade", "udpate"}
+
+
+def before_flag(tool: str, args: list[str], min_age_hours: float | None = None, now: float | None = None) -> list[str]:
+    """`--before=<now - waiting period>` for npm commands that resolve versions: npm then picks, for the whole
+    dependency tree, only versions published before that moment. The explicit package is checked (and held) by
+    check_spec; this covers what npm resolves on its own, such as a hijacked patch release of a dependency."""
+    from datetime import datetime, timezone
+
+    hours = MIN_AGE_HOURS if min_age_hours is None else min_age_hours
+    args = [a for a in args if a != ALLOW_FLAG]
+    if tool != "npm" or hours <= 0 or not args or args[0] not in RESOLVE_COMMANDS:
+        return []
+    if any(a == "--before" or a.startswith("--before=") for a in args):
+        return []
+    cutoff = datetime.fromtimestamp((now or time.time()) - hours * 3600, timezone.utc)
+    return [f"--before={cutoff:%Y-%m-%dT%H:%M:%SZ}"]
+
+
 def package_specs(tool: str, args: list[str]) -> list[str]:
     """Registry package specs that this npm/npx invocation would install or run."""
     args = [a for a in args if a != ALLOW_FLAG]
