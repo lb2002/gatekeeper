@@ -589,6 +589,9 @@ def audit(
     except (FileNotFoundError, ValueError, OSError) as exc:
         console.print(plain(f"cannot read a lockfile: {exc}"), markup=False)
         raise typer.Exit(2) from None
+    if not locked:  # an empty result must never read as "all clear"
+        console.print(plain(f"no packages found in {file}: format not understood"), markup=False)
+        raise typer.Exit(2)
     index = load_mal_index()
     report = run_audit(locked, index, online=OSV_ONLINE and not offline)
     if as_json:

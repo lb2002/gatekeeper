@@ -67,23 +67,35 @@ def parse_npm(text: str) -> list[Locked]:
     return out
 
 
-_YARN_ENTRY = re.compile(r'^"?((?:@[^/\s"]+/)?[^@\s"]+)@[^\n]*:\n(?:  [^\n]*\n)*?  version "?([^"\n]+)"?\n((?:  [^\n]*\n)*)', re.M)
-_PNPM_ENTRY = re.compile(r"^  '?/?((?:@[^/\s']+/)?[^@\s']+)@([0-9][^:'()\s]*)[^:\n]*'?:\s*$", re.M)
+_YARN_ENTRY = re.compile(r'^"?((?:@[^/\s"]+/)?[^@\s"]+)@[^\n]*:\n(?:  [^\n]*\n)*?  version:? "?([^"\n]+)"?\n((?:  [^\n]*\n)*)', re.M)
+_YARN_BERRY_SOURCE = re.compile(r'resolution: "[^"]*?@((?:https?:|git)[^"]*)"')
+_PNPM_BLOCK = re.compile(r"^  '?/?([^\s':][^'\n]*?)'?:\s*\n((?:    [^\n]*\n)+)", re.M)
+_PNPM_SOURCE = re.compile(r"(?:tarball|repo): ([^,}\s]+)")
+_SEMVER_START = re.compile(r"[0-9]")
 
 
 def parse_yarn(text: str) -> list[Locked]:
     out = []
     for m in _YARN_ENTRY.finditer(text if text.endswith("\n") else text + "\n"):
         body = m.group(3)
-        resolved = re.search(r'resolved "?([^"\n]+)"?', body)
+        resolved = re.search(r'resolved "?([^"\n]+)"?', body) or _YARN_BERRY_SOURCE.search(body)
         out.append(Locked(m.group(1), m.group(2), resolved.group(1) if resolved else "", "integrity " in body or "checksum: " in body))
     return out
 
 
 def parse_pnpm(text: str) -> list[Locked]:
-    section = text.split("\npackages:", 1)[-1].split("\nsnapshots:", 1)[0]
-    found = {(m.group(1), m.group(2)) for m in _PNPM_ENTRY.finditer(section)}
-    return [Locked(n, v) for n, v in sorted(found)]
+    section = text.split("\npackages:", 1)[-1].split("\nsnapshots:", 1)[0] + "\n"
+    out = []
+    for m in _PNPM_BLOCK.finditer(section):
+        name, _, version = m.group(1).split("(")[0].rpartition("@")
+        if not name:
+            continue
+        source = _PNPM_SOURCE.search(m.group(2))
+        resolved = source.group(1) if source else ""
+        if not _SEMVER_START.match(version):  # `pkg@https://...` or `pkg@github.com/...`: the key names the source
+            resolved = resolved or version
+        out.append(Locked(name, version, resolved, "integrity:" in m.group(2)))
+    return out
 
 
 def read_lockfile(path: Path) -> tuple[Path, list[Locked]]:

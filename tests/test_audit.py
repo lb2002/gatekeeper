@@ -122,3 +122,24 @@ def test_a_pasted_lockfile_is_recognised_by_its_content():
     assert au.parse_text(lock_v3({"node_modules/a": {"version": "1.0.0"}}))[0].name == "a"
     assert au.parse_text("lockfileVersion: '9.0'\n\npackages:\n\n  a@1.0.0:\n    resolution: {}\n")[0].name == "a"
     assert au.parse_text('a@^1:\n  version "1.0.0"\n')[0].name == "a"
+
+
+def test_pnpm_sources_are_read_from_the_resolution():
+    text = ("lockfileVersion: '9.0'\n\npackages:\n\n"
+            "  good@1.0.0:\n    resolution: {integrity: sha512-x}\n\n"
+            "  bad@1.0.0:\n    resolution: {integrity: sha512-y, tarball: https://evil.example/bad.tgz}\n\n"
+            "  gitdep@https://codeload.github.com/x/y/tar.gz/abc:\n    resolution: {tarball: https://codeload.github.com/x/y/tar.gz/abc}\n\n"
+            "  unsigned@1.0.0:\n    resolution: {tarball: https://registry.npmjs.org/unsigned/-/unsigned-1.0.0.tgz}\n")
+    locked = {p.name: p for p in au.parse_pnpm(text)}
+    assert set(locked) == {"good", "bad", "gitdep", "unsigned"}
+    found = {(f.kind, f.name) for f in au.check_index(list(locked.values()), {})}
+    assert found == {(au.UNTRUSTED_SOURCE, "bad"), (au.UNTRUSTED_SOURCE, "gitdep"), (au.NO_INTEGRITY, "gitdep"), (au.NO_INTEGRITY, "unsigned")}
+
+
+def test_yarn_berry_lockfile():
+    text = ('__metadata:\n  version: 8\n\n'
+            '"good@npm:^1.0.0":\n  version: 1.2.3\n  resolution: "good@npm:1.2.3"\n  checksum: 10c0/abc\n\n'
+            '"bad@https://evil.example/bad.tgz":\n  version: 1.0.0\n  resolution: "bad@https://evil.example/bad.tgz"\n  checksum: 10c0/def\n')
+    locked = {p.name: p for p in au.parse_yarn(text)}
+    assert locked["good"].version == "1.2.3" and locked["good"].resolved == ""
+    assert au.check_index([locked["bad"]], {})[0].kind == au.UNTRUSTED_SOURCE
