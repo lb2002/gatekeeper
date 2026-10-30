@@ -1,51 +1,61 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 480" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 548" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
 <title>Gatekeeper flags vs. public reports</title>
-<rect width="1100" height="480" fill="#fbfbf9"/>
+<rect width="1100" height="548" fill="#fbfbf9"/>
 <text x="24" y="34" font-size="20" font-weight="700" fill="#1d1d1b">Flagged by Gatekeeper vs. first public report</text>
-<text x="24" y="56" font-size="14" fill="#6b6b66">Confirmed malicious npm packages, Oct 27-Oct 29 (UTC). Dot: our flag, in the public ledger. Bar end: first public report (OSV, GitHub or npm).</text>
-<line x1="374.5" y1="62" x2="374.5" y2="430" stroke="#e3e3dd"/>
-<text x="378.5" y="446" font-size="12" fill="#8a8a84">Wed Oct 28</text>
-<line x1="732.8" y1="62" x2="732.8" y2="430" stroke="#e3e3dd"/>
-<text x="736.8" y="446" font-size="12" fill="#8a8a84">Thu Oct 29</text>
+<text x="24" y="56" font-size="14" fill="#6b6b66">Confirmed malicious npm packages, Oct 27-Oct 30 (UTC). Dot: our flag, in the public ledger. Bar end: first public report (OSV, GitHub or npm).</text>
+<line x1="342.4" y1="62" x2="342.4" y2="498" stroke="#e3e3dd"/>
+<text x="346.4" y="514" font-size="12" fill="#8a8a84">Wed Oct 28</text>
+<line x1="590.6" y1="62" x2="590.6" y2="498" stroke="#e3e3dd"/>
+<text x="594.6" y="514" font-size="12" fill="#8a8a84">Thu Oct 29</text>
+<line x1="838.7" y1="62" x2="838.7" y2="498" stroke="#e3e3dd"/>
+<text x="842.7" y="514" font-size="12" fill="#8a8a84">Fri Oct 30</text>
 <text x="258" y="92.0" font-size="14" text-anchor="end" fill="#1d1d1b">@webapp-shared/login-vmok</text>
-<rect x="272.4" y="81.0" width="195.6" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="272.4" cy="87.0" r="6" fill="#b4232c"/>
-<text x="476.1" y="92.0" font-size="13" fill="#55554f">13 h ahead</text>
+<rect x="271.7" y="81.0" width="135.5" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="271.7" cy="87.0" r="6" fill="#b4232c"/>
+<text x="415.2" y="92.0" font-size="13" fill="#55554f">13 h ahead</text>
 <text x="258" y="126.0" font-size="14" text-anchor="end" fill="#1d1d1b">identity-two-factor</text>
-<rect x="478.5" y="115.0" width="382.7" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="478.5" cy="121.0" r="6" fill="#b4232c"/>
-<text x="869.2" y="126.0" font-size="13" fill="#55554f">26 h ahead</text>
+<rect x="414.4" y="115.0" width="265.1" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="414.4" cy="121.0" r="6" fill="#b4232c"/>
+<text x="687.5" y="126.0" font-size="13" fill="#55554f">26 h ahead</text>
 <text x="258" y="160.0" font-size="14" text-anchor="end" fill="#1d1d1b">spectral-net-probe</text>
-<rect x="497.0" y="149.0" width="366.3" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="497.0" cy="155.0" r="6" fill="#b4232c"/>
-<text x="871.3" y="160.0" font-size="13" fill="#55554f">25 h ahead</text>
+<rect x="427.2" y="149.0" width="253.7" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="427.2" cy="155.0" r="6" fill="#b4232c"/>
+<text x="688.9" y="160.0" font-size="13" fill="#55554f">25 h ahead</text>
 <text x="258" y="194.0" font-size="14" text-anchor="end" fill="#1d1d1b">cjlowuxbnexkhgpzq</text>
-<rect x="509.9" y="183.0" width="437.9" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="509.9" cy="189.0" r="6" fill="#b4232c"/>
-<text x="955.8" y="194.0" font-size="13" fill="#55554f">29 h ahead</text>
+<rect x="436.2" y="183.0" width="303.3" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="436.2" cy="189.0" r="6" fill="#b4232c"/>
+<text x="747.5" y="194.0" font-size="13" fill="#55554f">29 h ahead</text>
 <text x="258" y="228.0" font-size="14" text-anchor="end" fill="#1d1d1b">@zmtcdn/components</text>
-<rect x="522.9" y="217.0" width="345.9" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="522.9" cy="223.0" r="6" fill="#b4232c"/>
-<text x="876.7" y="228.0" font-size="13" fill="#55554f">23 h ahead</text>
+<rect x="445.1" y="217.0" width="239.6" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="445.1" cy="223.0" r="6" fill="#b4232c"/>
+<text x="692.7" y="228.0" font-size="13" fill="#55554f">23 h ahead</text>
 <text x="258" y="262.0" font-size="14" text-anchor="end" fill="#1d1d1b">@zmtcdn/ui</text>
-<rect x="523.3" y="251.0" width="345.4" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="523.3" cy="257.0" r="6" fill="#b4232c"/>
-<text x="876.7" y="262.0" font-size="13" fill="#55554f">23 h ahead</text>
+<rect x="445.5" y="251.0" width="239.2" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="445.5" cy="257.0" r="6" fill="#b4232c"/>
+<text x="692.7" y="262.0" font-size="13" fill="#55554f">23 h ahead</text>
 <text x="258" y="296.0" font-size="14" text-anchor="end" fill="#1d1d1b">black-spindle</text>
-<rect x="616.4" y="285.0" width="14.9" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="616.4" cy="291.0" r="6" fill="#b4232c"/>
-<text x="639.3" y="296.0" font-size="13" fill="#55554f">60 min ahead</text>
+<rect x="509.9" y="285.0" width="10.3" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="509.9" cy="291.0" r="6" fill="#b4232c"/>
+<text x="528.3" y="296.0" font-size="13" fill="#55554f">60 min ahead</text>
 <text x="258" y="330.0" font-size="14" text-anchor="end" fill="#1d1d1b">black-spindle-2</text>
-<rect x="624.4" y="319.0" width="335.8" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="624.4" cy="325.0" r="6" fill="#b4232c"/>
-<text x="968.1" y="330.0" font-size="13" fill="#55554f">22 h ahead</text>
+<rect x="515.5" y="319.0" width="232.6" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="515.5" cy="325.0" r="6" fill="#b4232c"/>
+<text x="756.0" y="330.0" font-size="13" fill="#55554f">22 h ahead</text>
 <text x="258" y="364.0" font-size="14" text-anchor="end" fill="#1d1d1b">spectral-core</text>
-<rect x="664.2" y="353.0" width="296.0" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="664.2" cy="359.0" r="6" fill="#b4232c"/>
-<text x="968.1" y="364.0" font-size="13" fill="#55554f">20 h ahead</text>
+<rect x="543.0" y="353.0" width="205.0" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="543.0" cy="359.0" r="6" fill="#b4232c"/>
+<text x="756.0" y="364.0" font-size="13" fill="#55554f">20 h ahead</text>
 <text x="258" y="398.0" font-size="14" text-anchor="end" fill="#1d1d1b">@dmangal/curse-dependent-ecto</text>
-<rect x="703.1" y="387.0" width="257.0" height="12" rx="3" fill="#f4c7c3"/>
-<circle cx="703.1" cy="393.0" r="6" fill="#b4232c"/>
-<text x="968.1" y="398.0" font-size="13" fill="#55554f">17 h ahead</text>
-<text x="24" y="468" font-size="13" fill="#6b6b66">10 packages, all flagged before the public report; median lead 23 h. Source: https://lb2002--gatekeeper-api.us-east.modal.run/stats.json</text>
+<rect x="570.0" y="387.0" width="178.0" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="570.0" cy="393.0" r="6" fill="#b4232c"/>
+<text x="756.0" y="398.0" font-size="13" fill="#55554f">17 h ahead</text>
+<text x="258" y="432.0" font-size="14" text-anchor="end" fill="#1d1d1b">claims-acct-unlock</text>
+<rect x="910.5" y="421.0" width="7.1" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="910.5" cy="427.0" r="6" fill="#b4232c"/>
+<text x="925.6" y="432.0" font-size="13" fill="#55554f">41 min ahead</text>
+<text x="258" y="466.0" font-size="14" text-anchor="end" fill="#1d1d1b">tailwindcss-visual-kit</text>
+<rect x="953.8" y="455.0" width="15.5" height="12" rx="3" fill="#f4c7c3"/>
+<circle cx="953.8" cy="461.0" r="6" fill="#b4232c"/>
+<text x="977.3" y="466.0" font-size="13" fill="#55554f">90 min ahead</text>
+<text x="24" y="536" font-size="13" fill="#6b6b66">12 packages, all flagged before the public report; median lead 21 h. Source: https://lb2002--gatekeeper-api.us-east.modal.run/stats.json</text>
 </svg>

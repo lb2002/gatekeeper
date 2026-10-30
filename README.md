@@ -6,7 +6,7 @@ Open-source malware detection for npm, built on Meta's models. It never runs pac
 - **Investigator:** a Muse agent that reads a package the way an analyst does: it picks files, searches, has strings decoded, compares with the previous version or the original of a fork, and must cite every line it relies on. [**Try it on any npm package**](https://lb2002--gatekeeper-api.us-east.modal.run/try), no account needed.
 - **Install guard:** wraps `npm install` / `npx` (for you or an AI coding agent) and blocks malicious packages before any install script runs, offline, with Muse Glimmer running on your own machine.
 
-**So far (Oct 27-30):** 11 malicious packages flagged that were later confirmed by OSV / GitHub / npm, **every one before the public report, by a median of 22 hours**, about a minute after publication. Of the malware published while the monitor was running, it flagged 58% ([what it missed](#live-results-oct-27-30-2026)). Every flag time is in a public, timestamped ledger.
+**So far (Oct 27-30):** 12 malicious packages flagged that were later confirmed by OSV / GitHub / npm, **every one before the public report, by a median of 21 hours**, about a minute after publication. Of the malware published while the monitor was running, it flagged 58% ([what it missed](#live-results-oct-27-30-2026)). Every flag time is in a public, timestamped ledger.
 
 **The find we are proudest of:** [a campaign that ships no malware at all](#a-package-with-no-malware-in-it). Every scanner passes its packages, because the payload sits in a private dependency nobody can read. Gatekeeper now flags that gap, and following it turned up [8 unreported packages and 5 new private scopes](https://github.com/ossf/malicious-packages/pull/1694), 4 of them published the same day.
 
@@ -70,7 +70,7 @@ The fake job interview campaign ships Tailwind CSS plugins that contain nothing 
 
 But the absence is visible. [`phantom.py`](src/gatekeeper/triage/phantom.py) flags any public package whose code or manifest loads a package that does not exist on the public registry, or that npm has replaced with a security holder. With that signal the investigator rates all 6 campaign packages we tested as suspicious, naming the dependency it cannot see.
 
-Following the campaign's fingerprint through npm then found what nobody had reported: **8 new packages and 2 new versions, still live, 4 of the packages published that same day** (one borrows the name of a famous animation library), using **5 private scopes unknown until then**. The attackers had rotated to new scopes after the first reports. Reported as [ossf/malicious-packages#1694](https://github.com/ossf/malicious-packages/pull/1694).
+Following the campaign's fingerprint through npm then found what nobody had reported: **8 new packages and 2 new versions, still live, 4 of the packages published that same day** (one borrows the name of a famous animation library), using **5 private scopes unknown until then**. The attackers had rotated to new scopes after the first reports. Reported as [ossf/malicious-packages#1694](https://github.com/ossf/malicious-packages/pull/1694). The first of them is already confirmed: 90 minutes after our flag, GitHub published an advisory for `tailwindcss-visual-kit` 1.3.7 and npm removed the package.
 
 The install guard applies the same check: a public package that loads something nobody can read is blocked before it reaches your machine.
 
@@ -113,7 +113,7 @@ Worked example: `spectral-core@3.0.7` was flagged at 20:30:20 UTC on Oct 28. Its
 
 ## Live results (Oct 27-30, 2026)
 
-In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **11 packages (28 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 22 hours.** Median time from npm publication to our flag: about 1 minute; to the first Muse verdict with cited lines: about 9 minutes more.
+In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **12 packages (29 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 21 hours.** Median time from npm publication to our flag: about 1 minute; to the first Muse verdict with cited lines: about 9 minutes more.
 
 ![Flagged by Gatekeeper vs. first public report](docs/lead-times.svg)
 
@@ -128,6 +128,7 @@ In its first three days the monitor read 238,117 new npm versions, scanned 38,17
 | `spectral-core` (10) | no install script at all: a `binding.gyp` action (run by node-gyp on install) reads process environments and AWS instance metadata and POSTs them to webhook.site; a new version every ~15 min | 0.2-3.3 min | 18-20 h ([MAL-2026-18377](https://osv.dev/vulnerability/MAL-2026-18377)) |
 | `@dmangal/curse-dependent-ecto` (3) | the same `binding.gyp` trick: greps the machine for secrets and POSTs every env var | 0.3-1.5 min | 17 h ([MAL-2026-18375](https://osv.dev/vulnerability/MAL-2026-18375)) |
 | `claims-acct-unlock` | contacts a domain tied to malicious activity and runs commands (OpenSSF Package Analysis) | 0.8 min | 41 min ([MAL-2026-18404](https://osv.dev/vulnerability/MAL-2026-18404)) |
+| `tailwindcss-visual-kit` 1.3.7 | a new version of a reported package, with a new private dependency: found by following the campaign, not on publication | 14.7 h | 1.5 h ([GHSA-f37w-2g4f-58r3](https://github.com/advisories/GHSA-f37w-2g4f-58r3); npm removed it the same minute) |
 
 "Ahead of the public report" uses the report's import time into OSV, not the backdated `published` field (see above). Every flag time is committed to the public ledger before confirmation. Only flags at least one model called malicious or suspicious count; packages that sat in the queue but were judged benign do not, even when OSV listed them later. For two of them (`spectral-core`, `@dmangal/curse-dependent-ecto`) we opened OpenSSF reports ([#1681](https://github.com/ossf/malicious-packages/pull/1681), [#1682](https://github.com/ossf/malicious-packages/pull/1682)) about 15 hours before another scanner's entries for the same packages landed.
 
