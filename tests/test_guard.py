@@ -245,3 +245,31 @@ def test_npm_itself_reads_the_command_line(monkeypatch):
     assert read("npm", "install", "https://evil.example/x.tgz?@npm:") == ("install", [("https://evil.example/x.tgz?@npm:", "remote")])
     assert read("npm", "install", "git@github.com:u/r") == ("install", [("git@github.com:u/r", "remote")])
     assert read("npm", "run", "build") == ("run-script", [])
+
+
+def test_npm_itself_reads_project_context_and_side_doors(monkeypatch, tmp_path):
+    import json
+
+    import pytest
+
+    from gatekeeper.guard.core import npm_native_parse
+
+    exe = _real_npm()
+    if exe is None:
+        pytest.skip("npm not installed")
+    monkeypatch.delenv("NPM_CONFIG_REGISTRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "package.json").write_text(json.dumps({"name": "t", "version": "1.0.0", "dependencies": {"lodash": "~4.17.20"}}))
+
+    def read(*args):
+        d = npm_native_parse(exe, "npm", list(args))
+        assert d is not None
+        return [(s["spec"], s["type"]) for s in d["specs"]]
+
+    assert read("install", "lodash") == [("lodash@~4.17.20", "registry")]  # what arborist keeps, not latest
+    assert read("link", "is-odd") == [("is-odd", "registry")]  # installs globally from the registry
+    assert read("pack", "github:u/r") == [("github:u/r", "remote")]  # git builds run `prepare`
+    assert read("exec", "--package=", "foo") == [("", "invalid")]
+    (tmp_path / ".npmrc").write_text("before=notadate\n")
+    d = npm_native_parse(exe, "npm", ["install", "is-odd"])
+    assert d is not None and d["before"] == "invalid" and d["specs"][0].get("error")  # resolution fails: blocked
