@@ -1105,6 +1105,7 @@ def investigate_batch() -> dict:
     started = time.monotonic()
     lock = threading.Lock()
     counts = {"done": 0, "gone": 0, "errors": 0}
+    tally = state.get("investigator_tally", {})
 
     def one(key: str) -> None:
         with lock:
@@ -1145,6 +1146,9 @@ def investigate_batch() -> dict:
             spend["total"] += res.cost_usd
             spend["days"][day] = spend["days"].get(day, 0.0) + res.cost_usd
             state["investigator_spend"] = spend
+            if v:
+                tally[v.verdict.value] = tally.get(v.verdict.value, 0) + 1
+                state["investigator_tally"] = tally
         if v:
             fresh.setdefault("verdicts", {})["investigator"] = {
                 "verdict": v.verdict.value, "confidence": v.confidence, "at": row["received_at"], "errors": res.errors[:3], "full": row["verdict"],
@@ -1763,6 +1767,7 @@ def _public_stats() -> dict:
         "median_publish_to_flag_min": _median([c["publish_to_flag_min"] for c in first]),
         "flagged_before_public_report": sum(1 for c in first if (c.get("lead_over_public_min") or 0) > 0),
         "median_lead_over_public_min": _median([c["lead_over_public_min"] for c in first if (c.get("lead_over_public_min") or 0) > 0]),
+        "investigator": state.get("investigator_tally", {}),  # counts only: unconfirmed names stay private
         "live_recall": {k: v for k, v in (state.get("recall") or {}).items() if k != "outcomes"},
         # already public (each has an OSV report), so naming them reveals nothing unconfirmed
         "recall_misses": [{k: o.get(k) for k in ("id", "name", "published_at", "detail")}
@@ -1836,6 +1841,7 @@ th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(-
 <div class="kpi"><b>{t['versions']:,}</b><span>versions checked</span></div>
 <div class="kpi"><b>{t['scanned']:,}</b><span>archives scanned</span></div>
 <div class="kpi"><b>{t['flagged']:,}</b><span>flagged for model review</span></div>
+<div class="kpi"><b>{sum(st['investigator'].values()):,}</b><span>read by the Muse investigator ({st['investigator'].get('benign', 0):,} cleared)</span></div>
 <div class="kpi"><b>{st['confirmed_packages']}</b><span>independently confirmed malicious packages</span></div>
 <div class="kpi"><b>{_fmt_minutes(st['median_publish_to_flag_min'])}</b><span>median publish to flag</span></div>
 <div class="kpi"><b>{st['flagged_before_public_report']}</b><span>flagged before the public report (median lead {_fmt_minutes(st['median_lead_over_public_min'])})</span></div>
