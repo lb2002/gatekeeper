@@ -126,7 +126,9 @@ def names_another_file(p: Locked) -> bool:
         return False
     path = unquote(urlsplit(p.resolved).path)
     prefix = f"/{p.name}/-/{p.name.rsplit('/', 1)[-1]}-"
-    return not path.startswith(prefix) if p.version == "?" else path != f"{prefix}{p.version}.tgz"
+    if p.version == "?":
+        return not re.fullmatch(re.escape(prefix) + r"\d[^/]*\.tgz", path)
+    return path != f"{prefix}{p.version}.tgz"
 
 
 def host_of(source: str) -> str:
@@ -257,18 +259,20 @@ def public_release(client: httpx.Client, p: Locked) -> tuple[str, dict | None]:
     if not dist.get("tarball"):
         return "failed", None
     return "public", {"name": p.name, "version": p.version, "tarball": dist["tarball"], "integrity": str(dist.get("integrity") or ""),
-                      "shasum": str(dist.get("shasum") or ""), "runs_at_install": p.install_script or bool(doc.get("gypfile"))
+                      "shasum": str(dist.get("shasum") or ""), "runs_at_install": bool(doc.get("gypfile"))
                       or any(hook in scripts for hook in ("preinstall", "install", "postinstall"))}
 
 
 def _hash_differs(p: Locked, release: dict) -> bool:
-    """False if the two share no algorithm: an entry with no hash at all is the NO_INTEGRITY note."""
+    """True if any hash the two have in common differs: a matching sha1 must not excuse a wrong sha512 next to it.
+    False if they share no algorithm: an entry with no hash at all is the NO_INTEGRITY note."""
     for h in p.checksum.split():
-        if h.startswith("sha512-") and release["integrity"].startswith("sha512-"):
-            return h != release["integrity"]
+        if h.startswith("sha512-") and release["integrity"].startswith("sha512-") and h != release["integrity"]:
+            return True
         if h.startswith("sha1-") and release["shasum"]:
             try:
-                return base64.b64decode(h[5:]).hex() != release["shasum"].lower()
+                if base64.b64decode(h[5:], validate=True).hex() != release["shasum"].lower():
+                    return True
             except ValueError:
                 return True
     return False

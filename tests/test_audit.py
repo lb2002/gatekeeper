@@ -418,3 +418,18 @@ def test_a_berry_checksum_counts_as_the_entry_s_identity():
 def test_an_entry_with_no_version_still_has_to_name_its_package():
     assert au.names_another_file(_p("a", "?", resolved="https://registry.npmjs.org/evil/-/evil-1.0.0.tgz"))
     assert not au.names_another_file(_p("a", "?", resolved="https://registry.npmjs.org/a/-/a-1.0.0.tgz"))
+
+
+def test_a_matching_sha1_does_not_excuse_a_wrong_sha512():
+    import base64 as b64
+
+    good = "sha1-" + b64.b64encode(bytes.fromhex("aa" * 20)).decode()
+    release = {"integrity": "sha512-published", "shasum": "aa" * 20}
+    assert au._hash_differs(_p("a", checksum=f"{good} sha512-forged"), release)
+    assert au._hash_differs(_p("a", checksum=f"sha512-forged {good}"), release)
+    assert not au._hash_differs(_p("a", checksum=f"{good} sha512-published"), release)
+
+
+def test_a_path_cannot_climb_out_of_the_package():
+    url = "https://registry.npmjs.org/a/-/a-../../evil/-/evil-1.0.0.tgz"
+    assert au.names_another_file(_p("a", "?", resolved=url))
