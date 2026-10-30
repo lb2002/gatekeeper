@@ -57,7 +57,9 @@ def render(stats: dict, source: str = "") -> str:
                    f'<text x="{x(public) + 8:.1f}" y="{y + 5:.1f}" font-size="13" fill="#55554f">{lead_h * 60:.0f} min ahead</text>')
     leads = sorted((ts(c["earliest_public"]) - ts(c["flagged_at"])).total_seconds() / 3600 for c in rows)
     med = (leads[len(leads) // 2] + leads[(len(leads) - 1) // 2]) / 2
-    out.append(f'<text x="24" y="{height - 12}" font-size="13" fill="#6b6b66">{len(rows)} packages, all flagged before the public '
+    ahead = sum(lead > 0 for lead in leads)
+    who = "all" if ahead == len(rows) else f"{ahead}"
+    out.append(f'<text x="24" y="{height - 12}" font-size="13" fill="#6b6b66">{len(rows)} packages, {who} flagged before the public '
                f'report; median lead {med:.0f} h.' + (f' Source: {escape(source)}' if source else '') + '</text>')
     out.append("</svg>")
     return "\n".join(out) + "\n"
