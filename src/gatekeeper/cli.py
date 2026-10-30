@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -500,12 +500,11 @@ def packet(
     console.print(f"review packet: {folder / 'PACKET.md'}", markup=False)
 
 
-_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
-
-
 def plain(text: object) -> str:
-    """Text a package author can influence (paths, model summaries), safe for a terminal: no escape sequences."""
-    return _CONTROL.sub("?", str(text))
+    """Text a package author can influence (paths, model summaries) as one safe terminal line: no escape sequences,
+    no line breaks that could fake a verdict line, no invisible or bidirectional characters."""
+    return "".join("?" if unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp") else c
+                   for c in " ".join(str(text).split()))
 
 
 @app.command()

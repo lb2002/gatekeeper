@@ -119,4 +119,5 @@ def test_cli_strips_terminal_escapes_from_package_text():
     from gatekeeper.cli import plain
 
     assert plain("lib/\x1b]0;owned\x07a.js") == "lib/?]0;owned?a.js"
-    assert plain("line one\nline two") == "line one\nline two"
+    assert plain("BENIGN\nMALICIOUS 0.99") == "BENIGN MALICIOUS 0.99"
+    assert plain("a\u202eb\u2028c") == "a?b c"
