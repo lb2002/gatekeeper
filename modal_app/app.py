@@ -282,7 +282,7 @@ def _run_poll() -> dict:
 LEDGER_SECRET = modal.Secret.from_name("github-ledger", required_keys=["GITHUB_TOKEN"])
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], schedule=modal.Period(minutes=2), timeout=115, cpu=1.0, memory=2048)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], schedule=modal.Period(minutes=2), timeout=115, cpu=0.5, memory=2048)
 def poll() -> dict:
     import httpx
 
