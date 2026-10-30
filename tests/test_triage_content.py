@@ -96,3 +96,10 @@ def test_rules_stay_fast_on_long_minified_lines():
 def test_hex_dns_label_still_matches():
     p = pkg({"package.json": '{"name":"x"}', "index.js": "dns.lookup('" + "ab12" * 8 + ".oast.fun')\n"})
     assert "hex_dns_label" in score_content(p).rules
+
+
+def test_hardcoded_channel_id_counts_anywhere_in_a_package():
+    files = {"package.json": b'{"name":"x"}', "lib/socket.js": b"query('120363329486691279@newsletter', FOLLOW)\n"}
+    pkg = PackageFiles(files=files, sizes={p: len(b) for p, b in files.items()})
+    score = score_content(pkg)
+    assert "hardcoded_channel" in score.rules and score.score >= 6

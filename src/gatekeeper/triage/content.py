@@ -43,6 +43,8 @@ RULES: tuple[Rule, ...] = (
     # the lookbehind keeps this linear: without it every offset inside a long hex run restarts the match
     _r("hex_dns_label", 3, r"(?<![0-9a-f])[0-9a-f]{20,}\.[a-z0-9-]+\.(?:com|net|org|io|xyz|fun|site|live|me)\b"),
     _r("detached_spawn", 2, r"detached\s*:\s*true|\.unref\(\)"),
+    # a WhatsApp channel id written into a library: the Baileys fork family makes every user's account follow it
+    _r("hardcoded_channel", 6, r"\b\d{15,}@newsletter\b"),
     _r("injection_phrase", 3, r"(?:note|attention|message|instructions?)\s+(?:to|for)\s+(?:the\s+|any\s+)?(?:ai|llm|automated|security|code)(?:\s+\w+)?\s+(?:reviewers?|scanners?|analy[sz]ers?|auditors?)|ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions|(?:this\s+)?package\s+(?:is|has\s+been)\s+(?:audited|verified|reviewed)(?:\s+and)?(?:\s+is)?\s+safe|classify\s+(?:this\s+)?(?:package\s+)?as\s+(?:benign|safe)"),
 )
 
@@ -151,7 +153,7 @@ def score_content(pkg: PackageFiles, max_hits_per_rule: int = 5) -> ContentScore
 # Signals that are suspicious anywhere in a package. Everything else (spawning processes, network
 # calls, reading the hostname, eval) is normal for CLIs and agent tools at runtime and only counts
 # when it happens in code that runs at install time, or in a suspicious combination in one file.
-STRONG_RULES = {"env_dump", "exfil_service", "eval_decoded", "pipe_to_shell", "obfuscator_names", "hex_dns_label", "injection_phrase", "gyp_command", "encoded_url"}
+STRONG_RULES = {"hardcoded_channel", "env_dump", "exfil_service", "eval_decoded", "pipe_to_shell", "obfuscator_names", "hex_dns_label", "injection_phrase", "gyp_command", "encoded_url"}
 POINTS = {r.name: r.points for r in RULES} | {"high_entropy_blob": 2, "gyp_command": 4}
 INSTALL_TIME_MULTIPLIER = 2
 

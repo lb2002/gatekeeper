@@ -136,8 +136,11 @@ def _update_campaign_iocs(items: dict) -> int:
     lookups = 0
     with feed.make_client(timeout=20) as client:
         for key, it in items.items():
-            votes = sum((it.get("verdicts", {}).get(b) or {}).get("verdict") == "malicious" for b in NOTIFY_BACKENDS)
-            if votes < 2:
+            verdicts = it.get("verdicts") or {}
+            votes = sum((verdicts.get(b) or {}).get("verdict") == "malicious" for b in NOTIFY_BACKENDS)
+            # a wrong verdict must not put an innocent account on the list: a reviewer's or the investigator's word counts
+            cleared = (it.get("review") or {}).get("decision") not in (None, "malicious") or (verdicts.get("investigator") or {}).get("verdict") == "benign"
+            if votes < 2 or cleared:
                 continue
             if it.get("bundle"):
                 for ioc in specific_iocs(it["bundle"]):
@@ -1334,24 +1337,27 @@ def inspect_package(name: str, version: str, show_up_to: int = 20_000) -> dict:
 def _investigate_package(name: str, version: str, meta_reasons: list[str] | None, deep: bool, backend: str):
     """Fetch the archive into memory and run the investigator on it. None if the version is gone from npm."""
     from gatekeeper.evidence.bundle import build_bundle
+    from gatekeeper.evidence.compare import references_for
     from gatekeeper.investigate import investigate
     from gatekeeper.monitor import download_capped
     from gatekeeper.npm import feed, packument
     from gatekeeper.npm.tarball import read_tarball
+    from gatekeeper.popular import load_popular
     from gatekeeper.triage.content import score_content
 
     with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
         doc = packument.fetch_packument(client, name) or {}
         if version not in (doc.get("versions") or {}):
             return None
-        data = download_capped(client, packument.version_info(doc, version).tarball_url)
-    pkg = read_tarball(data)
+        pkg = read_tarball(download_capped(client, packument.version_info(doc, version).tarball_url))
+        references = references_for(client, doc, version, pkg, load_popular(DATA / "popular.txt"),
+                                    lambda url: read_tarball(download_capped(client, url)))
     content = score_content(pkg)
     return investigate(pkg, build_bundle(name, version, pkg, content, meta_reasons=meta_reasons), content,
-                       backend=backend, deep=deep)
+                       backend=backend, deep=deep, references=references)
 
 
-@app.function(image=image, secrets=[BASETEN_SECRET, FIREWORKS_SECRET], timeout=280, cpu=0.25, memory=1024)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[BASETEN_SECRET, FIREWORKS_SECRET], timeout=280, cpu=0.25, memory=1024)
 def investigate_package(name: str, version: str, deep: bool = False, backend: str = "spark-open-baseten") -> dict:
     """Run the investigator on one version and return its steps, excerpts and verdict (for review)."""
     res = _investigate_package(name, version, None, deep, backend)
