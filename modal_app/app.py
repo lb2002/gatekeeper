@@ -398,7 +398,7 @@ def _enqueue(rows: list[dict]) -> int:
     from gatekeeper.ledger import canonical_line, commitment, new_salt
 
     added = 0
-    pending = state.get("ledger_pending", [])
+    pending = []
     for r in rows:
         key = f"{r['name']}@{r['version']}"
         if key in queue:
@@ -413,7 +413,8 @@ def _enqueue(rows: list[dict]) -> int:
         pending.append(f"{r['seen_at']} {item['ledger']['digest']}")
         queue[key] = item
         added += 1
-    state["ledger_pending"] = pending
+    if pending:  # read last: a long batch must not write back a list other runs have changed meanwhile
+        state["ledger_pending"] = state.get("ledger_pending", []) + pending
     return added
 
 
@@ -1720,7 +1721,7 @@ def _seq_before(client, when: datetime) -> int:
 
 
 @app.function(image=image, volumes={str(DATA): volume}, timeout=3000, cpu=1.0, memory=2048)
-def backfill_gap(start: str, end: str, budget_s: int = 2700) -> dict:
+def backfill_gap(start: str, end: str, budget_s: int = 1500) -> dict:
     """Read a stretch the monitor missed: poll hung on Oct 29, 16:30-21:40 UTC, and what was published then had left
     its 6 h window when it recovered. Called by hand, again until nothing is left. What this finds was read late, so
     it never counts as a live flag or in recall, and the models take it after the live queue."""
@@ -1732,7 +1733,7 @@ def backfill_gap(start: str, end: str, budget_s: int = 2700) -> dict:
     started = time.monotonic()
     now = datetime.now(timezone.utc)
     gap_start, gap_end = datetime.fromisoformat(start), datetime.fromisoformat(end)
-    todo_file = DATA / "hunt" / "backfill-todo.json"
+    todo_file = DATA / "hunt" / f"backfill-{gap_start:%Y%m%d%H%M}-{gap_end:%Y%m%d%H%M}.json"
     todo_file.parent.mkdir(exist_ok=True)
     with feed.make_client(timeout=20) as client:
         if todo_file.exists():
@@ -1753,8 +1754,10 @@ def backfill_gap(start: str, end: str, budget_s: int = 2700) -> dict:
             publishers=state.get("campaign_publishers", {}), known_files=state.get("campaign_files", {}), workers=24,
         )
     rows = [r.to_json() | {"found_by": "gap"} for r in records]
-    flagged = sorted((r for r in rows if r["flagged"]), key=lambda r: -(r.get("priority") or 0))[:BACKFILL_MAX_FLAGS]
+    flagged = sorted((r for r in rows if r["flagged"]), key=lambda r: -(r.get("priority") or 0))
     flagged = [r | {"priority": (r.get("priority") or 0) - 100} for r in flagged]
+    failed = [r["name"] for r in rows if r["version"] == "?"]  # no packument: not read, so not done
+    deferred = list(dict.fromkeys(deferred + failed))
     day = f"{now:%Y-%m-%d}"
     if rows:
         _append_jsonl(DATA / "events" / day / f"sweep-gap-{now:%H%M%S}.jsonl",
@@ -1762,11 +1765,11 @@ def backfill_gap(start: str, end: str, budget_s: int = 2700) -> dict:
     added = 0
     if flagged:
         _append_jsonl(DATA / "flagged" / day / f"sweep-gap-{now:%H%M%S}.jsonl", flagged)
-        added = _enqueue(flagged)
+        added = _enqueue(flagged[:BACKFILL_MAX_FLAGS])  # the rest stays in that file, for the credits to decide
     todo_file.write_text(json.dumps(deferred), encoding="utf-8")
     volume.commit()
     stats = {"at": now.isoformat(), "names": total, "deferred": len(deferred), "versions": len(rows), "scanned": sum(1 for r in rows if r.get("scanned")),
-             "flagged": sum(1 for r in rows if r["flagged"]), "queued": added, "seconds": round(time.monotonic() - started)}
+             "flagged": len(flagged), "queued": added, "failed": len(failed), "seconds": round(time.monotonic() - started)}
     state["last_backfill"] = stats
     print(json.dumps(stats))
     return stats
