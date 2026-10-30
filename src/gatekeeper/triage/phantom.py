@@ -3,54 +3,86 @@
 The fake-job-interview campaign (26 Tailwind plugins, MAL-2026-18065 ff.) ships no payload at all: a clean plugin
 requires a private scoped package, and only the victim has the token, from the lure repository's .npmrc. No scanner,
 and no model, can see into that dependency, but the gap itself is visible: the name 404s on the public registry.
+A hit only sends the version to the models, so a stray monorepo leftover costs a few cents and nothing else.
 """
 
 from __future__ import annotations
 
+import json
 import re
 
 from gatekeeper.npm import packument
 from gatekeeper.npm.tarball import PackageFiles
-from gatekeeper.triage.content import CODE_EXT
+from gatekeeper.triage.content import CODE_EXT, focus_files
 
 _SCOPED_IMPORT = re.compile(r"""(?:\brequire\(\s*|\bfrom\s+|\bimport\(\s*|\bimport\s+)['"`](@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)""", re.I)
-MAX_CHECKS = 6  # registry lookups per version: a bundle may name dozens of optional integrations
-MAX_FILE_BYTES = 400_000
+_SCOPED_NAME = re.compile(r"@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*\Z", re.I)
+_TEST_DIR = re.compile(r"(?:^|/)(?:test|tests|__tests__|fixtures)/")
+MAX_LOOKUPS = 12  # registry requests per version; names already known cost nothing
+MAX_SCAN_BYTES = 400_000  # of each file
+MAX_NAMES = 200
 _KNOWN: dict[str, bool] = {}  # name -> readable on the public registry, for the life of the container
 
 
-def scoped_imports(pkg: PackageFiles) -> dict[str, tuple[str, int, str]]:
-    """Scoped package names loaded by the code -> where the first load is (path, line, text)."""
-    found: dict[str, tuple[str, int, str]] = {}
-    for path, data in pkg.files.items():
-        if not path.endswith(CODE_EXT) or path.endswith(".d.ts") or len(data) > MAX_FILE_BYTES or "/test" in path:
-            continue
-        text = pkg.text(path) or ""
-        for m in _SCOPED_IMPORT.finditer(text):
-            line = text.count("\n", 0, m.start()) + 1
-            found.setdefault(m.group(1), (path, line, m.group(0)[:120]))
+def _manifest_names(pkg: PackageFiles) -> dict[str, tuple[str, int, str]]:
+    try:
+        manifest = json.loads(pkg.text("package.json") or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(manifest, dict):
+        return {}
+    found = {}
+    for field in ("dependencies", "optionalDependencies", "peerDependencies"):
+        deps = manifest.get(field)
+        if isinstance(deps, dict):
+            for name in deps:
+                if isinstance(name, str) and _SCOPED_NAME.match(name):
+                    found.setdefault(name, ("package.json", 1, f"{field}: {name}"[:120]))
     return found
 
 
-def _readable(client, name: str) -> bool:
-    if name not in _KNOWN:
-        resp = client.head(packument.packument_url(name))
-        if resp.status_code not in (200, 404):  # rate limit or outage: says nothing about the package
-            return True
-        _KNOWN[name] = resp.status_code == 200
-    return _KNOWN[name]
+def scoped_imports(pkg: PackageFiles) -> dict[str, tuple[str, int, str]]:
+    """Scoped packages the package loads or declares -> where (path, line, text). Code that runs first comes first,
+    so filler imports in other files cannot push the real one past the lookup limit."""
+    found = _manifest_names(pkg)
+    focus = focus_files(pkg)
+    paths = focus + [p for p in pkg.files if p not in focus and p.endswith(CODE_EXT) and not p.endswith(".d.ts")]
+    for path in paths:
+        if path not in focus and _TEST_DIR.search(path):
+            continue
+        text = pkg.files[path][:MAX_SCAN_BYTES].decode("utf-8", errors="replace")
+        line, offset = 1, 0
+        for m in _SCOPED_IMPORT.finditer(text):
+            if m.group(1) in found:
+                continue
+            if len(found) >= MAX_NAMES:
+                return found
+            line += text.count("\n", offset, m.start())
+            offset = m.start()
+            found[m.group(1)] = (path, line, m.group(0)[:120])
+    return found
 
 
 def unreadable_imports(client, pkg: PackageFiles, own_name: str, popular: set[str]) -> list[tuple[str, tuple[str, int, str]]]:
-    """Scoped packages the code loads that do not exist for the public: (name, (path, line, text))."""
-    own_scope = own_name.split("/")[0] if own_name.startswith("@") else None
-    candidates = [(n, where) for n, where in scoped_imports(pkg).items()
-                  if n not in popular and n != own_name and n.split("/")[0] != own_scope]
+    """Scoped packages it loads that do not exist for the public: (name, (path, line, text)). A failed lookup
+    counts as readable and is not remembered: the monitor must not stop for a registry hiccup, and the next
+    version of the package asks again."""
     out = []
-    for name, where in candidates[:MAX_CHECKS]:
-        try:
-            if not _readable(client, name):
-                out.append((name, where))
-        except Exception:
+    lookups = 0
+    for name, where in scoped_imports(pkg).items():
+        if name in popular or name == own_name:
             continue
+        if name not in _KNOWN:
+            if lookups >= MAX_LOOKUPS:
+                continue
+            lookups += 1
+            try:
+                status = client.head(packument.packument_url(name)).status_code
+            except Exception:
+                continue
+            if status not in (200, 404):
+                continue
+            _KNOWN[name] = status == 200
+        if not _KNOWN[name]:
+            out.append((name, where))
     return out
