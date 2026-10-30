@@ -48,9 +48,16 @@ function projectRegistries (config) {
   const data = (config.data.get('project') || {}).data || {}
   for (const [k, v] of Object.entries(data)) {
     const registry = (k === 'registry' || k.endsWith(':registry')) && !PUBLIC.includes(slash(v))
-    const network = NETWORK_KEYS.has(k) || (k === 'strict-ssl' && String(v) === 'false') ||
+    // any strict-ssl in the project: npm coerces many spellings to false, so its value is not interpreted here
+    const network = NETWORK_KEYS.has(k) || k === 'strict-ssl' ||
       (k.startsWith('//') && /:(certfile|keyfile|cafile|ca|cert|key)$/.test(k))
-    if (registry || network) out.push(`${k}=${v}`)
+    if (!registry && !network) continue
+    // shown on the terminal and in CI logs: hosts only, never credentials, certificates or keys
+    let host = ''
+    try {
+      if (registry || /proxy$/.test(k)) host = new URL(String(v)).host
+    } catch (e) {}
+    out.push(host ? `${k} -> ${host}` : k)
   }
   return out
 }
