@@ -53,6 +53,7 @@ class Record:
     excerpts: list[dict] | None = None
     fast_risk: float | None = None
     error: str | None = None
+    publisher: str | None = None
 
     @property
     def key(self) -> str:
@@ -112,6 +113,7 @@ def process_version(
     mal_index: dict[str, dict] | None = None,
     scan: bool = True,
     campaign: dict[str, str] | None = None,
+    publishers: dict[str, str] | None = None,
 ) -> Record:
     meta = score_metadata(info, popular, now=now, mal_index=mal_index)
     rec = Record(
@@ -121,11 +123,16 @@ def process_version(
         seen_at=now.isoformat(),
         meta_score=meta.score,
         meta_reasons=meta.reasons,
+        publisher=info.publisher,
     )
+    # an npm account that already published a package the models agree is malicious: always look closely
+    known_account = (publishers or {}).get(info.publisher or "")
+    if known_account:
+        meta.reasons.append(f"+10 published by {info.publisher}, who also published {known_account}")
     # past the per-name cap only a strong metadata signal (e.g. a known-malicious dependency) earns a download
-    if not scan and meta.score < FLAG_TOTAL_THRESHOLD:
+    if not scan and meta.score < FLAG_TOTAL_THRESHOLD and not known_account:
         return rec
-    if not info.tarball_url or not should_scan(info, meta.score, popular, now):
+    if not info.tarball_url or not (should_scan(info, meta.score, popular, now) or known_account):
         return rec
     try:
         pkg = read_tarball(download_capped(client, info.tarball_url))
@@ -142,7 +149,8 @@ def process_version(
         meta.reasons.append(f"+10 sends to {shared[0][0]}, the endpoint of {shared[0][1]}")
     rec.scanned = True
     rec.content_score = content.score
-    rec.rules = sorted(content.rules | ({"known_campaign_endpoint"} if shared else set()))
+    rec.rules = sorted(content.rules | ({"known_campaign_endpoint"} if shared else set())
+                       | ({"known_bad_publisher"} if known_account else set()))
     rec.priority = meta.score + content.score
     rules_flag = content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD
     fast_flag = False
@@ -157,9 +165,8 @@ def process_version(
     text = bundle.render()
     young = info.package_created_at is not None and now - info.package_created_at <= timedelta(hours=NEW_PACKAGE_HOURS)
     new_with_hook = young and bool(info.install_scripts or info.gypfile)
-    rec.flagged = rules_flag or fast_flag or new_with_hook or bool(shared)
-    if shared:
-        rec.priority += 10
+    rec.flagged = rules_flag or fast_flag or new_with_hook or bool(shared) or bool(known_account)
+    rec.priority += 10 * (bool(shared) + bool(known_account))
     rec.bundle = text
     rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
     rec.excerpts = [e.ref() for e in bundle.excerpts]
@@ -178,6 +185,7 @@ def process_names(
     fast: FastScorer | None = None,
     mal_index: dict[str, dict] | None = None,
     campaign: dict[str, str] | None = None,
+    publishers: dict[str, str] | None = None,
 ) -> tuple[list[Record], list[str]]:
     """Score every version of the changed packages published within `window`, unless already seen.
 
@@ -205,7 +213,7 @@ def process_names(
             if out and deadline is not None and time.monotonic() > deadline:
                 return out, True  # unfinished: the name is deferred, `seen` skips what is done
             out.append(process_version(client, info, popular, now, fast, mal_index, scan=i < MAX_VERSIONS_PER_NAME,
-                                       campaign=campaign))
+                                       campaign=campaign, publishers=publishers))
         return out, False
 
     pool = ThreadPoolExecutor(max_workers=workers)

@@ -68,3 +68,29 @@ def test_a_reupload_to_a_known_campaign_endpoint_is_flagged(monkeypatch):
     rec = monitor.process_version(None, info, set(), now, campaign={"203.0.114.9": "evil@1.0.0"})
     assert rec.flagged and "known_campaign_endpoint" in rec.rules
     assert any("evil@1.0.0" in r for r in rec.meta_reasons)
+
+
+def test_any_new_version_from_a_known_bad_account_reaches_a_model(monkeypatch):
+    import io
+    import json
+    import tarfile
+    from datetime import datetime, timedelta, timezone
+
+    from gatekeeper import monitor
+    from gatekeeper.npm.packument import VersionInfo
+
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as tar:
+        data = json.dumps({"name": "z", "version": "5.0.0"}).encode()
+        info = tarfile.TarInfo("package/package.json")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    monkeypatch.setattr(monitor, "download_capped", lambda client, url: raw.getvalue())
+    now = datetime(2026, 10, 30, tzinfo=timezone.utc)
+    # an old, much-updated package: normally not even downloaded
+    info = VersionInfo(name="z", version="5.0.0", published_at=now, package_created_at=now - timedelta(days=400),
+                       has_repository=True, tarball_url="https://r/z.tgz", version_count=80, publisher="sleeper")
+    assert not monitor.process_version(None, info, set(), now).scanned
+    rec = monitor.process_version(None, info, set(), now, publishers={"sleeper": "random-transactions-sdk@1.0.1"})
+    assert rec.scanned and rec.flagged and "known_bad_publisher" in rec.rules and rec.publisher == "sleeper"
+    assert any("random-transactions-sdk@1.0.1" in r for r in rec.meta_reasons)

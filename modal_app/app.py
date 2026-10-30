@@ -37,7 +37,7 @@ state = modal.Dict.from_name("gatekeeper-state", create_if_missing=True)
 queue = modal.Dict.from_name("gatekeeper-queue", create_if_missing=True)  # key "name@version" -> item
 worker_secret = modal.Secret.from_name("gatekeeper-worker")  # GK_WORKER_TOKEN
 NTFY_SECRET = modal.Secret.from_name("ntfy", required_keys=["NTFY_TOPIC"])  # reviewer push notifications
-QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk", "low_priority")
+QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk", "low_priority", "publisher")
 
 DATA = Path("/data")
 # Time budget of one poll run (the function is killed at 115 s): every network step has a short timeout
@@ -104,9 +104,20 @@ _CAMPAIGN_CACHE: dict = {}
 
 def _campaign_iocs() -> dict:
     """Endpoints of model-agreed malicious packages (built hourly by `confirm`), cached per container for 5 min."""
-    if time.time() - _CAMPAIGN_CACHE.get("at", 0) > 300:
-        _CAMPAIGN_CACHE.update(at=time.time(), iocs=state.get("campaign_iocs", {}) or {})
+    _refresh_campaign_cache()
     return _CAMPAIGN_CACHE["iocs"]
+
+
+def _campaign_publishers() -> dict:
+    """npm accounts that published a model-agreed malicious package -> that package."""
+    _refresh_campaign_cache()
+    return _CAMPAIGN_CACHE["publishers"]
+
+
+def _refresh_campaign_cache() -> None:
+    if time.time() - _CAMPAIGN_CACHE.get("at", 0) > 300:
+        _CAMPAIGN_CACHE.update(at=time.time(), iocs=state.get("campaign_iocs", {}) or {},
+                               publishers=state.get("campaign_publishers", {}) or {})
 
 
 def _update_campaign_iocs(items: dict) -> int:
@@ -114,15 +125,33 @@ def _update_campaign_iocs(items: dict) -> int:
     bundles leave the queue). Returns how many are known."""
     from gatekeeper.triage.campaign import specific_iocs
 
+    from gatekeeper.npm import feed, packument
+
     known = state.get("campaign_iocs", {}) or {}
-    for key, it in items.items():
-        votes = sum((it.get("verdicts", {}).get(b) or {}).get("verdict") == "malicious" for b in NOTIFY_BACKENDS)
-        if votes >= 2 and it.get("bundle"):
-            for ioc in specific_iocs(it["bundle"]):
-                known.setdefault(ioc, key)
+    accounts = state.get("campaign_publishers", {}) or {}
+    lookups = 0
+    with feed.make_client(timeout=20) as client:
+        for key, it in items.items():
+            votes = sum((it.get("verdicts", {}).get(b) or {}).get("verdict") == "malicious" for b in NOTIFY_BACKENDS)
+            if votes < 2:
+                continue
+            if it.get("bundle"):
+                for ioc in specific_iocs(it["bundle"]):
+                    known.setdefault(ioc, key)
+            publisher = it.get("publisher")
+            if publisher is None and key not in accounts.values() and lookups < 30:  # items queued before the field existed
+                lookups += 1
+                try:
+                    doc = packument.fetch_packument(client, it["name"]) or {}
+                    publisher = (((doc.get("versions") or {}).get(it["version"]) or {}).get("_npmUser") or {}).get("name")
+                except Exception:
+                    publisher = None
+            if publisher and publisher != "npm":
+                accounts.setdefault(publisher, key)
     if len(known) > 5000:  # keep the newest entries (dicts keep insertion order)
         known = dict(list(known.items())[-5000:])
     state["campaign_iocs"] = known
+    state["campaign_publishers"] = dict(list(accounts.items())[-5000:])
     return len(known)
 
 
@@ -174,7 +203,7 @@ def _run_poll() -> dict:
         todo = list(dict.fromkeys(pending + list(names)))
         records, deferred = process_names(
             client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S,
-            fast=_fast_scorer(), mal_index=_mal_index(), campaign=_campaign_iocs(), workers=32,
+            fast=_fast_scorer(), mal_index=_mal_index(), campaign=_campaign_iocs(), publishers=_campaign_publishers(), workers=32,
         )
         stats["deferred"] = len(deferred)
 
