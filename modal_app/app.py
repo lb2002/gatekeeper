@@ -1505,7 +1505,9 @@ def api():
 
         from gatekeeper.report.chart import render
 
-        return Response(render(_public_stats()), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=300"})
+        return Response(render(_public_stats()), media_type="image/svg+xml", headers={
+            "Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
 
     @web.get("/", response_class=HTMLResponse)
     def public_page() -> str:

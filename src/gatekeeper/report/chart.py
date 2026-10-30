@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from html import escape
 
 
 def ts(s: str) -> datetime:
@@ -46,7 +47,8 @@ def render(stats: dict, source: str = "") -> str:
         y = top + i * row_h + row_h / 2
         flag, public = ts(c["flagged_at"]), ts(c["earliest_public"])
         lead_h = (public - flag).total_seconds() / 3600
-        label = c["name"] if len(c["name"]) <= 30 else c["name"][:29] + "…"
+        # package names are chosen by whoever publishes them: escaped like every other text in the SVG
+        label = escape(c["name"] if len(c["name"]) <= 30 else c["name"][:29] + "…")
         out.append(f'<text x="{left - 12}" y="{y + 5:.1f}" font-size="14" text-anchor="end" fill="#1d1d1b">{label}</text>')
         out.append(f'<rect x="{x(flag):.1f}" y="{y - 6:.1f}" width="{max(x(public) - x(flag), 2):.1f}" height="12" rx="3" fill="#f4c7c3"/>')
         out.append(f'<circle cx="{x(flag):.1f}" cy="{y:.1f}" r="6" fill="#b4232c"/>')
@@ -56,6 +58,6 @@ def render(stats: dict, source: str = "") -> str:
     leads = sorted((ts(c["earliest_public"]) - ts(c["flagged_at"])).total_seconds() / 3600 for c in rows)
     med = (leads[len(leads) // 2] + leads[(len(leads) - 1) // 2]) / 2
     out.append(f'<text x="24" y="{height - 12}" font-size="13" fill="#6b6b66">{len(rows)} packages, all flagged before the public '
-               f'report; median lead {med:.0f} h.' + (f' Source: {source}' if source else '') + '</text>')
+               f'report; median lead {med:.0f} h.' + (f' Source: {escape(source)}' if source else '') + '</text>')
     out.append("</svg>")
     return "\n".join(out) + "\n"
