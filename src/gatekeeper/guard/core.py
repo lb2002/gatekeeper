@@ -323,6 +323,37 @@ def registry_args(args: list[str]) -> list[str]:
     return []
 
 
+NPM_ARGV_JS = Path(__file__).with_name("npm_argv.js")
+
+
+def npm_root(npm_exe: str) -> Path | None:
+    """The npm package directory behind an npm executable (Windows npm.cmd, a unix symlink to npm-cli.js, ...)."""
+    exe = Path(npm_exe)
+    candidates = [exe.parent / "node_modules" / "npm", exe.parent.parent / "lib" / "node_modules" / "npm"]
+    with contextlib.suppress(OSError):
+        candidates.append(exe.resolve().parent.parent)
+    return next((c for c in candidates if (c / "lib" / "utils" / "cmd-list.js").exists()), None)
+
+
+def npm_native_parse(npm_exe: str, tool: str, args: list[str], timeout: float = 90) -> dict | None:
+    """Ask the installed npm itself what this command line installs or runs: npm's config loader (options,
+    shorthands, abbreviations, .npmrc, npm_config_* variables), its command aliases, npm-package-arg for the
+    spec type and pacote for the exact version, with the user's registry, tag and before settings. Re-parsing
+    npm's arguments in Python kept missing cases (`npm -p install x`, `npm it x`, `npm create x`, ...).
+    Returns None when this npm cannot be used that way; the caller falls back to the Python parser."""
+    root = npm_root(npm_exe)
+    if root is None:
+        return None
+    node = next((str(p) for p in (Path(npm_exe).parent / "node.exe", Path(npm_exe).parent / "node") if p.exists()), "node")
+    try:
+        out = subprocess.run([node, str(NPM_ARGV_JS), str(root), tool, *args], capture_output=True, text=True,
+                             timeout=timeout, encoding="utf-8")
+        data = json.loads(out.stdout or "{}")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return None if "error" in data or "specs" not in data else data
+
+
 def with_before(tool: str, args: list[str], min_age_hours: float | None = None, now: float | None = None) -> list[str]:
     """`args` with `--before=<now - waiting period>` for npm/npx commands that resolve versions: npm then picks,
     for the whole dependency tree, only versions published before that moment. The explicit package is checked
@@ -334,12 +365,13 @@ def with_before(tool: str, args: list[str], min_age_hours: float | None = None, 
     if hours <= 0 or any(a == "--before" or a.startswith("--before=") for a in args):
         return list(args)
     flag = f"--before={datetime.fromtimestamp((now or time.time()) - hours * 3600, timezone.utc):%Y-%m-%dT%H:%M:%SZ}"
+    # first, so it is always read as an option (after `--`, or after npx's package, it would be an argument)
     if tool == "npx":
         return [flag, *args]
     i = command_index(args)
-    if tool != "npm" or i is None or _canonical(args[i]) not in RESOLVE_COMMANDS | EXEC_COMMANDS:
+    if tool != "npm" or i is None or _canonical(args[i]) not in RESOLVE_COMMANDS | EXEC_COMMANDS | {"init", "create", "innit"}:
         return list(args)
-    return [*args[: i + 1], flag, *args[i + 1:]]
+    return [flag, *args]
 
 
 def _is_registry_spec(a: str) -> bool:
@@ -383,11 +415,11 @@ def verify_integrity(data: bytes, integrity: str | None) -> bool:
 
 
 def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, use_cache: bool = True,
-               min_age_hours: float | None = None) -> Decision:
+               min_age_hours: float | None = None, meta: dict | None = None) -> Decision:
     from gatekeeper.confirm.malindex import KNOWN_MALICIOUS, TAKEN_DOWN, bad_dependencies
 
     started = time.monotonic()
-    meta = resolve(npm_cmd, spec)
+    meta = meta or resolve(npm_cmd, spec)
     index = load_mal_index()
     listed = reported_malicious(meta, index) or osv_online(meta)
     if listed:

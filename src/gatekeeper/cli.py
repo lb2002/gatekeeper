@@ -312,15 +312,23 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import (ALLOW_FLAG, check_spec, index_age_days, load_fast_model, package_specs,
-                                       registry_args, remote_specs, with_before)
+    from gatekeeper.guard.core import (ALLOW_FLAG, check_spec, index_age_days, load_fast_model, npm_native_parse,
+                                       package_specs, registry_args, remote_specs, with_before)
 
     # the shims call `gk guard run npm -- <args>`: drop that one separator, keep the user's own `--`
     args = list(ctx.args[1:] if ctx.args[:1] == ["--"] else ctx.args)
     cfg = shim.config()
     real = shim.npm_command(cfg, tool)
     allow = ALLOW_FLAG in args
-    remote = remote_specs(tool, args)
+    plain = [a for a in args if a != ALLOW_FLAG]
+    native = None if allow else npm_native_parse(shim.npm_command(cfg, tool)[0], tool, plain)
+    if native is not None:
+        remote = [x["spec"] for x in native["specs"] if x["type"] in ("remote", "invalid")]
+        resolved = {x["spec"]: x for x in native["specs"] if x["type"] == "registry"}
+    else:
+        console.print("[yellow]gatekeeper[/] could not ask npm how it reads this command; using Gatekeeper's own parser",
+                      highlight=False)
+        remote, resolved = remote_specs(tool, args), {}
     if remote and not allow:
         console.print(Panel("\n".join([f"{', '.join(remote)} would be fetched from git or a URL: no registry metadata and no",
                                         "integrity hash, so Gatekeeper cannot check it before its install scripts run.",
@@ -329,7 +337,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
         typer.echo("Gatekeeper blocked an install from git or a URL it cannot check. Do not retry with other flags; ask the user.",
                    err=True)
         raise typer.Exit(1)
-    specs = package_specs(tool, args)
+    specs = list(resolved) if native is not None else package_specs(tool, args)
     if specs and not allow:
         fast_model = load_fast_model()
         stale = index_age_days()
@@ -339,7 +347,11 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
         for spec in specs:
             console.print(f"[cyan]gatekeeper[/] checking {escape(spec)} ...", highlight=False)
             try:
-                d = check_spec(shim.npm_command(cfg, "npm") + registry_args(args), spec, fast_model=fast_model)
+                r = resolved.get(spec)
+                if r is not None and r.get("error"):
+                    raise RuntimeError(f"npm could not resolve it ({r['error'].strip()[:200]})")
+                meta = None if r is None else {k: r[k] for k in ("name", "version", "tarball", "integrity", "time", "dependencies")}
+                d = check_spec(shim.npm_command(cfg, "npm") + registry_args(args), spec, fast_model=fast_model, meta=meta)
             except Exception as exc:
                 # Fail closed: a package must not get through just because checking it failed
                 # (an attacker could craft an archive that makes the check error out).
@@ -372,7 +384,6 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
             # message for AI coding agents reading stderr
             typer.echo("Gatekeeper blocked this install because the package looks malicious. Do not retry with other flags or names; ask the user.", err=True)
             raise typer.Exit(1)
-    plain = [a for a in args if a != ALLOW_FLAG]
     final = plain if allow else with_before(tool, plain)
     before = [a for a in final if a not in plain]
     if before:

@@ -148,11 +148,13 @@ def test_waiting_period_reaches_the_whole_dependency_tree():
 
     now = 1_793_318_400.0  # 2026-10-30T00:00:00Z
     flag = "--before=2026-10-29T00:00:00Z"
-    assert with_before("npm", ["install", "lodash"], 24, now) == ["install", flag, "lodash"]
-    assert with_before("npm", ["install"], 24, now) == ["install", flag]  # from package.json
-    assert with_before("npm", ["--loglevel", "warn", "i", "x"], 24, now) == ["--loglevel", "warn", "i", flag, "x"]
-    assert with_before("npm", ["update"], 72, now) == ["update", "--before=2026-10-27T00:00:00Z"]
-    assert with_before("npm", ["exec", "pkg", "--", "--x"], 24, now) == ["exec", flag, "pkg", "--", "--x"]
+    assert with_before("npm", ["install", "lodash"], 24, now) == [flag, "install", "lodash"]
+    assert with_before("npm", ["install"], 24, now) == [flag, "install"]  # from package.json
+    assert with_before("npm", ["--loglevel", "warn", "i", "x"], 24, now) == [flag, "--loglevel", "warn", "i", "x"]
+    assert with_before("npm", ["update"], 72, now) == ["--before=2026-10-27T00:00:00Z", "update"]
+    assert with_before("npm", ["exec", "pkg", "--", "--x"], 24, now) == [flag, "exec", "pkg", "--", "--x"]
+    assert with_before("npm", ["--", "install", "evil"], 24, now) == [flag, "--", "install", "evil"]  # never after --
+    assert with_before("npm", ["create", "vite"], 24, now) == [flag, "create", "vite"]
     assert with_before("npx", ["cowsay", "--x"], 24, now) == [flag, "cowsay", "--x"]
     assert with_before("npm", ["run", "build"], 24, now) == ["run", "build"]
     assert with_before("npm", ["install", "x", "--before=2020-01-01"], 24, now) == ["install", "x", "--before=2020-01-01"]
@@ -204,4 +206,40 @@ def test_parser_differentials_fail_closed():
     assert package_specs("npx", ["--packa=evil", "--package", "evil2", "bin"]) == ["evil", "evil2"]
     assert package_specs("npx", ["--", "evil", "--flag"]) == ["evil"]
     assert package_specs("npm", ["exec", "--", "evil", "arg"]) == ["evil"]
-    assert with_before("npm", ["-p", "i", "x"], 24, 1_793_318_400.0) == ["-p", "i", "--before=2026-10-29T00:00:00Z", "x"]
+    assert with_before("npm", ["-p", "i", "x"], 24, 1_793_318_400.0) == ["--before=2026-10-29T00:00:00Z", "-p", "i", "x"]
+
+
+def _real_npm():
+    import shutil
+
+    from gatekeeper.guard.core import npm_root
+
+    exe = shutil.which("npm.cmd") or shutil.which("npm")
+    return exe if exe and npm_root(exe) else None
+
+
+def test_npm_itself_reads_the_command_line(monkeypatch):
+    """The cases a review found the Python parser getting wrong, read by the installed npm (registry metadata
+    only; nothing is installed or run). Skipped without npm."""
+    import pytest
+
+    from gatekeeper.guard.core import npm_native_parse
+
+    exe = _real_npm()
+    if exe is None:
+        pytest.skip("npm not installed")
+    monkeypatch.delenv("NPM_CONFIG_REGISTRY", raising=False)
+
+    def read(tool, *args):
+        d = npm_native_parse(exe, tool, list(args))
+        assert d is not None
+        return d["command"], [(s["spec"], s["type"]) for s in d["specs"]]
+
+    assert read("npm", "-p", "install", "lodash") == ("install", [("lodash", "registry")])
+    assert read("npm", "it", "lodash") == ("install-test", [("lodash", "registry")])
+    assert read("npm", "--editor", "view", "install", "lodash") == ("install", [("lodash", "registry")])
+    assert read("npm", "create", "vite@5") == ("init", [("create-vite@5", "registry")])
+    assert read("npx", "--editor", "lodash", "cowsay") == ("exec", [("cowsay", "registry")])
+    assert read("npm", "install", "https://evil.example/x.tgz?@npm:") == ("install", [("https://evil.example/x.tgz?@npm:", "remote")])
+    assert read("npm", "install", "git@github.com:u/r") == ("install", [("git@github.com:u/r", "remote")])
+    assert read("npm", "run", "build") == ("run-script", [])

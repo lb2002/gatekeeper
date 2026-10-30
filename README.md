@@ -55,7 +55,7 @@ A note on OSV timestamps: an entry's `published` field is set by the reporter an
 
 `gk guard update-osv` refreshes the offline list (a 3 MB copy the monitor rebuilds daily; `--from-osv` builds it yourself from OSV's `npm/all.zip`).
 
-Decisions are cached per exact tarball integrity. The classifier ships as plain JSON numbers (no pickle), so loading it cannot run code.
+The guard does not re-implement npm's command line: it asks the installed npm, through npm's own config loader, command aliases, `npm-package-arg` and `pacote`, which packages a command would install or run and which exact versions (so `npm -p install x`, `npm it x`, `npm create x`, `npx --package=x`, `.npmrc` registries and `--tag` all resolve as npm resolves them). Decisions are cached per exact tarball integrity. The classifier ships as plain JSON numbers (no pickle), so loading it cannot run code.
 
 ### Proving when we saw something
 
