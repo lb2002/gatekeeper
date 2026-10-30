@@ -98,5 +98,7 @@ def test_lookups_are_cached_and_bounded():
     client = httpx.Client(transport=httpx.MockTransport(handler))
     pkg = pkg_of({"a.js": b"\n".join(b"require('@a/p%d')" % i for i in range(20))})
     phantom.unreadable_imports(client, pkg, "x", set())
-    phantom.unreadable_imports(client, pkg, "x", set())
     assert len(calls) == phantom.MAX_LOOKUPS
+    phantom.unreadable_imports(client, pkg, "x", set())  # known names are free, so the rest get their turn
+    phantom.unreadable_imports(client, pkg, "x", set())
+    assert len(calls) == 20
