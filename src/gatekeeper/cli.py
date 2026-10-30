@@ -325,6 +325,8 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     final = plain if allow else with_before(tool, plain)
     before = [a for a in final if a not in plain]
     native = None if allow else npm_native_parse(shim.npm_command(cfg, tool)[0], tool, final)
+    if native is not None and native.get("command") in ("view", "outdated", "search"):
+        final, before = plain, []  # read-only: --before would only change what the user sees
     if native is not None:
         remote = [x["spec"] for x in native["specs"] if x["type"] in ("remote", "invalid")]
         resolved = {x["spec"]: x for x in native["specs"] if x["type"] == "registry"}

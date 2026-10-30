@@ -23,28 +23,58 @@ const EXEC = new Set(['exec'])
 const INIT = new Set(['init'])
 // commands that fetch (and, for git specs, build) packages without installing them: only remote specs matter here,
 // because pacote runs `npm install` and the `prepare` script inside a git clone to pack it
-const INSPECT = new Set(['pack', 'cache', 'diff', 'view'])
+const INSPECT = new Set(['pack', 'cache', 'diff', 'view', 'publish'])
 const fs = require('fs')
+
+// commands that install the project's dependency tree, lockfile entries included
+const TREE = new Set(['install', 'install-test', 'update', 'ci', 'install-ci-test', 'dedupe', 'link', 'audit', 'rebuild'])
+
+// Lockfile entries npm would fetch from somewhere other than a configured registry. npm installs locked
+// transitive dependencies from their `resolved` URL as written, and a cloned repository controls that file.
+function offRegistryLockEntries (flat) {
+  let lock = null
+  for (const f of ['npm-shrinkwrap.json', 'package-lock.json']) {
+    try { lock = JSON.parse(fs.readFileSync(f, 'utf8')); break } catch (e) {}
+  }
+  if (!lock) return []
+  const registries = Object.entries(flat).filter(([k]) => k === 'registry' || k.endsWith(':registry'))
+    .map(([, v]) => String(v).replace(/\/?$/, '/'))
+  // the public registry (and yarn's mirror of it) is a known source even when a proxy registry is configured;
+  // what it serves is still checked package by package
+  registries.push('https://registry.npmjs.org/', 'https://registry.yarnpkg.com/')
+  const entries = []
+  if (lock.packages) {
+    for (const [p, e] of Object.entries(lock.packages)) if (p) entries.push([p, e])
+  } else {
+    const walk = (deps, prefix) => {
+      for (const [n, e] of Object.entries(deps || {})) {
+        entries.push([prefix + n, e])
+        walk(e.dependencies, prefix + n + '/node_modules/')
+      }
+    }
+    walk(lock.dependencies, 'node_modules/')
+  }
+  const out = []
+  for (const [p, e] of entries) {
+    if (!e || e.link || e.inBundle || !e.resolved) continue
+    const r = String(e.resolved)
+    if (r.startsWith('file:')) continue // the project's own files
+    if (!registries.some((reg) => r.startsWith(reg))) out.push(`${r} (package-lock: ${p})`)
+  }
+  return out
+}
 
 // what `npm install <bare name>` really resolves when the project already has it: arborist keeps the lockfile's
 // version, or else the range saved in package.json (build-ideal-tree: "if it's just @'' ... reload what's there")
-const lockInfo = new Map()
-
+// what `npm install <bare name>` / `npm update <name>` really resolves when package.json already lists the
+// package: arborist re-resolves the saved range (with the same --before), not the lockfile's version, for
+// packages named on the command line. A name not in package.json is added at its latest version.
 function projectSpec (spec) {
   let r
   try { r = npa(spec) } catch (e) { return spec }
   if (!r.registry || (r.rawSpec !== '' && r.rawSpec !== '*')) return spec
-  const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch (e) { return null } }
-  const lock = read('package-lock.json') || read('npm-shrinkwrap.json')
-  const locked = lock && lock.packages && lock.packages['node_modules/' + r.name]
-  if (locked && locked.version && !locked.link) {
-    // npm installs from the lock entry's `resolved` URL and checks it against the lock's `integrity`, both of
-    // which a cloned repository controls: remembered here and compared with the registry after resolving
-    const pinned = `${r.name}@${locked.version}`
-    lockInfo.set(pinned, { resolved: locked.resolved || null, integrity: locked.integrity || null })
-    return pinned
-  }
-  const pkg = read('package.json') || {}
+  let pkg = {}
+  try { pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')) } catch (e) {}
   for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
     const range = (pkg[section] || {})[r.name]
     if (typeof range === 'string') return `${r.name}@${range}`
@@ -152,6 +182,9 @@ async function main () {
     before = 'invalid'
   }
   const resolved = []
+  if (command && TREE.has(command)) {
+    for (const spec of offRegistryLockEntries(flat)) resolved.push({ spec, type: 'remote', error: 'locked outside the registry' })
+  }
   for (const spec of inspect) {
     let type
     try { type = kind(spec) } catch (e) { type = 'invalid' }
@@ -189,18 +222,6 @@ async function main () {
       } catch (e) {
         if (!flat.before || e.code !== 'ETARGET') throw e
         mani = await pacoteMod().manifest(spec, { ...flat, before: null, fullMetadata: true })
-      }
-      const lock = lockInfo.get(spec)
-      if (lock) {
-        // only a lock entry that is exactly what the configured registry serves counts as a registry install
-        const tarball = mani._resolved || (mani.dist && mani.dist.tarball)
-        const integrity = mani._integrity || (mani.dist && mani.dist.integrity)
-        const sameUrl = !lock.resolved || lock.resolved === tarball
-        const sameHash = !lock.integrity || lock.integrity === integrity
-        if (!sameUrl || !sameHash) {
-          resolved.push({ spec: lock.resolved || spec, type: 'remote', error: 'package-lock.json points elsewhere than the registry' })
-          continue
-        }
       }
       const pack = await pacoteMod().packument(mani.name, { ...flat, fullMetadata: true })
       const deps = []

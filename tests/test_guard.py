@@ -157,7 +157,8 @@ def test_waiting_period_reaches_the_whole_dependency_tree():
     assert with_before("npm", ["create", "vite"], 24, now) == [flag, "create", "vite"]
     assert with_before("npx", ["cowsay", "--x"], 24, now) == [flag, "cowsay", "--x"]
     assert with_before("npm", ["run", "build"], 24, now) == [flag, "run", "build"]  # harmless; nested installs inherit it
-    assert with_before("npm", ["view", "x", "time"], 24, now) == ["view", "x", "time"]  # would change the answer
+    # added even here: only npm's own parse may decide a command is a read-only view (guard_run drops it then)
+    assert with_before("npm", ["--editor", "view", "install", "x"], 24, now)[0] == flag
     assert with_before("npm", ["it", "x"], 24, now)[0] == flag and with_before("npm", ["audit", "fix"], 24, now)[0] == flag
     assert with_before("npm", ["install", "x", "--before=2020-01-01"], 24, now) == ["install", "x", "--before=2020-01-01"]
     assert with_before("npm", ["install", "x"], 0, now) == ["install", "x"]
@@ -275,7 +276,31 @@ def test_npm_itself_reads_project_context_and_side_doors(monkeypatch, tmp_path):
     assert d is not None and d["before"] == "invalid" and d["specs"][0].get("error")  # resolution fails: blocked
 
 
+def test_a_named_package_resolves_its_package_json_range_not_the_lockfile(monkeypatch, tmp_path):
+    """arborist re-resolves the saved range for packages named on the command line, whatever the lockfile says."""
+    import json
+
+    import pytest
+
+    from gatekeeper.guard.core import npm_native_parse
+
+    exe = _real_npm()
+    if exe is None:
+        pytest.skip("npm not installed")
+    monkeypatch.delenv("NPM_CONFIG_REGISTRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "package.json").write_text(json.dumps({"name": "t", "version": "1.0.0", "dependencies": {"is-odd": "^3.0.0"}}))
+    (tmp_path / "package-lock.json").write_text(json.dumps({"name": "t", "lockfileVersion": 3, "packages": {
+        "": {"name": "t"}, "node_modules/is-odd": {"version": "3.0.0", "resolved": "https://evil.example/x.tgz"}}}))
+    d = npm_native_parse(exe, "npm", ["install", "is-odd"])
+    assert d is not None
+    assert [(s["spec"], s["version"]) for s in d["specs"] if s["type"] == "registry"] == [("is-odd@^3.0.0", "3.0.1")]
+    # and the off-registry lock entry is reported on its own (it would be installed as a transitive dependency)
+    assert [s["spec"] for s in d["specs"] if s["type"] == "remote"] == ["https://evil.example/x.tgz (package-lock: node_modules/is-odd)"]
+
+
 def test_a_lockfile_pointing_away_from_the_registry_is_remote(monkeypatch, tmp_path):
+    """npm installs locked transitive dependencies from their `resolved` URL as written; a cloned repo controls it."""
     import json
 
     import pytest
@@ -290,7 +315,11 @@ def test_a_lockfile_pointing_away_from_the_registry_is_remote(monkeypatch, tmp_p
     (tmp_path / "package.json").write_text(json.dumps({"name": "t", "version": "1.0.0", "dependencies": {"is-odd": "^3.0.0"}}))
     (tmp_path / "package-lock.json").write_text(json.dumps({"name": "t", "lockfileVersion": 3, "packages": {
         "": {"name": "t"},
-        "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://evil.example/x/-/is-odd-3.0.1.tgz",
-                                "integrity": "sha512-AAAA"}}}))
-    d = npm_native_parse(exe, "npm", ["install", "is-odd"])
-    assert d is not None and [(s["spec"], s["type"]) for s in d["specs"]] == [("https://evil.example/x/-/is-odd-3.0.1.tgz", "remote")]
+        "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"},
+        "node_modules/is-number": {"version": "6.0.0", "resolved": "https://evil.example/x/-/is-number-6.0.0.tgz"},
+        "node_modules/local": {"version": "1.0.0", "resolved": "file:../local"}}}))
+    for args in (["ci"], ["install"], ["install", "lodash"]):
+        d = npm_native_parse(exe, "npm", args)
+        remote = [s["spec"] for s in d["specs"] if s["type"] == "remote"]
+        assert remote == ["https://evil.example/x/-/is-number-6.0.0.tgz (package-lock: node_modules/is-number)"], args
+    assert npm_native_parse(exe, "npm", ["run", "build"])["specs"] == []

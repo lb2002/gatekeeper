@@ -383,10 +383,8 @@ def with_before(tool: str, args: list[str], min_age_hours: float | None = None, 
         return [flag, *args]
     # Every other npm command gets it: harmless where nothing is resolved, and deciding "does this install?" in
     # Python is exactly the guesswork npm_native_parse replaced (audit fix, dedupe, link, it, ... all resolve).
-    i = command_index(args)
-    if tool != "npm" or (i is not None and _canonical(args[i]) in VIEW_COMMANDS):
-        return list(args)
-    return [flag, *args]
+    # whether a command only views something is decided afterwards from npm's own parse (guard_run)
+    return [flag, *args] if tool == "npm" else list(args)
 
 
 def _is_registry_spec(a: str) -> bool:
