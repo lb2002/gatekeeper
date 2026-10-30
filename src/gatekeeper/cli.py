@@ -499,6 +499,38 @@ def packet(
     console.print(f"review packet: {folder / 'PACKET.md'}", markup=False)
 
 
+@app.command()
+def investigate(
+    key: str = typer.Argument(..., help="name@version of a package on npm"),
+    backend: str = typer.Option("spark-open-baseten", help="spark-open-baseten, spark-open-fireworks or spark"),
+) -> None:
+    """Let a Muse model investigate one package and print what it looked at. Runs in the Modal container: the
+    archive stays in memory there, nothing is executed and nothing reaches this machine but text."""
+    import modal
+    from rich.markup import escape
+
+    name, _, version = key.rpartition("@")
+    res = modal.Function.from_name("gatekeeper", "investigate_package").remote(name, version, True, backend)
+    if res.get("error"):
+        console.print(res["error"], markup=False)
+        raise typer.Exit(1)
+    for i, step in enumerate(res["steps"], start=1):
+        target = ", ".join(step["terms"]) if step["action"] == "search" else step["path"]
+        console.print(f"[bold]{i}. {step['action']}[/bold] {escape(target)}  [dim]{escape(step['reason'])}[/dim]")
+    v = res.get("verdict")
+    if not v:
+        console.print(f"no verdict: {res['errors']}", markup=False)
+        raise typer.Exit(1)
+    color = {"malicious": "red", "suspicious": "yellow"}.get(v["verdict"], "green")
+    console.print(f"[bold {color}]{v['verdict'].upper()}[/bold {color}] {v['confidence']:.2f}  {escape(v['category'])}")
+    console.print(v["summary"], markup=False)
+    for ev in v["evidence"]:
+        console.print(f"  {ev['excerpt_id']} lines {ev['line_start']}-{ev['line_end']}: {ev['why']}", markup=False)
+    for err in res["errors"]:
+        console.print(f"[yellow]not verified:[/yellow] {escape(err)}")
+    console.print(f"[dim]{len(res['steps'])} steps, ${res['cost_usd']:.4f}[/dim]")
+
+
 @app.command("verify-flag")
 def verify_flag(
     salt: str = typer.Argument(..., help="hex salt from revealed/<month>.jsonl"),
