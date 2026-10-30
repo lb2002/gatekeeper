@@ -159,7 +159,7 @@ Time-split evaluation: train on samples discovered up to May 2026, test on sampl
 | Muse Spark Open, zero-shot (Baseten) | 0.88 (0.84-0.91) | 60% | as a blocker: 1 of 590 false blocks |
 | TF-IDF + logistic regression (real npm negatives) | 0.87 (0.83-0.90) | 62% | 2.0% |
 | Llama Guard 3 1B fine-tuned, v1 (popular packages as negatives) | 0.97 (0.95-0.98) | 87% | **37%**: unusable |
-| Llama Guard 3 1B fine-tuned, v2 (real npm negatives) | 0.86 (0.82-0.89) | 61% | 1.2% at threshold 0.3 (0.2% on the monitor's own stream) |
+| [Llama Guard 3 1B fine-tuned, v2](https://huggingface.co/lbaumberger/Llama-Guard-3-1B-Gatekeeper-npm) (real npm negatives) | 0.86 (0.82-0.89) | 61% | 1.2% at threshold 0.3 (0.2% on the monitor's own stream) |
 
 **What changed the system's recall, measured on the same test set:**
 
