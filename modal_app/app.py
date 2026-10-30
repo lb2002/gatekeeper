@@ -1413,6 +1413,7 @@ th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(-
 <div class="kpi"><b>{st['flagged_before_public_report']}</b><span>flagged before the public report (median lead {_fmt_minutes(st['median_lead_over_public_min'])})</span></div>
 </div>
 <h2>Confirmed catches</h2>
+<p><img src="lead-times.svg" alt="Flag time vs. first public report per confirmed package" style="width:100%;height:auto;border:1px solid var(--line);border-radius:8px"></p>
 <p class="sub">Only detections confirmed by OSV / OpenSSF, GitHub advisories or an npm takedown are named. Flag times are committed as salted hashes to the <a href="{st['ledger']}">public ledger</a> when they happen.</p>
 <div class="wrap"><table><tr><th>package</th><th>first published (UTC)</th><th>publish to flag</th><th>ahead of the public report</th><th>public records</th></tr>{rows}</table></div>
 {recall_html}
@@ -1496,6 +1497,15 @@ def api():
             return Response('{"error": "index not available yet"}', status_code=503, media_type="application/json")
         return Response(body, media_type="application/json",
                         headers={"Content-Encoding": "gzip", "Cache-Control": "public, max-age=3600"})
+
+    @web.get("/lead-times.svg")
+    def lead_chart():
+        """Public: flag time vs. first public report for every confirmed package."""
+        from fastapi import Response
+
+        from gatekeeper.report.chart import render
+
+        return Response(render(_public_stats()), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=300"})
 
     @web.get("/", response_class=HTMLResponse)
     def public_page() -> str:
