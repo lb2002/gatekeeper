@@ -575,6 +575,7 @@ def audit(
     offline: bool = typer.Option(False, help="Use only the local list, send nothing to OSV"),
     as_json: bool = typer.Option(False, "--json", help="Print the report as JSON"),
     since: str = typer.Option("", help="Git ref: also have the hosted investigator read up to 5 public versions added since then"),
+    strict: bool = typer.Option(False, help="With --since: exit 1 if an added public version stayed unread"),
 ) -> None:
     """Am I already affected? Checks every version in a project's lockfile. Exit code 1 if something is wrong.
 
@@ -604,9 +605,11 @@ def audit(
             report["since"] = review_added(added_since(locked, before), cloud_verdict, client, BLOCK_CONFIDENCE)
         report["findings"] += report["since"].pop("findings")
         report["severe"] = any(f["kind"] in SEVERE for f in report["findings"])
+    unread = (report.get("since") or {}).get("unread") or []
+    failed = report["severe"] or (strict and bool(unread))
     if as_json:
         print(json.dumps(report, indent=1))
-        raise typer.Exit(1 if report["severe"] else 0)
+        raise typer.Exit(1 if failed else 0)
     console.print(plain(f"{file}: {report['packages']} packages, {report['install_scripts']} with install scripts"), markup=False)
     if not index and not report["osv_online"]:
         console.print("[yellow]No list of known malware and no answer from OSV: run `gk guard update-osv` first.[/yellow]")
@@ -622,12 +625,15 @@ def audit(
         console.print(plain(f"{review['added']} versions added since {since}"), markup=False)
         for row in review["read"]:
             console.print(plain(f"  {row['name']}@{row['version']}: read by the investigator, {row['verdict']} ({row['confidence']:.2f})"), markup=False)
-        if review["unread"]:
-            shown = ", ".join(review["unread"][:8])
-            console.print(plain(f"  not read (private, over the limit of 5, or no answer): {shown}"), markup=False)
-    if not report["findings"]:
+        if review["private"]:
+            console.print(plain(f"  not sent, no public release: {', '.join(review['private'][:8])}"), markup=False)
+        if unread:
+            console.print(plain(f"  NOT READ, over the limit of 5 or no answer: {', '.join(unread[:8])}"), markup=False)
+    if unread:
+        console.print("[yellow]Incomplete: nobody has read those versions. Not a clean result.[/yellow]")
+    elif not report["findings"]:
         console.print("[green]No known malware, no foreign sources.[/green] That covers what is reported so far, not what nobody has found yet.")
-    raise typer.Exit(1 if report["severe"] else 0)
+    raise typer.Exit(1 if failed else 0)
 
 
 @app.command("verify-flag")

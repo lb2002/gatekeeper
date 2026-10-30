@@ -10,6 +10,9 @@ inputs:
   since:
     description: Git ref to compare with. On a pull request this defaults to the base commit, and up to 5 added public versions are read by the hosted investigator.
     default: ""
+  strict:
+    description: Fail if an added public version stayed unread (more than 5 added, or the hosted investigator had no answer)
+    default: "false"
 runs:
   using: composite
   steps:
@@ -19,10 +22,12 @@ runs:
         AUDIT_PATH: ${{ inputs.path }}
         GATEKEEPER: ${{ github.action_path }}
         SINCE: ${{ inputs.since || github.event.pull_request.base.sha }}
+        STRICT: ${{ inputs.strict }}
       run: |
         uvx --from "$GATEKEEPER" gk guard update-osv
         if [ -n "$SINCE" ]; then
           git fetch --quiet --depth=1 origin "$SINCE" || true
           set -- --since "$SINCE"
         fi
+        if [ "$STRICT" = "true" ]; then set -- "$@" --strict; fi
         uvx --from "$GATEKEEPER" gk audit "$AUDIT_PATH" "$@"

@@ -79,7 +79,7 @@ def test_a_code_host_is_a_note_not_a_failure():
 
 
 def test_registry_sources_and_local_files_are_fine():
-    locked = [au.Locked("a", "1.0.0", f"{REG}/a/-/a-1.0.0.tgz", True), au.Locked("b", "1.0.0", "https://registry.yarnpkg.com/b/-/b.tgz", True),
+    locked = [au.Locked("a", "1.0.0", f"{REG}/a/-/a-1.0.0.tgz", True), au.Locked("b", "1.0.0", "https://registry.yarnpkg.com/b/-/b-1.0.0.tgz", True),
               au.Locked("c", "1.0.0", "file:vendor/c", True)]
     assert au.check_index(locked, {}) == []
 
@@ -90,7 +90,7 @@ def test_a_lookalike_registry_host_is_not_trusted():
 
 
 def test_missing_integrity_is_a_note_not_severe():
-    report = au.audit([au.Locked("a", "1.0.0", f"{REG}/a.tgz", False)], {}, online=False)
+    report = au.audit([au.Locked("a", "1.0.0", f"{REG}/a/-/a-1.0.0.tgz", False)], {}, online=False)
     assert report["findings"][0]["kind"] == au.NO_INTEGRITY and not report["severe"]
 
 
@@ -285,10 +285,10 @@ def _p(name, version="1.0.0", **kw):
     return au.Locked(name, version, **kw)
 
 
-def test_added_versions_start_with_what_runs_at_install():
+def test_new_names_come_first_among_added_versions():
     before = [_p("old"), _p("kept")]
     now = [_p("kept"), _p("old", "2.0.0"), _p("brand-new"), _p("hook", install_script=True)]
-    assert [p.name for p in au.added_since(now, before)] == ["hook", "brand-new", "old"]
+    assert [p.name for p in au.added_since(now, before)] == ["brand-new", "hook", "old"]
 
 
 def _registry(*public):
@@ -296,7 +296,8 @@ def _registry(*public):
         path = httpx.URL(str(request.url)).raw_path.decode()
         name = path.rsplit("/", 1)[0].lstrip("/").replace("%2F", "/")
         if name in public:
-            return httpx.Response(200, json={"dist": {"tarball": f"https://registry.npmjs.org/{name}/-/x.tgz"}})
+            return httpx.Response(200, json={"dist": {"tarball": f"https://registry.npmjs.org/{name}/-/x.tgz", "integrity": "sha512-published"},
+                                             "scripts": {"postinstall": "x"} if "hook" in name else {}})
         return httpx.Response(404)
 
     return httpx.Client(transport=httpx.MockTransport(answer))
@@ -311,7 +312,8 @@ def test_private_packages_are_never_sent_on():
 
     added = [_p("@acme/private"), _p("foreign", resolved="https://npm.acme.example/foreign.tgz"), _p("left-pad")]
     review = au.review_added(added, ask, _registry("left-pad", "foreign"), 0.6)
-    assert asked == ["left-pad"] and review["unread"] == ["@acme/private@1.0.0", "foreign@1.0.0"] and review["findings"] == []
+    assert asked == ["left-pad"] and review["private"] == ["@acme/private@1.0.0", "foreign@1.0.0"]
+    assert review["unread"] == [] and review["findings"] == []
 
 
 def test_a_bad_verdict_fails_the_check_and_no_answer_stays_unread():
@@ -342,3 +344,40 @@ def test_the_lockfile_of_an_earlier_commit_is_read(tmp_path):
         au.locked_at(lock, "no-such-ref")
     with pytest.raises(ValueError):
         au.locked_at(lock, "--output=x")
+
+
+def test_a_changed_source_counts_as_added_though_the_version_stayed():
+    url = "https://registry.npmjs.org/a/-/a-1.0.0.tgz"
+    assert au.added_since([_p("a", resolved=url, checksum="sha512-new")], [_p("a", resolved=url, checksum="sha512-old")])
+    assert not au.added_since([_p("a", resolved=url, checksum="sha512-same")], [_p("a", resolved=url, checksum="sha512-same")])
+
+
+def test_a_hash_the_registry_never_published_fails_and_is_not_read():
+    review = au.review_added([_p("a", checksum="sha512-forged")], lambda r: pytest.fail("must not be asked"), _registry("a"), 0.6)
+    assert review["findings"][0]["kind"] == au.UNTRUSTED_SOURCE and review["unread"] == []
+
+
+def test_what_runs_at_install_is_read_first_by_what_the_registry_says():
+    names = [f"p{i}" for i in range(6)] + ["z-hook"]
+    asked = []
+
+    def ask(release):
+        asked.append(release["name"])
+        return {"verdict": "benign", "confidence": 1, "summary": ""}
+
+    au.review_added([_p(n) for n in names], ask, _registry(*names), 0.6)
+    assert "z-hook" in asked and len(asked) == 5
+
+
+@pytest.mark.parametrize("name,version,url", [("lodash", "4.17.21", "https://registry.npmjs.org/evil/-/evil-1.0.0.tgz"),
+                                              ("lodash", "4.17.21", "https://registry.npmjs.org/lodash/-/lodash-4.17.20.tgz"),
+                                              ("@a/b", "1.0.0", "https://registry.npmjs.org/@c/b/-/b-1.0.0.tgz")])
+def test_an_entry_that_points_to_another_file_of_the_registry_is_caught(name, version, url):
+    assert au.check_index([_p(name, version, resolved=url)], {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+@pytest.mark.parametrize("name,version,url", [("lodash", "4.17.21", "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"),
+                                              ("@a/b", "1.0.0", "https://registry.yarnpkg.com/@a/b/-/b-1.0.0.tgz#abc"),
+                                              ("@a/b", "1.0.0", "https://registry.npmjs.org/@a%2fb/-/b-1.0.0.tgz")])
+def test_the_matching_file_is_fine(name, version, url):
+    assert au.check_index([_p(name, version, resolved=url)], {}) == []

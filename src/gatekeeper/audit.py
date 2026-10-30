@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import yaml
@@ -36,6 +36,7 @@ MALICIOUS, UNTRUSTED_SOURCE, CODE_HOST_SOURCE, NO_INTEGRITY = "malicious", "untr
 MODEL_FLAGGED = "model_flagged"
 SEVERE = {MALICIOUS, UNTRUSTED_SOURCE, MODEL_FLAGGED}
 MAX_REVIEWED = 5
+MAX_LOOKUPS = 60
 REVIEW_WORKERS = 3
 
 
@@ -46,6 +47,7 @@ class Locked:
     resolved: str = ""
     integrity: bool = True
     install_script: bool = False
+    checksum: str = ""
 
 
 @dataclass
@@ -68,14 +70,14 @@ def parse_npm(text: str) -> list[Locked]:
         if not path or not isinstance(e, dict) or not e.get("version") or e.get("link"):
             continue
         out.append(Locked(e.get("name") or _npm_name(path), e["version"], e.get("resolved") or "", bool(e.get("integrity")),
-                          bool(e.get("hasInstallScript"))))
+                          bool(e.get("hasInstallScript")), str(e.get("integrity") or "")))
     if out:
         return out
 
     def walk(deps: dict) -> None:
         for name, e in (deps or {}).items():
             if isinstance(e, dict) and e.get("version"):
-                out.append(Locked(name, e["version"], e.get("resolved") or "", bool(e.get("integrity"))))
+                out.append(Locked(name, e["version"], e.get("resolved") or "", bool(e.get("integrity")), checksum=str(e.get("integrity") or "")))
                 walk(e.get("dependencies") or {})
 
     walk(doc.get("dependencies") or {})
@@ -108,6 +110,14 @@ def is_local(source: str) -> bool:
 def on_registry(source: str) -> bool:
     """A real URL on the registry; a value without a scheme is never taken for one."""
     return bool(re.match(r"https?://", source, re.I)) and host_of(source) in TRUSTED_HOSTS
+
+
+def names_another_file(p: Locked) -> bool:
+    """A registry URL for another package or version than the entry claims. The host is right, so the host check passes
+    it, and a reviewer sees an entry for a familiar name: this is how a lockfile gets poisoned."""
+    if not on_registry(p.resolved) or p.version == "?":
+        return False
+    return unquote(urlsplit(p.resolved).path) != f"/{p.name}/-/{p.name.rsplit('/', 1)[-1]}-{p.version}.tgz"
 
 
 def host_of(source: str) -> str:
@@ -160,7 +170,7 @@ def parse_yarn(text: str) -> list[Locked]:
         named = re.match(r'((?:@[^/@\s]+/)?[^/@\s]+)@npm:', fields.get("resolution", ""))
         names = [named.group(1)] if named else list(dict.fromkeys(n for n, _ in keys))
         integrity = "integrity" in fields or "checksum" in fields
-        out += [Locked(n, version, source, integrity) for n in names]
+        out += [Locked(n, version, source, integrity, checksum=fields.get("integrity", "")) for n in names]
     return out
 
 
@@ -180,7 +190,7 @@ def parse_pnpm(text: str) -> list[Locked]:
             source = _source_of(key, *(str(v) for k, v in resolution.items() if k != "integrity"))
             if not source and not _SEMVER_START.match(version):  # `pkg@github.com/x/y/abc`: the key names the source
                 source = version
-            out.append(Locked(name, version, source, bool(resolution.get("integrity"))))
+            out.append(Locked(name, version, source, bool(resolution.get("integrity")), checksum=str(resolution.get("integrity") or "")))
     return out
 
 
@@ -210,11 +220,14 @@ def locked_at(file: Path, ref: str) -> list[Locked]:
 
 def added_since(locked: list[Locked], before: list[Locked]) -> list[Locked]:
     """Versions that were not there before. A new version of an old dependency counts: that is what a hijack looks
-    like. First what runs at install, then names the project never had."""
-    had = {(p.name, p.version) for p in before}
+    like. So does a known version whose source or hash changed. Names the project never had come first."""
+    def identity(p: Locked) -> tuple:
+        return p.name, p.version, p.resolved, p.checksum
+
+    had = {identity(p) for p in before}
     names = {p.name for p in before}
-    new = {(p.name, p.version): p for p in locked if (p.name, p.version) not in had}
-    return sorted(new.values(), key=lambda p: (not p.install_script, p.name in names, p.name))
+    new = {(p.name, p.version): p for p in locked if identity(p) not in had}
+    return sorted(new.values(), key=lambda p: (p.name in names, p.name))
 
 
 def public_release(client: httpx.Client, p: Locked) -> dict | None:
@@ -223,23 +236,38 @@ def public_release(client: httpx.Client, p: Locked) -> dict | None:
         return None
     try:
         resp = client.get(f"{packument_url(p.name)}/{p.version}")
-        tarball = (resp.json().get("dist") or {}).get("tarball") if resp.status_code == 200 else None
+        doc = resp.json() if resp.status_code == 200 else {}
+        tarball = (doc.get("dist") or {}).get("tarball")
     except (httpx.HTTPError, ValueError, AttributeError):
         return None
-    return {"name": p.name, "version": p.version, "tarball": tarball} if tarball else None
+    if not tarball:
+        return None
+    dist, scripts = doc.get("dist") or {}, doc.get("scripts") or {}
+    return {"name": p.name, "version": p.version, "tarball": tarball, "integrity": str(dist.get("integrity") or ""),
+            "runs_at_install": bool(doc.get("gypfile")) or any(hook in scripts for hook in ("preinstall", "install", "postinstall"))}
+
+
+def _hash_differs(p: Locked, published: str) -> bool:
+    mine = next((h for h in p.checksum.split() if h.startswith("sha512-")), "")
+    return bool(mine) and published.startswith("sha512-") and mine != published
 
 
 def review_added(added: list[Locked], ask: Callable[[dict], dict | None], client: httpx.Client, block_at: float) -> dict:
-    """Have up to MAX_REVIEWED of the `added` versions read. `ask` returns a verdict, or None if it has no answer."""
-    releases = []
-    for p in added:
-        if len(releases) == MAX_REVIEWED:
-            break
-        if release := public_release(client, p):
-            releases.append(release)
+    """Have up to MAX_REVIEWED of the `added` versions read, what runs at install first. That comes from the registry:
+    the lockfile is the thing under review. `ask` returns a verdict, or None if it has no answer."""
+    public, private, findings = [], [], []
+    for p in added[:MAX_LOOKUPS]:
+        release = public_release(client, p)
+        if release is None:
+            private.append(f"{p.name}@{p.version}")
+        elif _hash_differs(p, release["integrity"]):
+            findings.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, "the hash in the lockfile is not the hash of the file the registry published"))
+        else:
+            public.append(release)
+    releases = sorted(public, key=lambda r: not r["runs_at_install"])
     with ThreadPoolExecutor(REVIEW_WORKERS) as pool:
-        answers = list(pool.map(ask, releases))
-    read, findings = [], []
+        answers = list(pool.map(ask, releases[:MAX_REVIEWED]))
+    read = []
     for release, v in zip(releases, answers):
         if not v:
             continue
@@ -247,9 +275,9 @@ def review_added(added: list[Locked], ask: Callable[[dict], dict | None], client
         read.append(row)
         if v["verdict"] == "malicious" or (v["verdict"] == "suspicious" and v["confidence"] >= block_at):
             findings.append(Finding(MODEL_FLAGGED, row["name"], row["version"], f"Muse Spark Open read it: {v['verdict']} ({v['confidence']:.2f}), {row['summary'][:300]}"))
-    done = {(r["name"], r["version"]) for r in read}
-    return {"added": len(added), "read": read, "unread": [f"{p.name}@{p.version}" for p in added if (p.name, p.version) not in done],
-            "findings": [asdict(f) for f in findings]}
+    done = {f"{r['name']}@{r['version']}" for r in read} | {f"{f.name}@{f.version}" for f in findings} | set(private)
+    return {"added": len(added), "read": read, "private": private, "findings": [asdict(f) for f in findings],
+            "unread": [f"{p.name}@{p.version}" for p in added if f"{p.name}@{p.version}" not in done]}
 
 
 def parse_text(text: str) -> list[Locked]:
@@ -275,6 +303,8 @@ def check_index(locked: list[Locked], index: dict) -> list[Finding]:
                 out.append(Finding(CODE_HOST_SOURCE, p.name, p.version, f"resolved from {host[:80]}, not the npm registry"))
             elif not on_registry(p.resolved):
                 out.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, f"resolved from {p.resolved[:80]}, not the npm registry"))
+            elif names_another_file(p):
+                out.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, f"the entry points to another file: {p.resolved[:80]}"))
             if not p.integrity:
                 out.append(Finding(NO_INTEGRITY, p.name, p.version, "no integrity hash in the lockfile"))
     return out

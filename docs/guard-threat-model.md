@@ -50,7 +50,7 @@ Verdicts are cached per tarball integrity. `--gk-allow` skips every check for on
 
 ## What `gk audit --since` sends
 
-The names and versions of up to 5 added packages go to the hosted investigator, and only if the public registry has exactly that version; each lookup asks the public registry about that name. Nothing else about the project is sent. A private package has no public release, or comes from another host, and stays out. `--offline` and `GK_NO_CLOUD=1` turn this off.
+The names and versions of up to 5 added packages go to the hosted investigator, and only if the public registry has exactly that version; each lookup asks the public registry about that name. Nothing else about the project is sent. A private package has no public release, or comes from another host, and stays out. Plain `gk audit` already sends every name and version to OSV, so the registry lookup tells the public side nothing new about the project; `--offline` turns off both, and `GK_NO_CLOUD=1` turns off the investigator. The hosted demo's limits apply, so a large update stays partly unread; the result then says incomplete and `--strict` fails it.
 
 ## Code behind a URL dependency
 
