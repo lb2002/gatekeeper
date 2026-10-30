@@ -1577,7 +1577,8 @@ def live_recall() -> dict:
     read_later = {k for k, it in queue.items() if it.get("found_by")}
     outcomes = [o for v in vulns for o in recall.classify(v, seen, detections, start, queued=flags, npm_times=npm_times,
                                                           read_later=read_later)]
-    result = {"at": datetime.now(timezone.utc).isoformat(), "since": start.isoformat(), **recall.summarize(outcomes),
+    current = {"since": CURRENT_PIPELINE.isoformat(), **recall.summarize(recall.published_since(outcomes, CURRENT_PIPELINE))}
+    result = {"at": datetime.now(timezone.utc).isoformat(), "since": start.isoformat(), **recall.summarize(outcomes), "current": current,
               "outcomes": [o.as_dict() for o in sorted(outcomes, key=lambda o: o.first_public or "")]}
     state["recall"] = result
     out = DATA / "recall" / f"{datetime.now(timezone.utc):%Y-%m-%d}.json"
@@ -1587,6 +1588,7 @@ def live_recall() -> dict:
     return result
 
 
+CURRENT_PIPELINE = datetime(2026, 10, 30, 11, 5, tzinfo=timezone.utc)  # wider gates and the investigator live
 SWEEP_WINDOW = timedelta(days=45)  # how far back a suspect account's versions are read
 SWEEP_ACCOUNTS_PER_RUN = 15
 SWEEP_BUDGET_S = 420
@@ -1910,12 +1912,16 @@ def _public_html(st: dict) -> str:
         f"<td>{escape(o.get('detail') or '')}</td><td>{escape(o['id'])}</td></tr>"
         for o in st.get("recall_misses", [])
     )
+    now_rc = rc.get("current") or {}
+    current_html = "" if not now_rc.get("in_scope") else (
+        f" Since the current pipeline went live ({escape(now_rc['since'][:16].replace('T', ' '))} UTC): {now_rc['flagged']} of "
+        f"{now_rc['in_scope']}. Reports arrive with a delay, so this number is small and still moving.")
     recall_html = "" if not rc.get("in_scope") else (
         f"<h2>What it missed</h2><p class=sub>Every hour, each new OSV report of npm malware is checked against the monitor's "
         f"own logs. Of the {rc['in_scope']} malicious packages published while it was running (since "
         f"{escape(rc.get('since', '')[:16].replace('T', ' '))} UTC), it flagged <b>{rc['flagged']}</b> "
         f"({round(100 * (rc.get('recall') or 0))}%), {rc.get('flagged_before_osv', 0)} of them before the report. Reports about "
-        f"malware published before the monitor started ({rc.get('before_monitor', 0)}) are left out.</p>"
+        f"malware published before the monitor started ({rc.get('before_monitor', 0)}) are left out.{current_html}</p>"
         f"<div class=wrap><table><tr><th>missed package</th><th>published (UTC)</th><th>what the monitor saw</th><th>report</th></tr>"
         f"{misses}</table></div>")
     days = "".join(

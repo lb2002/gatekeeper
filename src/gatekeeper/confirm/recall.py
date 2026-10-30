@@ -162,6 +162,11 @@ def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], sta
     return out
 
 
+def published_since(outcomes: list[Outcome], when: datetime) -> list[Outcome]:
+    """The malware that came out at or after `when`: the only part a change to the pipeline can be judged on."""
+    return [o for o in outcomes if (ts := parse_ts(o.published_at)) is not None and ts >= when]
+
+
 def summarize(outcomes: list[Outcome]) -> dict:
     by = {s: [o for o in outcomes if o.status == s] for s in ("flagged", "missed", "not_seen", "before_monitor")}
     in_scope = len(by["flagged"]) + len(by["missed"]) + len(by["not_seen"])

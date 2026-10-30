@@ -11,6 +11,14 @@ def _vuln(vid, name, versions=(), published="2026-10-28T10:00:00Z", imported="20
             "database_specific": {"malicious-packages-origins": [{"import_time": imported}]}}
 
 
+def test_a_change_is_judged_only_on_what_came_out_after_it():
+    def outcome(published):
+        return recall.Outcome("MAL-1", "a", "missed", [], "2026-10-31T00:00:00Z", published_at=published)
+
+    old, new, undated = outcome("2026-10-29T10:00:00Z"), outcome("2026-10-30T12:00:00Z"), outcome(None)
+    assert recall.published_since([old, new, undated], datetime(2026, 10, 30, 11, tzinfo=timezone.utc)) == [new]
+
+
 def test_recent_ids_stop_at_the_first_older_line():
     csv = "2026-10-29T10:00:00Z,MAL-3\n2026-10-28T10:00:00Z,GHSA-x\n2026-10-27T10:00:00Z,MAL-2\n2026-10-20T00:00:00Z,MAL-1\n2026-10-28T00:00:00Z,MAL-0\n"
     assert recall.recent_mal_ids(csv, START) == ["MAL-3", "MAL-2"]
