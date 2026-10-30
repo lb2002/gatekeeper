@@ -38,19 +38,19 @@ Every verdict must cite excerpt lines that exist in the bundle; verdicts that ci
 ### Install guard decisions
 
 ```
-npm install X  ->  X from git or a URL: blocked (no registry metadata or integrity hash to check)
-  ->  npm view (read-only)
+npm install X  ->  ask the installed npm what it would install or run (its own option parsing, aliases,
+                   .npmrc, registries, tags), resolving X with the 24 h waiting period applied
+  X comes from git or a URL                                   -> blocked (nothing to check before it runs)
   X is listed as malicious by OSV (asked live; offline: a local copy of OSV's 222k malicious npm names),
     or a dependency of X is on that list                      -> blocked
-  -> download tarball, verify sha512 -> read in memory
-  rules clean AND local classifier clean   -> clean
-  otherwise                                -> Muse Glimmer on your machine judges, citing lines
+  download the tarball, verify sha512, read it in memory
+  rules clean AND local classifier clean                      -> clean
+  otherwise Muse Glimmer on your machine judges, citing lines
   malicious, or suspicious with confidence >= 0.6, or any error -> blocked, nothing installed
-  X is resolved the way npm will resolve it, with the waiting period applied: a tag or range gets the
-    newest version older than 24 h, and that is the version checked; an exact version younger than 24 h
-    -> held, with the newest older version suggested
-  then the real npm runs with --before=<24 h ago>: the whole dependency tree resolves to versions
-    older than the waiting period (a hijacked patch release of a dependency is not installed on day one)
+  X requested as an exact version younger than 24 h           -> held, newest older version suggested
+    (a tag or range simply resolves to the newest version older than 24 h, and that one is checked)
+  run the real npm with --before=<24 h ago>: the whole dependency tree resolves to versions older than
+    the waiting period (a hijacked patch release of a dependency is not installed on day one)
 ```
 
 The waiting period is there because the rest of the ecosystem catches up quickly. Of 742 npm malware reports in OSV for October 2026, measured from the npm publish time of the malicious version to the report's import into OSV, 33% were public within an hour, 58% within a day, 74% within three days (median 10 h). A model catches what is new; the waiting period plus the live OSV lookup catch much of what the model misses. As a rough estimate (assuming the two are independent), the model's ~57% plus a 24 h wait block about 4 in 5 malicious versions, and a 72 h wait (`GK_MIN_AGE_HOURS=72`) about 9 in 10. `GK_MIN_AGE_HOURS=0` turns the wait off, `--gk-allow` overrides one install, and `GK_OFFLINE=1` never contacts OSV (the live lookup sends only the package name and version).
