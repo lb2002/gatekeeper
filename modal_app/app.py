@@ -358,7 +358,8 @@ def _daily_report(now: datetime) -> None:
     if rc.get("in_scope"):
         lines.append(f"live recall: {rc['flagged']}/{rc['in_scope']} ({round(100 * rc['recall'])}%)")
     for label, key, cap in (("Muse Spark", "spark_spend", SPARK_TOTAL_CAP_USD), ("Spark Open/Fireworks", "fireworks_spend", FIREWORKS_TOTAL_CAP_USD),
-                            ("Spark Open/Baseten", "baseten_spend", BASETEN_TOTAL_CAP_USD)):
+                            ("Spark Open/Baseten", "baseten_spend", BASETEN_TOTAL_CAP_USD), ("Investigator", "investigator_spend", INVESTIGATOR_TOTAL_CAP_USD),
+                            ("Public demo", "demo_spend", DEMO_TOTAL_CAP_USD)):
         s = state.get(key) or {}
         lines.append(f"{label}: ${(s.get('days') or {}).get(yday, 0):.2f} yesterday, ${s.get('total', 0):.2f} of ${cap:.0f} cap")
     _notify(f"Gatekeeper daily: {yday}", "\n".join(lines), tags="bar_chart", priority="default")
@@ -1829,7 +1830,7 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 28px;font-size:14px}} th
 th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(--accent)}} code{{font-size:13px}}
 </style></head><body>
 <h1>Gatekeeper: live npm malware monitor</h1>
-<p><a href="/try"><b>Try it: watch a Muse agent read any npm package</b></a></p>
+<p><a href="/try"><b>Try it: watch a Muse agent read any npm package</b></a> · <a href="https://github.com/ossf/malicious-packages/pulls?q=is%3Apr+author%3Alb2002">Our reports to OpenSSF</a></p>
 <p class="sub">Every new npm release, checked statically by rules, a fast classifier and Meta models (Muse Spark, Muse Glimmer). Running since {escape(st['since'] or '-')}; last run {escape((st['updated_at'] or '-')[:16])} UTC.</p>
 <div class="kpis">
 <div class="kpi"><b>{t['versions']:,}</b><span>versions checked</span></div>

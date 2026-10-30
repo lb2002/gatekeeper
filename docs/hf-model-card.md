@@ -24,14 +24,15 @@ Meta's models, made for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 
 
 In Gatekeeper's live monitor it runs every 30 minutes over every npm version the rules and a small TF-IDF classifier
 let through, as a cheap safety net in front of the Muse models (Muse Spark Open judges every flag; Muse Glimmer
-runs locally). Its flags are never reported on their own: a detection needs a Muse verdict or a human.
+runs locally). Its flags are never reported on their own: a detection needs a Muse verdict or a human, so it can run
+wide, at a threshold that passes about 5% of live npm.
 
 ```python
 from gatekeeper.models.llamaguard import LlamaGuardScorer, prepare
 
 scorer = LlamaGuardScorer("path/to/this/adapter", device="cuda")   # or "cpu"
 risk = scorer.risk([prepare(bundle_text, name, version, rules)])[0]
-flag = risk >= 0.3   # the monitor's threshold; threshold.json holds the validation threshold (0.103)
+flag = risk >= 0.02   # the monitor's routing threshold; threshold.json holds the validation threshold (0.103)
 ```
 
 `bundle_text` comes from `gatekeeper.evidence.bundle.build_bundle(...)`; see the Gatekeeper repository.
@@ -53,6 +54,7 @@ flag = risk >= 0.3   # the monitor's threshold; threshold.json holds the validat
 | PR-AUC (95% CI) | 0.86 (0.82-0.89) |
 | Recall at 1% false-positive rate | 61% |
 | False positives on unseen live npm releases | 1.2% at threshold 0.3 (0.2% on the monitor's own stream) |
+| Recall at about 5% live false positives | 70% (threshold 0.02) |
 
 An earlier version (v1) trained with popular packages as the benign class scored 0.97 PR-AUC offline but flagged 37%
 of real npm releases: it had learned "unpolished = malicious". This v2 uses real npm releases as negatives. On its own
