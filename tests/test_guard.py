@@ -176,3 +176,32 @@ def test_npx_packages_given_with_p_are_the_ones_checked():
     assert package_specs("npx", ["--package=evil", "-c", "some-bin --x"]) == ["evil"]
     assert package_specs("npx", ["--yes", "cowsay", "hi"]) == ["cowsay"]
     assert package_specs("npm", ["exec", "-p", "evil", "--", "bin"]) == ["evil"]
+
+
+def test_installs_from_git_or_urls_are_recognised_and_not_sent_to_the_registry_check():
+    from gatekeeper.guard.core import package_specs, registry_args, remote_specs
+
+    args = ["install", "github:user/evil", "user/evil#main", "https://x.test/evil.tgz", "x@git+ssh://git@host/r.git",
+            "lodash", "@scope/pkg", "alias@npm:lodash@4", "./local-dir", "file:../pkg"]
+    assert remote_specs("npm", args) == ["github:user/evil", "user/evil#main", "https://x.test/evil.tgz",
+                                         "x@git+ssh://git@host/r.git"]
+    assert package_specs("npm", args) == ["lodash", "@scope/pkg", "alias@npm:lodash@4"]
+    assert remote_specs("npx", ["github:user/tool"]) == ["github:user/tool"]
+    assert registry_args(["install", "--registry", "http://r.test", "x"]) == ["--registry", "http://r.test"]
+    assert registry_args(["--registry=http://r.test", "i", "x"]) == ["--registry", "http://r.test"]
+    assert registry_args(["install", "x"]) == []
+
+
+def test_parser_differentials_fail_closed():
+    from gatekeeper.guard.core import package_specs, with_before
+
+    assert package_specs("npm", ["-p", "install", "evil"]) == ["evil"]  # top-level -p is --parseable (no value)
+    assert package_specs("npm", ["install", "--", "evil"]) == ["evil"]
+    assert package_specs("npm", ["install", "ok", "--", "evil"]) == ["ok", "evil"]
+    assert package_specs("npm", ["exe", "evil"]) == ["evil"]  # a command prefix npm may accept
+    assert package_specs("npx", ["--pack", "evil", "bin"]) == ["evil"]
+    assert package_specs("npx", ["-p=evil", "bin"]) == ["evil"]
+    assert package_specs("npx", ["--packa=evil", "--package", "evil2", "bin"]) == ["evil", "evil2"]
+    assert package_specs("npx", ["--", "evil", "--flag"]) == ["evil"]
+    assert package_specs("npm", ["exec", "--", "evil", "arg"]) == ["evil"]
+    assert with_before("npm", ["-p", "i", "x"], 24, 1_793_318_400.0) == ["-p", "i", "--before=2026-10-29T00:00:00Z", "x"]

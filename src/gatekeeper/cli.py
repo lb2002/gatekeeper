@@ -312,13 +312,23 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, index_age_days, load_fast_model, package_specs, with_before
+    from gatekeeper.guard.core import (ALLOW_FLAG, check_spec, index_age_days, load_fast_model, package_specs,
+                                       registry_args, remote_specs, with_before)
 
     # the shims call `gk guard run npm -- <args>`: drop that one separator, keep the user's own `--`
     args = list(ctx.args[1:] if ctx.args[:1] == ["--"] else ctx.args)
     cfg = shim.config()
     real = shim.npm_command(cfg, tool)
     allow = ALLOW_FLAG in args
+    remote = remote_specs(tool, args)
+    if remote and not allow:
+        console.print(Panel("\n".join([f"{', '.join(remote)} would be fetched from git or a URL: no registry metadata and no",
+                                        "integrity hash, so Gatekeeper cannot check it before its install scripts run.",
+                                        "", f"Nothing was installed. Install it anyway (only if you trust the source): add {ALLOW_FLAG}"]),
+                            title="BLOCKED by Gatekeeper: unchecked source", border_style="red"), markup=False)
+        typer.echo("Gatekeeper blocked an install from git or a URL it cannot check. Do not retry with other flags; ask the user.",
+                   err=True)
+        raise typer.Exit(1)
     specs = package_specs(tool, args)
     if specs and not allow:
         fast_model = load_fast_model()
@@ -329,7 +339,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
         for spec in specs:
             console.print(f"[cyan]gatekeeper[/] checking {escape(spec)} ...", highlight=False)
             try:
-                d = check_spec(shim.npm_command(cfg, "npm"), spec, fast_model=fast_model)
+                d = check_spec(shim.npm_command(cfg, "npm") + registry_args(args), spec, fast_model=fast_model)
             except Exception as exc:
                 # Fail closed: a package must not get through just because checking it failed
                 # (an attacker could craft an archive that makes the check error out).

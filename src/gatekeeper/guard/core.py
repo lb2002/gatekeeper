@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -187,10 +188,12 @@ def older_version(meta: dict, min_age_h: float, now: float | None = None) -> str
 
 
 RESOLVE_COMMANDS = INSTALL_COMMANDS | {"update", "up", "upgrade", "udpate"}
-# npm options that take the next argument as their value (`--registry URL`); `--flag=value` needs no entry
+# npm options that take the next argument as their value (`--registry URL`); `--flag=value` needs no entry. Only
+# options that take a value everywhere: at the top level `-p` is the boolean --parseable, so `npm -p install x`
+# must still be read as an install. The exec-only ones (-p/--package, -c/--call) are handled in _exec_specs.
 VALUE_FLAGS = {"--registry", "--prefix", "-C", "--workspace", "-w", "--tag", "--loglevel", "--userconfig", "--globalconfig",
-               "--cache", "--otp", "--package", "-p", "--call", "-c", "--before", "--omit", "--include", "--install-strategy",
-               "--script-shell", "--node-options"}
+               "--cache", "--otp", "--before", "--omit", "--include", "--install-strategy", "--script-shell", "--node-options"}
+EXEC_VALUE_FLAGS = VALUE_FLAGS | {"-p", "--package", "-c", "--call"}
 NPM_COMMANDS = RESOLVE_COMMANDS | EXEC_COMMANDS | {
     "ci", "clean-install", "install-clean", "ic", "run", "run-script", "rum", "urn", "test", "t", "tst", "start", "stop", "restart",
     "publish", "uninstall", "un", "unlink", "remove", "rm", "r", "view", "v", "info", "show", "ls", "list", "ll", "la",
@@ -202,15 +205,29 @@ NPM_COMMANDS = RESOLVE_COMMANDS | EXEC_COMMANDS | {
     "install-ci-test", "cit", "help-search", "undeprecate"}
 
 
-def _positionals(args: list[str]) -> list[int]:
-    """Indexes of the arguments that are not options or option values (scanning stops at `--`)."""
+def _canonical(token: str) -> str | None:
+    """The npm command a token names. npm also accepts unique prefixes; failing closed, any prefix (2+ letters) of
+    a command that installs or runs packages counts as that command, so at worst a few extra packages are checked."""
+    if token in NPM_COMMANDS:
+        return token
+    if len(token) >= 2:
+        for full in ("install", "exec", "update", "upgrade", "add"):
+            if full.startswith(token):
+                return full
+    return None
+
+
+def _positionals(args: list[str], value_flags: set[str] = VALUE_FLAGS) -> list[int]:
+    """Indexes of the arguments that are not options or option values. After `--` everything is positional:
+    `npm install -- evil` installs evil."""
     out, i = [], 0
     while i < len(args):
         a = args[i]
         if a == "--":
+            out.extend(range(i + 1, len(args)))
             break
         if a.startswith("-"):
-            i += 2 if a in VALUE_FLAGS else 1
+            i += 2 if a in value_flags else 1
             continue
         out.append(i)
         i += 1
@@ -218,44 +235,92 @@ def _positionals(args: list[str]) -> list[int]:
 
 
 def command_index(args: list[str]) -> int | None:
-    """Where the npm command is, after any leading options (`npm --loglevel warn install x`). The first positional
-    that is a known npm command: a value of an option this parser does not know is skipped instead of
-    being mistaken for the command, which would let the install through unchecked."""
-    return next((i for i in _positionals(args) if args[i] in NPM_COMMANDS), None)
+    """Where the npm command is, after any leading options (`npm --loglevel warn install x`): the first positional
+    that names a command. A value of an option this parser does not know is skipped rather than mistaken for the
+    command, which would let the install through unchecked."""
+    return next((i for i in _positionals(args) if _canonical(args[i])), None)
+
+
+def _is_package_option(a: str) -> bool:
+    """-p, --package and the abbreviations nopt accepts (--pack, --packa, ...), with or without `=value`."""
+    name = a.split("=", 1)[0]
+    return name == "-p" or (len(name) >= 6 and "--package".startswith(name))
 
 
 def _exec_specs(args: list[str]) -> list[str]:
-    """npx / npm exec: packages given with -p/--package, otherwise the first positional (the package to run)."""
+    """npx / npm exec: every package given with -p/--package (any spelling), otherwise the first positional (the
+    package to run). Arguments after that positional belong to the package and are not specs."""
     pkgs, i = [], 0
     while i < len(args):
         a = args[i]
         if a == "--":
             break
-        if a in ("-p", "--package") and i + 1 < len(args):
-            pkgs.append(args[i + 1])
-        elif a.startswith("--package="):
-            pkgs.append(a.split("=", 1)[1])
+        if _is_package_option(a):
+            if "=" in a:
+                pkgs.append(a.split("=", 1)[1])
+            elif i + 1 < len(args):
+                pkgs.append(args[i + 1])
+                i += 1
         i += 1
     if not pkgs:
-        pos = _positionals(args)
+        pos = _positionals(args, EXEC_VALUE_FLAGS)
         pkgs = [args[pos[0]]] if pos else []
-    return [p for p in pkgs if _is_registry_spec(p)]
+    return pkgs
 
 
-def package_specs(tool: str, args: list[str]) -> list[str]:
-    """Registry package specs that this npm/npx invocation would install or run."""
+def _all_specs(tool: str, args: list[str]) -> list[str]:
+    """Every package spec this npm/npx invocation would install or run, wherever it comes from."""
     args = [a for a in args if a != ALLOW_FLAG]
     if tool == "npx":
         return _exec_specs(args)
     i = command_index(args)
     if i is None:
         return []
-    cmd, rest = args[i], args[i + 1:]
+    cmd, rest = _canonical(args[i]), args[i + 1:]
     if cmd in EXEC_COMMANDS:
         return _exec_specs(rest)
     if cmd not in INSTALL_COMMANDS:
         return []
-    return [rest[j] for j in _positionals(rest) if _is_registry_spec(rest[j])]
+    return [rest[j] for j in _positionals(rest)]
+
+
+def package_specs(tool: str, args: list[str]) -> list[str]:
+    """Registry package specs that this npm/npx invocation would install or run."""
+    return [s for s in _all_specs(tool, args) if _is_registry_spec(s)]
+
+
+_GITHUB_SHORTHAND = re.compile(r"[A-Za-z0-9][\w.-]*/[\w.-]+(#.*)?")
+
+
+def _is_remote_spec(a: str) -> bool:
+    """Code from git or a URL: no registry metadata, no integrity hash, so nothing for the guard to check."""
+    if "@npm:" in a:  # an alias of a registry package
+        return False
+    # what follows the name: `name@<target>` / `@scope/name@<target>`; a bare `user/repo` is GitHub shorthand
+    if a.startswith("@"):
+        rest = a[1:].split("@", 1)
+        target = rest[1] if len(rest) > 1 else ""
+    else:
+        target = a.split("@", 1)[1] if "@" in a and not a.startswith(("http:", "https:", "git")) else a
+    return bool(
+        re.match(r"(git\+[a-z]+|git|github|gitlab|bitbucket|gist|https?):", target)
+        or _GITHUB_SHORTHAND.fullmatch(target)
+    )
+
+
+def remote_specs(tool: str, args: list[str]) -> list[str]:
+    """Specs that npm would fetch from git or a URL (`github:u/r`, `u/r`, `https://…/x.tgz`, `name@git+ssh://…`)."""
+    return [s for s in _all_specs(tool, args) if _is_remote_spec(s)]
+
+
+def registry_args(args: list[str]) -> list[str]:
+    """A `--registry` given on the command line, so the guard checks the package where npm will fetch it."""
+    for i, a in enumerate(args):
+        if a == "--registry" and i + 1 < len(args):
+            return ["--registry", args[i + 1]]
+        if a.startswith("--registry="):
+            return ["--registry", a.split("=", 1)[1]]
+    return []
 
 
 def with_before(tool: str, args: list[str], min_age_hours: float | None = None, now: float | None = None) -> list[str]:
@@ -272,7 +337,7 @@ def with_before(tool: str, args: list[str], min_age_hours: float | None = None, 
     if tool == "npx":
         return [flag, *args]
     i = command_index(args)
-    if tool != "npm" or i is None or args[i] not in RESOLVE_COMMANDS | EXEC_COMMANDS:
+    if tool != "npm" or i is None or _canonical(args[i]) not in RESOLVE_COMMANDS | EXEC_COMMANDS:
         return list(args)
     return [*args[: i + 1], flag, *args[i + 1:]]
 
@@ -283,6 +348,7 @@ def _is_registry_spec(a: str) -> bool:
         a.startswith((".", "/", "\\", "file:", "git+", "git:", "github:", "http:", "https:"))
         or a.endswith((".tgz", ".tar.gz"))
         or (len(a) > 1 and a[1] == ":")  # Windows drive path
+        or _is_remote_spec(a)
     )
 
 

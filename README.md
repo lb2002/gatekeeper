@@ -36,7 +36,8 @@ Every verdict must cite excerpt lines that exist in the bundle; verdicts that ci
 ### Install guard decisions
 
 ```
-npm install X  ->  npm view (read-only)
+npm install X  ->  X from git or a URL: blocked (no registry metadata or integrity hash to check)
+  ->  npm view (read-only)
   X is listed as malicious by OSV (asked live; offline: a local copy of OSV's 222k malicious npm names),
     or a dependency of X is on that list                      -> blocked
   -> download tarball, verify sha512 -> read in memory
