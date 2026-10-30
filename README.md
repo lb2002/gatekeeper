@@ -41,8 +41,9 @@ Every verdict must cite excerpt lines that exist in the bundle; verdicts that ci
 npm install X  ->  ask the installed npm what it would install or run (its own option parsing, aliases,
                    .npmrc, registries, tags), resolving X with the 24 h waiting period applied
   X comes from git or a URL                                   -> blocked (nothing to check before it runs)
-  the project's package-lock.json pins a package outside the registry, or the project's .npmrc
-    points to another registry (a cloned repo controls both; GK_TRUST_PROJECT_REGISTRY=1 trusts it) -> blocked
+  the project's package-lock.json pins a package outside the registry, or the project's .npmrc sets
+    another registry, a proxy or TLS settings (a cloned repo controls both files;
+    GK_TRUST_PROJECT_REGISTRY=1 trusts the project's .npmrc)  -> blocked
   X is listed as malicious by OSV (asked live; offline: a local copy of OSV's 222k malicious npm names),
     or a dependency of X is on that list                      -> blocked
   download the tarball, verify sha512, read it in memory

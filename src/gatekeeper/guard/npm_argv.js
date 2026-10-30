@@ -33,17 +33,24 @@ const READ_ONLY = new Set(['run-script', 'test', 'start', 'stop', 'restart', 'vi
   'team', 'org', 'star', 'unstar', 'stars', 'hook', 'dist-tag', 'deprecate', 'undeprecate', 'unpublish', 'cache',
   'diff', 'pack', 'publish', 'edit', 'explore', 'get', 'set', 'find-dupes'])
 const PUBLIC = ['https://registry.npmjs.org/', 'https://registry.yarnpkg.com/']
+// commands that never contact a registry
+const LOCAL_ONLY = new Set(['run-script', 'test', 'start', 'stop', 'restart', 'ls', 'config', 'help', 'help-search',
+  'version', 'root', 'prefix', 'explain', 'query', 'pkg', 'completion', 'edit', 'explore', 'sbom', 'get', 'set'])
 const slash = (u) => String(u).replace(/\/?$/, '/')
 
 // Registries a project's own .npmrc points somewhere other than the public registry. A cloned repository controls
 // that file, so such a registry is not trusted unless the user says so (GK_TRUST_PROJECT_REGISTRY=1).
+// Settings in a project's own .npmrc that send npm's traffic (and its credentials) somewhere else.
+const NETWORK_KEYS = new Set(['proxy', 'https-proxy', 'http-proxy', 'ca', 'cafile', 'cert', 'key', 'replace-registry-host'])
+
 function projectRegistries (config) {
   const out = []
-  for (const layer of ['project']) {
-    const data = (config.data.get(layer) || {}).data || {}
-    for (const [k, v] of Object.entries(data)) {
-      if ((k === 'registry' || k.endsWith(':registry')) && !PUBLIC.includes(slash(v))) out.push(`${k}=${v}`)
-    }
+  const data = (config.data.get('project') || {}).data || {}
+  for (const [k, v] of Object.entries(data)) {
+    const registry = (k === 'registry' || k.endsWith(':registry')) && !PUBLIC.includes(slash(v))
+    const network = NETWORK_KEYS.has(k) || (k === 'strict-ssl' && String(v) === 'false') ||
+      (k.startsWith('//') && /:(certfile|keyfile|cafile|ca|cert|key)$/.test(k))
+    if (registry || network) out.push(`${k}=${v}`)
   }
   return out
 }
@@ -200,12 +207,13 @@ async function main () {
     before = 'invalid'
   }
   const resolved = []
-  if (command && !READ_ONLY.has(command)) {
-    if (process.env.GK_TRUST_PROJECT_REGISTRY !== '1') {
-      for (const spec of projectRegistries(config)) {
-        resolved.push({ spec: `${spec} (project .npmrc)`, type: 'remote', error: 'registry set by the project' })
-      }
+  // any command that talks to a registry (installs, but also login, publish, token, ...) sends it there
+  if (command && !LOCAL_ONLY.has(command) && process.env.GK_TRUST_PROJECT_REGISTRY !== '1') {
+    for (const spec of projectRegistries(config)) {
+      resolved.push({ spec: `${spec} (project .npmrc)`, type: 'remote', error: 'network setting from the project' })
     }
+  }
+  if (command && !READ_ONLY.has(command)) {
     for (const spec of offRegistryLockEntries(flat, config.localPrefix || process.cwd())) {
       resolved.push({ spec, type: 'remote', error: 'locked outside the registry' })
     }
