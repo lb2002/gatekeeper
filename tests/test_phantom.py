@@ -13,7 +13,7 @@ def pkg_of(files: dict[str, bytes]) -> PackageFiles:
 def client_with(missing: set[str]) -> httpx.Client:
     def handler(request):
         name = httpx.URL(str(request.url)).path.lstrip("/").replace("%2F", "/").replace("%2f", "/")
-        return httpx.Response(404 if name in missing else 200)
+        return httpx.Response(404) if name in missing else httpx.Response(200, json={"versions": {"1.0.0": {}}})
 
     return httpx.Client(transport=httpx.MockTransport(handler))
 
@@ -51,9 +51,33 @@ def test_a_declared_dependency_counts_without_any_code_loading_it():
     assert [n for n, _ in phantom.unreadable_imports(client_with({"@evil/payload"}), pkg, "x", set())] == ["@evil/payload"]
 
 
-def test_type_declarations_and_test_folders_do_not_count():
-    pkg = pkg_of({"a.d.ts": b"import x from '@a/types'", "lib/test/a.js": b"require('@a/fixture')"})
-    assert phantom.scoped_imports(pkg) == {}
+def test_type_declarations_do_not_count():
+    assert phantom.scoped_imports(pkg_of({"a.d.ts": b"import x from '@a/types'"})) == {}
+
+
+def test_a_test_folder_is_read_last_but_still_read():
+    # a directory name is the attacker's choice, so it can only lower the priority
+    pkg = pkg_of({"lib/test/a.js": b"require('@a/hidden')", "b.js": b"require('@b/first')"})
+    assert list(phantom.scoped_imports(pkg)) == ["@b/first", "@a/hidden"]
+
+
+def test_a_package_npm_took_down_counts_as_unreadable():
+    def handler(request):
+        return httpx.Response(200, json={"versions": {"0.0.0-stage": {}, "0.0.1-security": {}}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    assert phantom.unreadable_imports(client, pkg_of({"a.js": b"require('@evil/gone')"}), "x", set())
+
+
+def test_dependencies_only_the_registry_declares_count():
+    # manifest confusion: npm installs what the registry says, not what the archive's package.json says
+    found = phantom.unreadable_imports(client_with({"@evil/hidden"}), pkg_of({"package.json": b"{}"}), "x", set(), [("@evil/hidden", "1.0.0")])
+    assert [n for n, _ in found] == ["@evil/hidden"]
+
+
+def test_an_npm_alias_is_followed_to_its_target():
+    pkg = pkg_of({"package.json": b'{"dependencies": {"innocent": "npm:@evil/payload@1.0.0"}}'})
+    assert [n for n, _ in phantom.unreadable_imports(client_with({"@evil/payload"}), pkg, "x", set())] == ["@evil/payload"]
 
 
 def test_a_name_with_test_in_it_is_still_read():
@@ -65,9 +89,9 @@ def test_the_entry_file_is_read_even_inside_a_test_folder():
     assert "@a/hidden" in phantom.scoped_imports(pkg)
 
 
-def test_padding_does_not_hide_an_import_past_the_size_limit_of_a_file():
-    pkg = pkg_of({"big.js": b"require('@a/early')\n" + b"x" * (phantom.MAX_SCAN_BYTES + 10)})
-    assert "@a/early" in phantom.scoped_imports(pkg)
+def test_padding_does_not_hide_an_import_late_in_a_file():
+    pkg = pkg_of({"big.js": b"x" * 900_000 + b"\nrequire('@a/late')\n"})
+    assert "@a/late" in phantom.scoped_imports(pkg)
 
 
 def test_filler_imports_cannot_push_the_entry_file_past_the_lookup_limit():
@@ -93,12 +117,11 @@ def test_lookups_are_cached_and_bounded():
 
     def handler(request):
         calls.append(request.url)
-        return httpx.Response(200)
+        return httpx.Response(200, json={"versions": {"1.0.0": {}}})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    pkg = pkg_of({"a.js": b"\n".join(b"require('@a/p%d')" % i for i in range(20))})
+    pkg = pkg_of({"a.js": b"\n".join(b"require('@a/p%d')" % i for i in range(50))})
     phantom.unreadable_imports(client, pkg, "x", set())
     assert len(calls) == phantom.MAX_LOOKUPS
     phantom.unreadable_imports(client, pkg, "x", set())  # known names are free, so the rest get their turn
-    phantom.unreadable_imports(client, pkg, "x", set())
-    assert len(calls) == 20
+    assert len(calls) == 50

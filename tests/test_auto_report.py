@@ -188,3 +188,37 @@ def test_one_identity_call_is_not_a_probe():
 
 def test_identity_sent_to_an_ordinary_domain_is_not_a_probe():
     assert auto.install_evidence(_probe_pkg(PROBE.replace(b"203.0.114.9:8443", b"telemetry.example.com")), "1.0.0") is None
+
+
+class _Resp:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.payload
+
+
+class _Github:
+    def __init__(self, open_prs):
+        self.open_prs, self.pr = open_prs, None
+
+    def get(self, url, params=None):
+        return _Resp({"total_count": self.open_prs} if "search" in url else {"object": {"sha": "abc"}})
+
+    def put(self, url, json=None):
+        return _Resp({})
+
+    def post(self, url, json=None):
+        if url.endswith("/pulls"):
+            self.pr = json
+        return _Resp({"html_url": "https://github.com/x/y/pull/1"})
+
+
+def test_report_opens_as_draft_once_the_open_pull_request_limit_is_reached():
+    full, free = _Github(3), _Github(2)
+    auto.submit(full, {"id": "x"}, "pkg")
+    auto.submit(free, {"id": "x"}, "pkg")
+    assert full.pr["draft"] is True and free.pr["draft"] is False

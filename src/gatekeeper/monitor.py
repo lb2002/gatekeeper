@@ -145,7 +145,7 @@ def process_version(
         return rec
     content = score_content(pkg)
     # code that loads a package nobody can read: the payload stays out of every scanner's sight
-    hidden = unreadable_imports(client, pkg, info.name, popular)
+    hidden = unreadable_imports(client, pkg, info.name, popular, info.dependencies)
     for dep, (path, line, text) in hidden:
         content.hits.append(Hit("private_dependency", path, line, text))
         meta.reasons.append(f"+10 loads {dep}, which does not exist on the public registry")

@@ -18,58 +18,84 @@ from gatekeeper.triage.content import CODE_EXT, focus_files
 _SCOPED_IMPORT = re.compile(r"""(?:\brequire\(\s*|\bfrom\s+|\bimport\(\s*|\bimport\s+)['"`](@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)""", re.I)
 _SCOPED_NAME = re.compile(r"@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*\Z", re.I)
 _TEST_DIR = re.compile(r"(?:^|/)(?:test|tests|__tests__|fixtures)/")
-MAX_LOOKUPS = 12  # registry requests per version; names already known cost nothing
-MAX_SCAN_BYTES = 400_000  # of each file
-MAX_NAMES = 200
+_ALIAS = re.compile(r"npm:(@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)", re.I)
+MAX_LOOKUPS = 30  # registry requests per version; names already known cost nothing
+MAX_NAMES = 400
 _KNOWN: dict[str, bool] = {}  # name -> readable on the public registry, for the life of the container
 
 
-def _manifest_names(pkg: PackageFiles) -> dict[str, tuple[str, int, str]]:
-    try:
-        manifest = json.loads(pkg.text("package.json") or "{}")
-    except ValueError:
-        return {}
-    if not isinstance(manifest, dict):
-        return {}
+def _declared(deps: list[tuple[str, str]]) -> dict[str, tuple[str, int, str]]:
+    """Scoped names among declared dependencies, aliases (`"x": "npm:@evil/y"`) resolved to their target."""
     found = {}
-    for field in ("dependencies", "optionalDependencies", "peerDependencies"):
-        deps = manifest.get(field)
-        if isinstance(deps, dict):
-            for name in deps:
-                if isinstance(name, str) and _SCOPED_NAME.match(name):
-                    found.setdefault(name, ("package.json", 1, f"{field}: {name}"[:120]))
+    for name, spec in deps:
+        alias = _ALIAS.match(spec) if isinstance(spec, str) else None
+        target = alias.group(1) if alias else name
+        if isinstance(target, str) and _SCOPED_NAME.match(target):
+            found.setdefault(target, ("package.json", 1, f"dependency: {target}"[:120]))
     return found
 
 
-def scoped_imports(pkg: PackageFiles) -> dict[str, tuple[str, int, str]]:
+def _manifest_deps(pkg: PackageFiles) -> list[tuple[str, str]]:
+    try:
+        manifest = json.loads((pkg.text("package.json") or "{}").lstrip("\ufeff"))
+    except ValueError:
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    return [(n, s) for field in ("dependencies", "optionalDependencies", "peerDependencies")
+            if isinstance(manifest.get(field), dict) for n, s in manifest[field].items()]
+
+
+def scoped_imports(pkg: PackageFiles, registry_deps: list[tuple[str, str]] | None = None) -> dict[str, tuple[str, int, str]]:
     """Scoped packages the package loads or declares -> where (path, line, text). Code that runs first comes first,
-    so filler imports in other files cannot push the real one past the lookup limit."""
-    found = _manifest_names(pkg)
+    then what the registry and the archive declare (they can differ, and npm installs the registry's), then other
+    files, test folders last: filler imports cannot push the real one past the lookup limit."""
+    found: dict[str, tuple[str, int, str]] = {}
     focus = focus_files(pkg)
-    paths = focus + [p for p in pkg.files if p not in focus and p.endswith(CODE_EXT) and not p.endswith(".d.ts")]
-    for path in paths:
-        if path not in focus and _TEST_DIR.search(path):
-            continue
-        text = pkg.files[path][:MAX_SCAN_BYTES].decode("utf-8", errors="replace")
-        line, offset = 1, 0
-        for m in _SCOPED_IMPORT.finditer(text):
-            if m.group(1) in found:
-                continue
-            if len(found) >= MAX_NAMES:
-                return found
-            line += text.count("\n", offset, m.start())
-            offset = m.start()
-            found[m.group(1)] = (path, line, m.group(0)[:120])
+    others = sorted((p for p in pkg.files if p not in focus and p.endswith(CODE_EXT) and not p.endswith(".d.ts")),
+                    key=lambda p: bool(_TEST_DIR.search(p)))
+    for path in focus:
+        _scan(pkg, path, found)
+    for name, where in _declared(list(registry_deps or []) + _manifest_deps(pkg)).items():
+        found.setdefault(name, where)
+    for path in others:
+        _scan(pkg, path, found)
     return found
 
 
-def unreadable_imports(client, pkg: PackageFiles, own_name: str, popular: set[str]) -> list[tuple[str, tuple[str, int, str]]]:
+def _scan(pkg: PackageFiles, path: str, found: dict[str, tuple[str, int, str]]) -> None:
+    text = pkg.text(path) or ""
+    line, offset = 1, 0
+    for m in _SCOPED_IMPORT.finditer(text):
+        if m.group(1) in found:
+            continue
+        if len(found) >= MAX_NAMES:
+            return
+        line += text.count("\n", offset, m.start())
+        offset = m.start()
+        found[m.group(1)] = (path, line, m.group(0)[:120])
+
+
+def _lookup(client, name: str) -> bool | None:
+    """True if the public can read this package, None if the registry gave no answer. npm's security holding
+    package counts as unreadable: that name exists only because npm removed what was there."""
+    resp = client.get(packument.packument_url(name), headers={"Accept": "application/vnd.npm.install-v1+json"})
+    if resp.status_code == 404:
+        return False
+    if resp.status_code != 200:
+        return None
+    versions = (resp.json() or {}).get("versions") or {}
+    return bool(set(versions) - {packument.SECURITY_HOLDER_VERSION, packument.STAGE_PLACEHOLDER_VERSION})
+
+
+def unreadable_imports(client, pkg: PackageFiles, own_name: str, popular: set[str],
+                       registry_deps: list[tuple[str, str]] | None = None) -> list[tuple[str, tuple[str, int, str]]]:
     """Scoped packages it loads that do not exist for the public: (name, (path, line, text)). A failed lookup
     counts as readable and is not remembered: the monitor must not stop for a registry hiccup, and the next
     version of the package asks again."""
     out = []
     lookups = 0
-    for name, where in scoped_imports(pkg).items():
+    for name, where in scoped_imports(pkg, registry_deps).items():
         if name in popular or name == own_name:
             continue
         if name not in _KNOWN:
@@ -77,12 +103,12 @@ def unreadable_imports(client, pkg: PackageFiles, own_name: str, popular: set[st
                 continue
             lookups += 1
             try:
-                status = client.head(packument.packument_url(name)).status_code
+                readable = _lookup(client, name)
             except Exception:
                 continue
-            if status not in (200, 404):
+            if readable is None:
                 continue
-            _KNOWN[name] = status == 200
+            _KNOWN[name] = readable
         if not _KNOWN[name]:
             out.append((name, where))
     return out

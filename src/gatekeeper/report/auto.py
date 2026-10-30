@@ -42,6 +42,7 @@ MIN_CONFIDENCE = 0.9
 MAX_AGE = timedelta(days=7)
 MAX_VERSIONS = 30
 DAILY_LIMIT = 5
+OPEN_PR_LIMIT = 3
 PROXIMITY_LINES = 30
 
 # hosts whose only purpose is receiving requests for inspection; subdomains count
@@ -441,8 +442,12 @@ def submit(client, osv: dict, name: str) -> dict:
         "message": f"Add malicious npm package `{name}`\n\n{SIGN_OFF}", "branch": branch,
         "content": content, "author": AUTHOR, "committer": AUTHOR,
     }).raise_for_status()
+    # the repository lets outsiders hold 3 open pull requests; drafts do not count, and a draft still publishes the report
+    open_prs = client.get("/search/issues", params={"q": f"repo:{UPSTREAM} is:pr is:open author:{FORK_OWNER}"})
+    open_prs.raise_for_status()
     pr = client.post(f"/repos/{UPSTREAM}/pulls", json={
         "title": f"Add malicious npm package {name}", "head": f"{FORK_OWNER}:{branch}", "base": "main",
+        "draft": open_prs.json().get("total_count", 0) >= OPEN_PR_LIMIT,
         "body": "Submitted automatically by Gatekeeper (https://github.com/lb2002/gatekeeper) on behalf of Linus Baumberger, "
                 "who maintains it. Gatekeeper only submits on its own when the install-time code in the published archive "
                 "reads the environment, credential files or the machine's identity and sends a request to an external "
