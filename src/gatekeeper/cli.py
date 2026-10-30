@@ -1,8 +1,8 @@
 """`gk` command line interface."""
 
-from __future__ import re
-import annotations
+from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 

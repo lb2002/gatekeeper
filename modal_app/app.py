@@ -1078,7 +1078,12 @@ def investigate_batch() -> dict:
         return {"busy": True}
     spend = state.get("investigator_spend", {"total": 0.0, "days": {}})
     day = f"{now:%Y-%m-%d}"
-    if spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD:
+    # the same Baseten switch and credits as the one-shot verdicts: both count against the host's total cap
+    if not state.get("baseten_enabled", False):
+        return {"enabled": False}
+    host_total = (state.get("baseten_spend") or {}).get("total", 0.0) + spend["total"]
+    if (host_total >= BASETEN_TOTAL_CAP_USD or spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD
+            or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD):
         return {"capped": True}
     backend = INVESTIGATOR_BACKEND
     keys = _investigator_candidates(dict(queue.items()), now)[:INVESTIGATOR_PER_RUN]
