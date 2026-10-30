@@ -205,7 +205,10 @@ def parse_pnpm(text: str) -> list[Locked]:
             if not name:  # an entry nobody can name must not vanish from the report
                 out.append(Locked(key[:80], "?", "unreadable lockfile entry"))
                 continue
-            source = _source_of(key, *(v for k, v in resolution.items() if k != "integrity" and isinstance(v, str)))
+            fields = [v for k, v in resolution.items() if k != "integrity"]
+            source = _source_of(key, *(v for v in fields if isinstance(v, str)))
+            if not all(isinstance(v, str) for v in fields):  # nothing pnpm writes: not to be read past
+                source = source or "unreadable lockfile entry"
             if not source and not _SEMVER_START.match(version):  # `pkg@github.com/x/y/abc`: the key names the source
                 source = version
             out.append(Locked(name, version, source, bool(resolution.get("integrity")), checksum=str(resolution.get("integrity") or "")))

@@ -446,6 +446,11 @@ def test_yaml_aliases_are_refused_before_they_expand():
         au.parse_text(_alias_bomb())
 
 
+def test_a_resolution_that_is_not_text_is_not_read_past():
+    text = "lockfileVersion: '9.0'\npackages:\n  a@1.0.0:\n    resolution: {tarball: [https://evil.example/a.tgz]}\n"
+    assert au.check_index(au.parse_text(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
 def test_a_merge_key_bomb_is_refused_too():
     lines = ["lockfileVersion: '9.0'", "a0: &a0 {x: 1}"]
     lines += [f"a{i}: &a{i} {{<<: [" + ", ".join([f"*a{i - 1}"] * 10) + "]}" for i in range(1, 9)]

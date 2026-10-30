@@ -1998,9 +1998,10 @@ def api():
             raise HTTPException(status_code=401, detail="unauthorized")
 
     @web.middleware("http")
-    async def small_public_posts(request: Request, call_next):
-        """FastAPI reads a body before a route can look at it: without this, one large POST fills the container."""
-        if request.method == "POST" and request.url.path.startswith("/try/"):
+    async def small_posts(request: Request, call_next):
+        """FastAPI reads a body before a route, or its auth, can look at it: without this, one large POST fills the
+        container. A body with no length is refused, and the server holds a body to the length it declared."""
+        if request.method == "POST":
             length = request.headers.get("content-length", "")
             if not length.isdigit() or int(length) > AUDIT_MAX_BODY:
                 return JSONResponse({"detail": "That is too large for this page. Use `gk audit` instead."}, status_code=413)
