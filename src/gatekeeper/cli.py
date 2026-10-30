@@ -340,12 +340,14 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     else:
         remote, resolved = [], {}
     if remote and not allow:
-        console.print(Panel("\n".join([f"{', '.join(remote)} would be fetched from git or a URL: no registry metadata and no",
-                                        "integrity hash, so Gatekeeper cannot check it before its install scripts run.",
-                                        "", f"Nothing was installed. Install it anyway (only if you trust the source): add {ALLOW_FLAG}"]),
+        console.print(Panel("\n".join(["npm would use sources Gatekeeper cannot check:", *[f"  - {r}" for r in remote], "",
+                                        "Code from git or a URL, a package-lock.json entry outside the registry, or a registry, proxy",
+                                        "or TLS setting in the project's own .npmrc (a cloned repository controls these files).",
+                                        "", f"Nothing was run. If you trust the source: add {ALLOW_FLAG}, or GK_TRUST_PROJECT_REGISTRY=1 "
+                                        "for the project's .npmrc"]),
                             title="BLOCKED by Gatekeeper: unchecked source", border_style="red"), markup=False)
-        typer.echo("Gatekeeper blocked an install from git or a URL it cannot check. Do not retry with other flags; ask the user.",
-                   err=True)
+        typer.echo("Gatekeeper blocked npm because it would use a source Gatekeeper cannot check. Do not retry with other "
+                   "flags; ask the user.", err=True)
         raise typer.Exit(1)
     specs = list(resolved)
     if specs and not allow:
