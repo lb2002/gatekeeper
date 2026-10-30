@@ -253,3 +253,23 @@ def test_every_url_scheme_counts_as_a_source():
 def test_an_unknown_yarn_source_form_fails_closed():
     text = 'a@^1:\n  version "1.0.0"\n  resolved "evil.example/a.tgz"\n'
     assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_a_long_line_cannot_stall_the_source_scan():
+    import time
+
+    start = time.monotonic()
+    au._source_of("a" * 3_000_000)
+    assert time.monotonic() - start < 1
+
+
+def test_a_file_url_does_not_hide_a_remote_one():
+    assert au._source_of("file:///local/a.tgz", "https://evil.example/a.tgz") == "https://evil.example/a.tgz"
+    text = '"a@file:./x.tgz":\n  version "1.0.0"\n  resolved "https://evil.example/a.tgz"\n'
+    assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_only_a_real_url_counts_as_the_registry():
+    assert not au.on_registry("registry.npmjs.org/a.tgz")
+    text = 'a@^1:\n  version "1.0.0"\n  resolved "registry.npmjs.org/a.tgz"\n'
+    assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE

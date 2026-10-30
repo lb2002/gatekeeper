@@ -332,9 +332,9 @@ def cloud_verdict(meta: dict, wait_s: float = CLOUD_WAIT_S, poll_s: float = 2.0)
     try:
         with httpx.Client(timeout=20) as client:
             start = client.post(f"{CLOUD_URL}/try/start", json={"package": f"{meta['name']}@{meta['version']}"})
-            if start.status_code != 200:
+            key = start.json().get("key") if start.status_code == 200 else None
+            if key != f"{meta['name']}@{meta['version']}":  # a verdict counts only for exactly what is being installed
                 return None
-            key = start.json()["key"]
             deadline = time.monotonic() + wait_s
             while time.monotonic() < deadline:
                 state = client.get(f"{CLOUD_URL}/try/result", params={"key": key}).json()

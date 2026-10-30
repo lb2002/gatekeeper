@@ -73,7 +73,8 @@ def parse_npm(text: str) -> list[Locked]:
 
 
 # `git@` only as an ssh address: `simple-git@^3.10.0` and `@npmcli/git@5.0.8` are package names
-_ANY_SOURCE = re.compile(r"""(?:[a-z][a-z0-9+.-]*://|git\+|(?<![\w-])git@[\w.-]+[:/]|(?<![\w-])(?:github|gitlab|bitbucket|gist):)[^\s"',}#&]*""", re.I)
+# bounded, and a scheme can only start at a token start: this runs on text anyone can post to the public demo
+_ANY_SOURCE = re.compile(r"""(?:(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}://|(?<![a-z0-9+.-])git\+|(?<![\w-])git@[\w.-]{1,255}[:/]|(?<![\w-])(?:github|gitlab|bitbucket|gist):)[^\s"',}#&]{0,2000}""", re.I)
 _YARN_ALIAS = re.compile(r"((?:@[^/@\s]+/)?[^/@\s]+)(?:@.*)?\Z")
 _YARN_FIELD = re.compile(r'  ("?[\w-]+"?):? "?([^"]*)"?\s*\Z')
 _YARN_LOCAL = ("link:", "file:", "workspace:", "portal:", "patch:")
@@ -84,9 +85,19 @@ _SEMVER_START = re.compile(r"[0-9]")
 def _source_of(*fields: str) -> str:
     """Where lockfile fields say the code comes from: any URL in them, percent-encoded ones too (yarn berry hides them
     in `::__archiveUrl=` bindings), a foreign one first. Deny by default: anything that looks like a source counts."""
-    urls = _ANY_SOURCE.findall(unquote("\n".join(fields)))
-    foreign = [u for u in urls if host_of(u) not in TRUSTED_HOSTS]
+    urls = [u for u in _ANY_SOURCE.findall(unquote("\n".join(fields))) if not is_local(u)]
+    foreign = [u for u in urls if not on_registry(u)]
     return (foreign or urls or [""])[0]
+
+
+def is_local(source: str) -> bool:
+    """Code in the project itself. `file://host/...` names a machine, so it is not."""
+    return source.startswith(("file:", "workspace:")) and "://" not in source.replace("file:///", "")
+
+
+def on_registry(source: str) -> bool:
+    """A real URL on the registry; a value without a scheme is never taken for one."""
+    return bool(re.match(r"https?://", source, re.I)) and host_of(source) in TRUSTED_HOSTS
 
 
 def host_of(source: str) -> str:
@@ -128,8 +139,10 @@ def parse_yarn(text: str) -> list[Locked]:
         keys = [_yarn_key(k) for k in re.findall(r'"[^"]*"|[^,\s][^,]*', header)]
         fields = dict(m.groups() for m in map(_YARN_FIELD.match, body) if m)
         fields = {k.strip('"'): v for k, v in fields.items()}
-        # a `resolved` value of an unknown form fails closed: it is taken as it stands
-        source = _source_of(header, fields.get("resolved", ""), fields.get("resolution", "")) or fields.get("resolved", "")
+        source = _source_of(header, fields.get("resolution", ""))
+        resolved = fields.get("resolved", "")
+        if resolved and not source and not is_local(resolved):  # whatever its form: only a registry URL is left alone
+            source = resolved
         if not keys or (not source and all(spec.startswith(_YARN_LOCAL) for _, spec in keys)):
             continue
         version = fields.get("version") or "?"
@@ -189,11 +202,11 @@ def check_index(locked: list[Locked], index: dict) -> list[Finding]:
             out.append(Finding(MALICIOUS, p.name, p.version, "npm's placeholder for a package it removed as malware"))
         elif e and (e.get("all") or p.version in (e.get("versions") or [])):
             out.append(Finding(MALICIOUS, p.name, p.version, f"listed as malicious in OSV (reported {str(e.get('public'))[:10]})"))
-        if p.resolved and not p.resolved.startswith(("file:", "workspace:")):
+        if p.resolved and not is_local(p.resolved):
             host = host_of(p.resolved)
             if host in CODE_HOSTS:
                 out.append(Finding(CODE_HOST_SOURCE, p.name, p.version, f"resolved from {host[:80]}, not the npm registry"))
-            elif host not in TRUSTED_HOSTS:
+            elif not on_registry(p.resolved):
                 out.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, f"resolved from {p.resolved[:80]}, not the npm registry"))
             if not p.integrity:
                 out.append(Finding(NO_INTEGRITY, p.name, p.version, "no integrity hash in the lockfile"))

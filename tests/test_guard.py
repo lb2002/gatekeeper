@@ -433,3 +433,8 @@ def test_no_cloud_answer_means_none_so_the_guard_fails_closed(monkeypatch):
     assert core.cloud_verdict(_public_meta(version="1.0.0"), poll_s=0) is None
     core = _with_cloud(monkeypatch, _Cloud(result={"error": "run failed"}))
     assert core.cloud_verdict(_public_meta(version="1.0.0"), poll_s=0) is None
+
+
+def test_a_cloud_verdict_for_another_package_is_ignored(monkeypatch):
+    core = _with_cloud(monkeypatch, _Cloud(result={"verdict": VERDICT}))
+    assert core.cloud_verdict(_public_meta(name="Tailwind-Thing", version="1.0.0"), poll_s=0) is None

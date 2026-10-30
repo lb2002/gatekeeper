@@ -1982,7 +1982,7 @@ def api():
 
         from gatekeeper.npm import feed, packument
 
-        text = str(body.get("package") or "").strip().lower()[:230]
+        text = str(body.get("package") or "").strip()[:230]
         spec = _demo_spec(text)
         if spec is None:
             raise HTTPException(status_code=400, detail="That is not an npm package name.")
