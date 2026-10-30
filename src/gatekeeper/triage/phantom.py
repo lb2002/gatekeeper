@@ -23,7 +23,8 @@ _ALIAS = re.compile(r"npm:(@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)", re.I)
 MAX_LOOKUPS = 30  # registry requests per version; names already known cost nothing
 MAX_NAMES = 400
 YOUNG_DEPENDENCY = timedelta(days=7)
-MAX_ADDED_CHECKED = 5
+MAX_ADDED_LOOKUPS = 12  # registry requests per version; names already known cost nothing
+MISSING = object()  # a dependency the registry does not have
 _KNOWN: dict[str, bool] = {}  # name -> readable on the public registry, for the life of the container
 _CREATED: dict = {}  # name -> creation time of the package, likewise
 
@@ -80,22 +81,42 @@ def _scan(pkg: PackageFiles, path: str, found: dict[str, tuple[str, int, str]]) 
         found[m.group(1)] = (path, line, m.group(0)[:120])
 
 
-def young_additions(client, info, now: datetime, popular: set[str]) -> list[tuple[str, float]]:
-    """Dependencies this update adds that are themselves only days old: (name, age in hours). A hijacked release
-    usually looks like this: a patch version of a trusted package pulling in something created that week. The
-    registry metadata shows it without opening the archive, which most updates never get."""
-    out = []
-    for name in [n for n in info.added_dependencies if n not in popular][:MAX_ADDED_CHECKED]:
+def _created(client, name: str) -> datetime | None:
+    """When a package was created, `MISSING` if the registry does not have it, None if it gave no usable answer."""
+    resp = client.get(packument.packument_url(name))
+    if resp.status_code == 404:
+        return MISSING
+    if resp.status_code != 200:
+        return None
+    body = resp.json()
+    created = (body.get("time") or {}).get("created") if isinstance(body, dict) else None
+    return packument._parse_time(created) if isinstance(created, str) else None
+
+
+def young_additions(client, info, now: datetime, popular: set[str]) -> list[tuple[str, float | None]]:
+    """Dependencies this update adds that are only days old, or not on the registry at all: (name, age in hours or
+    None). A hijacked release usually looks like this: a patch version of a trusted package pulling in something
+    created that week. The registry metadata shows it without opening the archive, which most updates never get."""
+    out: list[tuple[str, float | None]] = []
+    lookups = 0
+    for name in info.added_dependencies:
+        if name in popular:
+            continue
         if name not in _CREATED:
+            if lookups >= MAX_ADDED_LOOKUPS:
+                continue
+            lookups += 1
             try:
-                resp = client.get(packument.packument_url(name))
-            except Exception:
+                created = _created(client, name)
+            except Exception:  # no answer is no evidence; the next version of the package asks again
                 continue
-            if resp.status_code != 200:
+            if created is None:
                 continue
-            _CREATED[name] = packument._parse_time((resp.json().get("time") or {}).get("created"))
+            _CREATED[name] = created
         created = _CREATED[name]
-        if created is not None and now - created <= YOUNG_DEPENDENCY:
+        if created is MISSING:
+            out.append((name, None))
+        elif now - created <= YOUNG_DEPENDENCY:
             out.append((name, (now - created).total_seconds() / 3600))
     return out
 

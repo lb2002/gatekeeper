@@ -60,12 +60,22 @@ class VersionInfo:
         """Dependencies an update brings in that its previous version did not have."""
         if not self.previous_version:
             return []
-        before = {n for n, _ in self.previous_dependencies}
-        return [n for n, _ in self.dependencies if n not in before]
+        before = {install_target(n, s) for n, s in self.previous_dependencies}
+        added = [install_target(n, s) for n, s in self.dependencies]
+        return [n for n in dict.fromkeys(added) if n not in before]
 
     @property
     def install_hook_added(self) -> bool:
         return bool(self.install_scripts) and not self.previous_install_scripts and self.previous_version is not None
+
+
+def install_target(name: str, spec: str) -> str:
+    """The package npm really installs: `"lodash": "npm:evil-pkg@1.0.0"` installs evil-pkg under another name."""
+    if isinstance(spec, str) and spec.startswith("npm:"):
+        target = spec[4:]
+        at = target.rfind("@")
+        return target[:at] if at > 0 else target
+    return name
 
 
 def packument_url(name: str) -> str:

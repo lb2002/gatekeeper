@@ -133,9 +133,11 @@ def process_version(
     if known_account:
         meta.reasons.append(f"+10 published by {info.publisher}, who also published {known_account}")
     # an update that pulls in a brand-new package: the shape of a hijacked release
-    fresh = young_additions(client, info, now, popular)
+    fresh = young_additions(client, info, now, popular) if scan else []  # versions past the per-name cap stay cheap
     if fresh:
-        meta.reasons.append(f"+10 this update adds {fresh[0][0]}, a package created {fresh[0][1]:.0f} hours ago")
+        dep, hours = fresh[0]
+        meta.reasons.append(f"+10 this update adds {dep}, " + ("which is not on the public registry" if hours is None
+                                                                else f"a package created {hours:.0f} hours ago"))
     # past the per-name cap only a strong metadata signal (e.g. a known-malicious dependency) earns a download
     if not scan and meta.score < FLAG_TOTAL_THRESHOLD and not known_account and not fresh:
         return rec

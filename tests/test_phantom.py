@@ -166,3 +166,35 @@ def test_a_first_release_has_no_additions():
 
 def test_a_dependency_it_already_had_is_not_an_addition():
     assert _update([]).added_dependencies == []
+
+
+def test_an_alias_is_compared_by_what_it_installs():
+    from gatekeeper.npm.packument import VersionInfo, install_target
+
+    assert install_target("lodash", "npm:evil-pkg@1.0.0") == "evil-pkg"
+    assert install_target("x", "npm:@evil/pkg") == "@evil/pkg"
+    assert install_target("lodash", "^4.0.0") == "lodash"
+    info = VersionInfo(name="t", version="2", published_at=None, package_created_at=None, previous_version="1",
+                       dependencies=[("lodash", "npm:evil-pkg@1.0.0")], previous_dependencies=[("lodash", "^4.0.0")])
+    assert info.added_dependencies == ["evil-pkg"]
+
+
+def test_many_added_dependencies_do_not_hide_a_young_one():
+    phantom._CREATED.clear()
+    fillers = [f"old-{i}" for i in range(phantom.MAX_ADDED_LOOKUPS)]
+    phantom._CREATED.update({n: datetime(2020, 1, 1, tzinfo=timezone.utc) for n in fillers})  # known names are free
+    client = _registry({"fresh": "2026-10-30T00:00:00.000Z"})
+    assert [n for n, _ in phantom.young_additions(client, _update([*fillers, "fresh"]), NOW, set())] == ["fresh"]
+
+
+def test_an_added_dependency_the_registry_lacks_is_reported():
+    phantom._CREATED.clear()
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
+    assert phantom.young_additions(client, _update(["ghost"]), NOW, set()) == [("ghost", None)]
+
+
+def test_a_garbled_registry_answer_is_no_evidence_and_no_crash():
+    phantom._CREATED.clear()
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=["not", "a", "packument"])))
+    assert phantom.young_additions(client, _update(["odd"]), NOW, set()) == []
+    assert phantom._CREATED == {}
