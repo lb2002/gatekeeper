@@ -144,3 +144,16 @@ def test_a_slow_url_is_given_up(monkeypatch):
     monkeypatch.setattr(monitor.time, "monotonic", lambda: next(ticks))
     with pytest.raises(OSError):
         monitor.download_capped(_author_url_client(), "https://evil.example/a.tgz", public_only=True)
+
+
+def test_a_stretch_of_time_can_be_read_again(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from gatekeeper import monitor
+
+    now = datetime(2026, 10, 30, 15, tzinfo=timezone.utc)
+    doc = {"name": "x", "dist-tags": {"latest": "2.0.0"}, "time": {"1.0.0": "2026-10-29T18:00:00.000Z", "2.0.0": "2026-10-30T10:00:00.000Z"},
+           "versions": {"1.0.0": {"name": "x", "version": "1.0.0", "dist": {}}, "2.0.0": {"name": "x", "version": "2.0.0", "dist": {}}}}
+    monkeypatch.setattr(monitor.packument, "fetch_packument", lambda client, name: doc)
+    records, _ = process_names(None, ["x"], set(), set(), now=now, window=timedelta(days=1), before=datetime(2026, 10, 29, 22, tzinfo=timezone.utc))
+    assert [r.version for r in records] == ["1.0.0"]

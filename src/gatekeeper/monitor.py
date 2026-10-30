@@ -220,11 +220,12 @@ def process_names(
     campaign: dict[str, str] | None = None,
     publishers: dict[str, str] | None = None,
     known_files: dict[str, str] | None = None,
+    before: datetime | None = None,
 ) -> tuple[list[Record], list[str]]:
     """Score every version of the changed packages published within `window`, unless already seen.
 
     With a `deadline` (time.monotonic()), names not finished by then are returned as deferred
-    instead of blocking, so a scheduled run never overruns its timeout."""
+    instead of blocking, so a scheduled run never overruns its timeout. `before` leaves out later versions."""
     now = now or datetime.now(timezone.utc)
 
     def one(name: str) -> tuple[list[Record], bool] | None:
@@ -237,7 +238,8 @@ def process_names(
         if not doc:
             return [], False
         todo = [v for v in packument.recent_versions(doc, window, now=now)
-                if not v.is_npm_placeholder and f"{v.name}@{v.version}" not in seen]
+                if not v.is_npm_placeholder and f"{v.name}@{v.version}" not in seen
+                and (before is None or (v.published_at is not None and v.published_at < before))]
         # Newest first, and only a few per name: a package that pushed 190 versions in a day (CI canaries,
         # spam) otherwise ties up a worker for minutes. Malware rarely comes as more than a handful.
         # Versions past the cap still get the metadata check (install hooks, dependencies), just no download.

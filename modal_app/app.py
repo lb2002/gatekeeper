@@ -1694,6 +1694,84 @@ def sweep(days: int = 2) -> dict:
     return stats
 
 
+BACKFILL_MAX_FLAGS = 400
+
+
+def _seq_before(client, when: datetime) -> int:
+    """A feed position shortly before `when`. The feed lists each package once, at its last change, so the time of a
+    package's last change is the time of its position."""
+    from gatekeeper.npm import feed, packument
+
+    high = feed.current_seq(client)
+    low = max(0, high - 2_000_000)
+    while high - low > 2000:
+        mid = (low + high) // 2
+        stamp = None
+        for change in feed.fetch_changes(client, mid, limit=5)[0]:
+            doc = packument.fetch_packument(client, change.name) or {}
+            stamp = (doc.get("time") or {}).get("modified")
+            if stamp:
+                break
+        if stamp and datetime.fromisoformat(stamp.replace("Z", "+00:00")) < when:
+            low = mid
+        else:
+            high = mid
+    return low
+
+
+@app.function(image=image, volumes={str(DATA): volume}, timeout=3000, cpu=1.0, memory=2048)
+def backfill_gap(start: str, end: str, budget_s: int = 2700) -> dict:
+    """Read a stretch the monitor missed: poll hung on Oct 29, 16:30-21:40 UTC, and what was published then had left
+    its 6 h window when it recovered. Called by hand, again until nothing is left. What this finds was read late, so
+    it never counts as a live flag or in recall, and the models take it after the live queue."""
+    from gatekeeper.monitor import process_names
+    from gatekeeper.npm import feed
+    from gatekeeper.popular import load_popular
+
+    volume.reload()
+    started = time.monotonic()
+    now = datetime.now(timezone.utc)
+    gap_start, gap_end = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    todo_file = DATA / "hunt" / "backfill-todo.json"
+    todo_file.parent.mkdir(exist_ok=True)
+    with feed.make_client(timeout=20) as client:
+        if todo_file.exists():
+            names = json.loads(todo_file.read_text(encoding="utf-8"))
+        else:
+            seq, names = _seq_before(client, gap_start), {}
+            while True:  # to the present: a package changed again after the gap is listed at that later change
+                changes, seq_next = feed.fetch_changes(client, seq)
+                names.update((c.name, None) for c in changes if not c.deleted)
+                if not changes or seq_next == seq:
+                    break
+                seq = seq_next
+            names = list(names)
+        total = len(names)
+        records, deferred = process_names(
+            client, names, load_popular(DATA / "popular.txt"), set(queue.keys()), now=now, window=now - gap_start, before=gap_end,
+            deadline=started + budget_s, fast=_fast_scorer(), mal_index=_mal_index(), campaign=state.get("campaign_iocs", {}),
+            publishers=state.get("campaign_publishers", {}), known_files=state.get("campaign_files", {}), workers=24,
+        )
+    rows = [r.to_json() | {"found_by": "gap"} for r in records]
+    flagged = sorted((r for r in rows if r["flagged"]), key=lambda r: -(r.get("priority") or 0))[:BACKFILL_MAX_FLAGS]
+    flagged = [r | {"priority": (r.get("priority") or 0) - 100} for r in flagged]
+    day = f"{now:%Y-%m-%d}"
+    if rows:
+        _append_jsonl(DATA / "events" / day / f"sweep-gap-{now:%H%M%S}.jsonl",
+                      [{k: v for k, v in r.items() if k not in ("bundle", "excerpts")} for r in rows])
+    added = 0
+    if flagged:
+        _append_jsonl(DATA / "flagged" / day / f"sweep-gap-{now:%H%M%S}.jsonl", flagged)
+        added = _enqueue(flagged)
+    todo_file.write_text(json.dumps(deferred), encoding="utf-8")
+    volume.commit()
+    stats = {"at": now.isoformat(), "names": total, "deferred": len(deferred), "versions": len(rows), "scanned": sum(1 for r in rows if r.get("scanned")),
+             "flagged": sum(1 for r in rows if r["flagged"]), "queued": added, "seconds": round(time.monotonic() - started)}
+    state["last_backfill"] = stats
+    print(json.dumps(stats))
+    return stats
+
+
 @app.function(image=image, volumes={str(DATA): volume}, timeout=900, cpu=1.0, memory=4096)
 def requeue_stream(min_risk: float = FAST_GATE, days: int = 5, limit: int = 3000) -> dict:
     """One pass over the evidence kept for scanned versions: what the wider gate would have sent to a model
