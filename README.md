@@ -44,6 +44,8 @@ npm install X  ->  npm view (read-only)
   otherwise                                -> Muse Glimmer on your machine judges, citing lines
   malicious, or suspicious with confidence >= 0.6, or any error -> blocked, nothing installed
   clean, but X was published less than 24 h ago -> held, with the newest older version suggested
+  then the real npm runs with --before=<24 h ago>: the whole dependency tree resolves to versions
+    older than the waiting period (a hijacked patch release of a dependency is not installed on day one)
 ```
 
 The waiting period is there because the rest of the ecosystem catches up quickly. Of 742 npm malware reports in OSV for October 2026, measured from the npm publish time of the malicious version to the report's import into OSV, 33% were public within an hour, 58% within a day, 74% within three days (median 10 h). A model catches what is new; the waiting period plus the live OSV lookup catch much of what the model misses. As a rough estimate (assuming the two are independent), the model's ~57% plus a 24 h wait block about 4 in 5 malicious versions, and a 72 h wait (`GK_MIN_AGE_HOURS=72`) about 9 in 10. `GK_MIN_AGE_HOURS=0` turns the wait off, `--gk-allow` overrides one install, and `GK_OFFLINE=1` never contacts OSV (the live lookup sends only the package name and version).
