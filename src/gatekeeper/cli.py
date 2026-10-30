@@ -569,6 +569,46 @@ def investigate(
     console.print(f"[dim]{len(res['steps'])} steps, ${res['cost_usd']:.4f}[/dim]")
 
 
+@app.command()
+def audit(
+    path: str = typer.Argument(".", help="A project folder or a lockfile"),
+    offline: bool = typer.Option(False, help="Use only the local list, send nothing to OSV"),
+    as_json: bool = typer.Option(False, "--json", help="Print the report as JSON"),
+) -> None:
+    """Am I already affected? Checks every version in a project's lockfile. Exit code 1 if something is wrong.
+
+    Reads only the lockfile: nothing is installed or executed. Online it sends package names and versions to OSV."""
+    import json
+    from pathlib import Path
+
+    from gatekeeper.audit import SEVERE, audit as run_audit, read_lockfile
+    from gatekeeper.guard.core import OSV_ONLINE, index_age_days, load_mal_index
+
+    try:
+        file, locked = read_lockfile(Path(path))
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        console.print(plain(f"cannot read a lockfile: {exc}"), markup=False)
+        raise typer.Exit(2) from None
+    index = load_mal_index()
+    report = run_audit(locked, index, online=OSV_ONLINE and not offline)
+    if as_json:
+        print(json.dumps(report, indent=1))
+        raise typer.Exit(1 if report["severe"] else 0)
+    console.print(plain(f"{file}: {report['packages']} packages, {report['install_scripts']} with install scripts"), markup=False)
+    if not index and not report["osv_online"]:
+        console.print("[yellow]No list of known malware and no answer from OSV: run `gk guard update-osv` first.[/yellow]")
+        raise typer.Exit(2)
+    if not report["osv_online"]:
+        age = index_age_days()
+        console.print(plain(f"offline: checked against the local list ({age:.0f} days old)" if age is not None else "offline"), markup=False)
+    for f in report["findings"]:
+        color = "red" if f["kind"] in SEVERE else "yellow"
+        console.print(f"[{color}]{escape(plain(f['name'] + '@' + f['version']))}[/{color}]  {escape(plain(f['detail']))}")
+    if not report["findings"]:
+        console.print("[green]No known malware, no foreign sources.[/green] That covers what is reported so far, not what nobody has found yet.")
+    raise typer.Exit(1 if report["severe"] else 0)
+
+
 @app.command("verify-flag")
 def verify_flag(
     salt: str = typer.Argument(..., help="hex salt from revealed/<month>.jsonl"),

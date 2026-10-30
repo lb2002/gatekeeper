@@ -1,0 +1,20 @@
+name: Gatekeeper audit
+description: Fail the build if a locked npm package is reported malware or comes from outside the registry.
+branding:
+  icon: shield
+  color: red
+inputs:
+  path:
+    description: Project folder or lockfile
+    default: .
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+    - shell: bash
+      env:
+        AUDIT_PATH: ${{ inputs.path }}
+        GATEKEEPER: ${{ github.action_path }}
+      run: |
+        uvx --from "$GATEKEEPER" gk guard update-osv
+        uvx --from "$GATEKEEPER" gk audit "$AUDIT_PATH"

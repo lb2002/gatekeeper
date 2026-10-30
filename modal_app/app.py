@@ -1407,6 +1407,9 @@ DEMO_RUNS_PER_CLIENT_HOUR = 8  # a courtesy limit; the daily limits are what pro
 DEMO_DAILY_CAP_USD = 2.0
 DEMO_TOTAL_CAP_USD = 8.0
 DEMO_RUNNING_FOR_S = 240  # a run older than this died: the function timeout is 200 s
+AUDIT_MAX_CHARS = 6_000_000
+AUDIT_MAX_PACKAGES = 6000
+AUDIT_RUNS_PER_CLIENT_HOUR = 30
 _DEMO_NAME = re.compile(r"(?:@[a-z0-9][a-z0-9._-]{0,100}/)?[a-z0-9][a-z0-9._-]{0,120}\Z")
 _DEMO_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,60}\Z")
 
@@ -1882,7 +1885,7 @@ class ReviewIn(BaseModel):
     note: str = ""
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[worker_secret, NTFY_SECRET], cpu=0.25, memory=512)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[worker_secret, NTFY_SECRET], cpu=0.25, memory=1024)
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app()
 def api():
@@ -2001,7 +2004,7 @@ def api():
         client_id = hashlib.sha256((request.headers.get("x-forwarded-for", "?").split(",")[-1].strip()).encode()).hexdigest()[:16]
         hour = int(time.time() // 3600)
         with demo_lock:
-            for old in [k for k in demo_clients if k[1] != hour]:
+            for old in [k for k in demo_clients if hour not in k[:2]]:
                 demo_clients.pop(old)
             if demo_clients.get((client_id, hour), 0) >= DEMO_RUNS_PER_CLIENT_HOUR:
                 raise HTTPException(status_code=429, detail="That is enough for this hour. Please come back later.")
@@ -2019,6 +2022,38 @@ def api():
             demo.pop(key, None)
             raise HTTPException(status_code=503, detail="Could not start a run. Please try again.") from None
         return {"key": key}
+
+    audit_index: dict = {}
+
+    @web.post("/try/audit")
+    def try_audit(request: Request, body: dict = Body(...)) -> dict:
+        """Public, no auth, no model: a lockfile against the list of known malware. Nothing is stored."""
+        import hashlib
+
+        from gatekeeper.audit import audit, parse_text
+
+        text = body.get("lockfile")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(status_code=400, detail="Paste a lockfile first.")
+        if len(text) > AUDIT_MAX_CHARS:
+            raise HTTPException(status_code=413, detail="That lockfile is too large for this page. Use `gk audit` instead.")
+        client_id = hashlib.sha256((request.headers.get("x-forwarded-for", "?").split(",")[-1].strip()).encode()).hexdigest()[:16]
+        hour = int(time.time() // 3600)
+        with demo_lock:
+            for old in [k for k in demo_clients if hour not in k[:2]]:
+                demo_clients.pop(old)
+            if demo_clients.get(("audit", hour, client_id), 0) >= AUDIT_RUNS_PER_CLIENT_HOUR:
+                raise HTTPException(status_code=429, detail="That is enough for this hour. Please come back later.")
+            demo_clients[("audit", hour, client_id)] = demo_clients.get(("audit", hour, client_id), 0) + 1
+            if not audit_index and MAL_INDEX.exists():
+                audit_index.update(json.loads(MAL_INDEX.read_text(encoding="utf-8")))
+        try:
+            locked = parse_text(text)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=400, detail="That does not look like a lockfile.") from None
+        if not locked:
+            raise HTTPException(status_code=400, detail="No packages found in that lockfile.")
+        return audit(locked[:AUDIT_MAX_PACKAGES], audit_index)
 
     @web.get("/try/result")
     def try_result(key: str = "") -> dict:

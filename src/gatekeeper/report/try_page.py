@@ -22,7 +22,11 @@ button:disabled{opacity:.5;cursor:default}
 #unverified{color:var(--warn);font-size:14px}#meta{color:var(--muted);font-size:13px;margin-top:10px}
 pre{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;overflow-x:auto;padding:10px;background:var(--bg);border:1px solid var(--line);border-radius:6px;margin:8px 0 0}
 details{margin-top:10px}summary{cursor:pointer;font-size:14px}
-#error{color:var(--accent);margin-top:12px}footer{color:var(--muted);font-size:13px;margin-top:28px}
+#error,#auditerror{color:var(--accent);margin-top:12px}
+#audit{margin-top:36px;border-top:1px solid var(--line);padding-top:6px}h2{font-size:19px;margin:14px 0 4px}
+textarea{display:block;width:100%;box-sizing:border-box;font:13px ui-monospace,Menlo,Consolas,monospace;padding:10px;margin:10px 0;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit}
+#auditfindings{padding-left:18px;font-size:14px}.bad{color:var(--accent)}.note{color:var(--warn)}.clean{color:var(--ok)}
+footer{color:var(--muted);font-size:13px;margin-top:28px}
 </style></head><body>
 <h1>Watch a Muse agent read an npm package</h1>
 <p class=sub>Muse Spark Open opens the published archive, decides where to look, and has to cite every line it relies on.
@@ -36,6 +40,13 @@ The package is read in memory on our server and never executed.</p>
 <div id=error role=alert></div>
 <section id=verdict aria-live=polite><p id=label></p><p id=summary></p><ul id=evidence></ul><p id=unverified></p>
 <details id=shown hidden><summary>What the model was shown</summary><div id=excerpts></div></details><p id=meta></p></section>
+<section id=audit><h2>Is your project affected?</h2>
+<p class=sub>Paste a <code>package-lock.json</code>, <code>pnpm-lock.yaml</code> or <code>yarn.lock</code>, or pick the file. We check every
+locked version against reported malware and look for packages from outside the registry. Nothing is stored or installed.</p>
+<input id=file type=file accept=".json,.yaml,.yml,.lock" aria-label="Lockfile">
+<textarea id=lock rows=6 placeholder="Paste a lockfile" spellcheck=false aria-label="Lockfile text"></textarea>
+<button id=check type=button>Check my lockfile</button>
+<div id=auditerror role=alert></div><p id=auditsummary></p><ul id=auditfindings></ul></section>
 <footer>A model's opinion on the package you asked about, not a finding: confirmed detections are on the
 <a href="/">live page</a>. <a href="https://github.com/lb2002/gatekeeper">Source</a>. Limited to a small number of runs a day.</footer>
 <script>
@@ -85,6 +96,20 @@ async function start(pkg) {
     poll(r.key);
   } catch (e) { finish({error: "Could not reach the server."}); }
 }
+$("file").addEventListener("change", async e => { if (e.target.files[0]) $("lock").value = await e.target.files[0].text(); });
+$("check").addEventListener("click", async () => {
+  $("auditerror").textContent = ""; $("auditsummary").textContent = "Checking…"; $("auditsummary").className = ""; $("auditfindings").textContent = "";
+  try {
+    const resp = await fetch("/try/audit", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({lockfile: $("lock").value})});
+    const r = await resp.json();
+    if (!resp.ok) { $("auditsummary").textContent = ""; $("auditerror").textContent = r.detail || "That did not work."; return; }
+    const bad = r.findings.length;
+    $("auditsummary").textContent = r.packages + " packages checked, " + r.install_scripts + " with install scripts. " +
+      (bad ? bad + " finding" + (bad > 1 ? "s" : "") + ":" : "No reported malware and no foreign sources. That covers what is known so far, not what nobody has found yet.");
+    $("auditsummary").className = r.severe ? "bad" : bad ? "note" : "clean";
+    for (const f of r.findings) { const li = document.createElement("li"); li.textContent = f.name + "@" + f.version + ": " + f.detail; $("auditfindings").append(li); }
+  } catch (e) { $("auditsummary").textContent = ""; $("auditerror").textContent = "Could not reach the server."; }
+});
 $("form").addEventListener("submit", e => { e.preventDefault(); start($("pkg").value.trim()); });
 document.querySelectorAll("[data-p]").forEach(b => b.addEventListener("click", () => { $("pkg").value = b.dataset.p; start(b.dataset.p); }));
 </script></body></html>

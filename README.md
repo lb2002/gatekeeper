@@ -183,6 +183,21 @@ Open [the demo](https://lb2002--gatekeeper-api.us-east.modal.run/try), type any 
 
 Open weights: the investigator and every-flag verdicts run on **Muse Spark Open** through partner inference (Baseten, Fireworks); **Muse Glimmer 30B** runs on a laptop GPU through llama.cpp; the fine-tuned **Llama Guard 3 1B** runs on a Modal GPU. Muse Spark (Meta Model API) gives second opinions.
 
+## Check your project
+
+`gk audit` answers the question after every incident: am I already affected? It reads the lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`) and nothing else, so nothing is installed or run.
+
+```bash
+gk guard setup      # once: downloads the list of known malware
+gk audit            # in your project; --offline sends nothing, --json for scripts
+```
+
+The same check runs [on the demo page](https://lb2002--gatekeeper-api.us-east.modal.run/try) without installing anything. It flags versions OSV lists as malware, npm's placeholders for removed packages, and locked packages that come from outside the registry (a poisoned lockfile). Exit code 1 means something needs a look, so it also works in CI:
+
+```yaml
+- uses: lb2002/gatekeeper@v1
+```
+
 ## Try the install guard
 
 Needs [uv](https://docs.astral.sh/uv/) and Node/npm. No account or API key, under a minute:
