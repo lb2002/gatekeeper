@@ -133,7 +133,7 @@ def process_version(
     if known_account:
         meta.reasons.append(f"+10 published by {info.publisher}, who also published {known_account}")
     # an update that pulls in a brand-new package: the shape of a hijacked release
-    fresh = young_additions(client, info, now, popular) if scan else []  # versions past the per-name cap stay cheap
+    fresh = young_additions(client, info, now, popular)  # also past the per-name cap: the publisher chooses the order
     if fresh:
         dep, hours = fresh[0]
         meta.reasons.append(f"+10 this update adds {dep}, " + ("which is not on the public registry" if hours is None
