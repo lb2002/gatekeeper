@@ -20,7 +20,7 @@ npm replication feed (every 2 min, on Modal)
   -> metadata triage (install hooks, typosquats, maintainer changes, new packages, OSV-listed dependencies)
   -> in-memory tarball scan: static rules + a fast first-stage classifier;
      every package younger than 72 h that runs code at install time goes to the models
-  -> every 15 min: fine-tuned Llama Guard 3 1B (v2) over everything the cheap stages let through
+  -> every 30 min: fine-tuned Llama Guard 3 1B (v2) over everything the cheap stages let through
   -> evidence bundle: numbered excerpts of the code that matters (max 8000 chars)
   -> Muse Spark Open (Fireworks, Baseten) judges every flag; Muse Spark (Meta API) gives second opinions;
      Muse Glimmer 30B runs locally (laptop worker, install guard)

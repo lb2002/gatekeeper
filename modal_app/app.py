@@ -1043,7 +1043,8 @@ LG_STRONG = 0.9  # in a hot run, weaker hits are queued as low priority
 
 
 @app.function(image=lg_image, gpu="L4", volumes={str(DATA): volume, "/models": model_volume},
-              secrets=[modal.Secret.from_name("huggingface"), NTFY_SECRET], schedule=modal.Period(minutes=15), timeout=900,
+              # every 30 min (was 15): the L4 start-up dominates the cost and Modal's monthly limit is $30
+              secrets=[modal.Secret.from_name("huggingface"), NTFY_SECRET], schedule=modal.Period(minutes=30), timeout=900,
               cpu=2.0, memory=16384)
 def llamaguard() -> dict:
     """Batched pass of the fine-tuned Llama Guard 3 1B over every scanned version the rules and the
