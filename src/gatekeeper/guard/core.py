@@ -21,8 +21,8 @@ import httpx
 
 from gatekeeper.evidence.bundle import build_bundle
 from gatekeeper.npm.tarball import read_tarball
-from gatekeeper.triage.phantom import unreadable_imports
 from gatekeeper.triage.content import score_content
+from gatekeeper.triage.phantom import unreadable_imports
 
 RULES_ALLOW_BELOW = 4  # content score under this: allow without asking the model
 BLOCK_CONFIDENCE = 0.6
