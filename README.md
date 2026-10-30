@@ -46,7 +46,9 @@ npm install X  ->  X from git or a URL: blocked (no registry metadata or integri
   rules clean AND local classifier clean   -> clean
   otherwise                                -> Muse Glimmer on your machine judges, citing lines
   malicious, or suspicious with confidence >= 0.6, or any error -> blocked, nothing installed
-  clean, but X was published less than 24 h ago -> held, with the newest older version suggested
+  X is resolved the way npm will resolve it, with the waiting period applied: a tag or range gets the
+    newest version older than 24 h, and that is the version checked; an exact version younger than 24 h
+    -> held, with the newest older version suggested
   then the real npm runs with --before=<24 h ago>: the whole dependency tree resolves to versions
     older than the waiting period (a hijacked patch release of a dependency is not installed on day one)
 ```
