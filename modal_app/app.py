@@ -423,7 +423,9 @@ def _record_catches() -> None:
         review = (it.get("review") or {}).get("decision")
         # Queued but judged benign by every model is not a detection, even if OSV lists it later; nor is
         # a placeholder npm itself published while taking the package down.
-        if is_placeholder_version(it["version"]) or not ({"malicious", "suspicious"} & judged or review == "malicious"):
+        # Nor is a package the sweep read only after it was reported: that is follow-up work, not a catch.
+        late = bool(it.get("found_by")) and (flag_lead_minutes(it["seen_at"], conf.get("earliest_public")) or 0) <= 0
+        if late or is_placeholder_version(it["version"]) or not ({"malicious", "suspicious"} & judged or review == "malicious"):
             catches.pop(key, None)
             continue
         catches[key] = {

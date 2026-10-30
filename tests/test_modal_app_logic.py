@@ -88,3 +88,12 @@ def test_demo_page_never_builds_html_from_results():
     from gatekeeper.report.try_page import TRY_PAGE
 
     assert "innerHTML" not in TRY_PAGE and "insertAdjacentHTML" not in TRY_PAGE and "document.write" not in TRY_PAGE
+
+
+def test_a_package_the_sweep_read_after_its_report_is_no_catch(app):
+    late = {"name": "old", "version": "1.0.0", "seen_at": "2026-10-30T10:00:00+00:00", "found_by": "sweep", "verdicts": {"spark": {"verdict": "malicious"}},
+            "confirmation": {"confirmed": True, "earliest_public": "2026-10-28T10:00:00+00:00"}}
+    early = dict(late, name="new", confirmation={"confirmed": True, "earliest_public": "2026-10-30T12:00:00+00:00"})
+    app.queue.update({"old@1.0.0": late, "new@1.0.0": early})
+    app._record_catches()
+    assert list(app.state["catches"]) == ["new@1.0.0"]
