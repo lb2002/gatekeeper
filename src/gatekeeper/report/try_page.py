@@ -52,7 +52,7 @@ locked version against reported malware and look for packages from outside the r
 <pre>uv tool install git+https://github.com/lb2002/gatekeeper
 gk guard setup
 gk guard shell</pre>
-<p class=sub>In your project, <code>gk audit</code> does the lockfile check above. In CI: <code>uses: lb2002/gatekeeper@v1</code>.</p></section>
+<p class=sub>In your project, <code>gk audit</code> does the lockfile check above. In CI: <code>uses: lb2002/gatekeeper@v2</code>.</p></section>
 <footer>A model's opinion on the package you asked about, not a finding: confirmed detections are on the
 <a href="/">live page</a>. <a href="https://github.com/lb2002/gatekeeper">Source</a>. Limited to a small number of runs a day.</footer>
 <script>
