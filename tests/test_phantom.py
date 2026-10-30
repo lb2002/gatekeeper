@@ -1,5 +1,7 @@
 """Public packages that load something the public registry does not have."""
 
+from datetime import datetime, timezone
+
 import httpx
 
 from gatekeeper.npm.tarball import PackageFiles
@@ -125,3 +127,42 @@ def test_lookups_are_cached_and_bounded():
     assert len(calls) == phantom.MAX_LOOKUPS
     phantom.unreadable_imports(client, pkg, "x", set())  # known names are free, so the rest get their turn
     assert len(calls) == 50
+
+
+def _update(added, previous=("left-pad",)):
+    from gatekeeper.npm.packument import VersionInfo
+
+    return VersionInfo(name="trusted", version="1.0.1", published_at=None, package_created_at=None, previous_version="1.0.0",
+                       dependencies=[(n, "^1.0.0") for n in (*previous, *added)],
+                       previous_dependencies=[(n, "^1.0.0") for n in previous])
+
+
+NOW = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+
+
+def _registry(created: dict[str, str]):
+    return httpx.Client(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"time": {"created": created[r.url.path.lstrip("/")]}})))
+
+
+def test_an_update_adding_a_days_old_package_is_found():
+    phantom._CREATED.clear()
+    client = _registry({"plain-crypto-js": "2026-10-29T12:00:00.000Z"})
+    assert phantom.young_additions(client, _update(["plain-crypto-js"]), NOW, set()) == [("plain-crypto-js", 24.0)]
+
+
+def test_an_update_adding_an_established_package_is_not():
+    phantom._CREATED.clear()
+    client = _registry({"chalk-next": "2024-01-01T00:00:00.000Z"})
+    assert phantom.young_additions(client, _update(["chalk-next"]), NOW, set()) == []
+
+
+def test_a_first_release_has_no_additions():
+    from gatekeeper.npm.packument import VersionInfo
+
+    info = VersionInfo(name="new", version="1.0.0", published_at=None, package_created_at=None, dependencies=[("a", "1")])
+    assert info.added_dependencies == []
+
+
+def test_a_dependency_it_already_had_is_not_an_addition():
+    assert _update([]).added_dependencies == []

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta
 
 from gatekeeper.npm import packument
 from gatekeeper.npm.tarball import PackageFiles
@@ -21,7 +22,10 @@ _TEST_DIR = re.compile(r"(?:^|/)(?:test|tests|__tests__|fixtures)/")
 _ALIAS = re.compile(r"npm:(@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)", re.I)
 MAX_LOOKUPS = 30  # registry requests per version; names already known cost nothing
 MAX_NAMES = 400
+YOUNG_DEPENDENCY = timedelta(days=7)
+MAX_ADDED_CHECKED = 5
 _KNOWN: dict[str, bool] = {}  # name -> readable on the public registry, for the life of the container
+_CREATED: dict = {}  # name -> creation time of the package, likewise
 
 
 def _declared(deps: list[tuple[str, str]]) -> dict[str, tuple[str, int, str]]:
@@ -74,6 +78,26 @@ def _scan(pkg: PackageFiles, path: str, found: dict[str, tuple[str, int, str]]) 
         line += text.count("\n", offset, m.start())
         offset = m.start()
         found[m.group(1)] = (path, line, m.group(0)[:120])
+
+
+def young_additions(client, info, now: datetime, popular: set[str]) -> list[tuple[str, float]]:
+    """Dependencies this update adds that are themselves only days old: (name, age in hours). A hijacked release
+    usually looks like this: a patch version of a trusted package pulling in something created that week. The
+    registry metadata shows it without opening the archive, which most updates never get."""
+    out = []
+    for name in [n for n in info.added_dependencies if n not in popular][:MAX_ADDED_CHECKED]:
+        if name not in _CREATED:
+            try:
+                resp = client.get(packument.packument_url(name))
+            except Exception:
+                continue
+            if resp.status_code != 200:
+                continue
+            _CREATED[name] = packument._parse_time((resp.json().get("time") or {}).get("created"))
+        created = _CREATED[name]
+        if created is not None and now - created <= YOUNG_DEPENDENCY:
+            out.append((name, (now - created).total_seconds() / 3600))
+    return out
 
 
 def _lookup(client, name: str) -> bool | None:

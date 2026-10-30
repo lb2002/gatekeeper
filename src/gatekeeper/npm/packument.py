@@ -41,6 +41,7 @@ class VersionInfo:
     previous_install_scripts: dict[str, str] = field(default_factory=dict)
     previous_publisher: str | None = None
     previous_maintainers: list[str] = field(default_factory=list)
+    previous_dependencies: list[tuple[str, str]] = field(default_factory=list)
     version_count: int | None = None
 
     @property
@@ -53,6 +54,14 @@ class VersionInfo:
         npm also writes when it takes malware down). Decided by the publishing account, which the registry
         sets, never by the version string, which the author picks: `evil@0.0.1-security` is still scanned."""
         return self.publisher == "npm"
+
+    @property
+    def added_dependencies(self) -> list[str]:
+        """Dependencies an update brings in that its previous version did not have."""
+        if not self.previous_version:
+            return []
+        before = {n for n, _ in self.previous_dependencies}
+        return [n for n, _ in self.dependencies if n not in before]
 
     @property
     def install_hook_added(self) -> bool:
@@ -166,6 +175,7 @@ def version_info(packument: dict, version: str, ordered: list[tuple[str, datetim
         previous_install_scripts=_hooks(prev_manifest),
         previous_publisher=prev_user.get("name") if isinstance(prev_user, dict) else None,
         previous_maintainers=_people(prev_manifest.get("maintainers")),
+        previous_dependencies=_all_dependencies(prev_manifest),
         version_count=len(ordered),
     )
 
