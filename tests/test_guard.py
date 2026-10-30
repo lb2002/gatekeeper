@@ -1,27 +1,7 @@
 import base64
 import hashlib
 
-from gatekeeper.guard.core import package_specs, verify_integrity
-
-
-def test_install_specs_skip_flags_and_local_paths():
-    args = ["install", "-D", "axios-retry@^4", "@types/node", "./local-dir", "file:../x", "--registry", "https://r.example", "lodash"]
-    assert package_specs("npm", args) == ["axios-retry@^4", "@types/node", "lodash"]
-
-
-def test_non_install_commands_are_not_checked():
-    assert package_specs("npm", ["run", "build"]) == []
-    assert package_specs("npm", ["install"]) == []  # lockfile install: out of scope for now
-    assert package_specs("npm", ["test"]) == []
-
-
-def test_exec_and_npx():
-    assert package_specs("npx", ["-y", "create-vite@latest", "my-app"]) == ["create-vite@latest"]
-    assert package_specs("npm", ["exec", "cowsay"]) == ["cowsay"]
-
-
-def test_allow_flag_is_ignored_in_specs():
-    assert package_specs("npm", ["i", "--gk-allow", "left-pad"]) == ["left-pad"]
+from gatekeeper.guard.core import verify_integrity
 
 
 def test_integrity_check():
@@ -164,54 +144,6 @@ def test_waiting_period_reaches_the_whole_dependency_tree():
     assert with_before("npm", ["install", "x"], 0, now) == ["install", "x"]
 
 
-def test_leading_options_do_not_hide_the_install():
-    from gatekeeper.guard.core import package_specs
-
-    assert package_specs("npm", ["-s", "install", "evil"]) == ["evil"]
-    assert package_specs("npm", ["--loglevel", "warn", "install", "evil", "--save-dev"]) == ["evil"]
-    assert package_specs("npm", ["--some-new-flag", "value", "install", "evil"]) == ["evil"]  # unknown value: skipped
-    assert package_specs("npm", ["--registry", "http://r", "i", "a", "--tag", "next", "b"]) == ["a", "b"]
-    assert package_specs("npm", ["run", "install"]) == []  # a script called install
-
-
-def test_npx_packages_given_with_p_are_the_ones_checked():
-    from gatekeeper.guard.core import package_specs
-
-    assert package_specs("npx", ["-p", "evil", "some-bin"]) == ["evil"]
-    assert package_specs("npx", ["--package=evil", "-c", "some-bin --x"]) == ["evil"]
-    assert package_specs("npx", ["--yes", "cowsay", "hi"]) == ["cowsay"]
-    assert package_specs("npm", ["exec", "-p", "evil", "--", "bin"]) == ["evil"]
-
-
-def test_installs_from_git_or_urls_are_recognised_and_not_sent_to_the_registry_check():
-    from gatekeeper.guard.core import package_specs, registry_args, remote_specs
-
-    args = ["install", "github:user/evil", "user/evil#main", "https://x.test/evil.tgz", "x@git+ssh://git@host/r.git",
-            "lodash", "@scope/pkg", "alias@npm:lodash@4", "./local-dir", "file:../pkg"]
-    assert remote_specs("npm", args) == ["github:user/evil", "user/evil#main", "https://x.test/evil.tgz",
-                                         "x@git+ssh://git@host/r.git"]
-    assert package_specs("npm", args) == ["lodash", "@scope/pkg", "alias@npm:lodash@4"]
-    assert remote_specs("npx", ["github:user/tool"]) == ["github:user/tool"]
-    assert registry_args(["install", "--registry", "http://r.test", "x"]) == ["--registry", "http://r.test"]
-    assert registry_args(["--registry=http://r.test", "i", "x"]) == ["--registry", "http://r.test"]
-    assert registry_args(["install", "x"]) == []
-
-
-def test_parser_differentials_fail_closed():
-    from gatekeeper.guard.core import package_specs, with_before
-
-    assert package_specs("npm", ["-p", "install", "evil"]) == ["evil"]  # top-level -p is --parseable (no value)
-    assert package_specs("npm", ["install", "--", "evil"]) == ["evil"]
-    assert package_specs("npm", ["install", "ok", "--", "evil"]) == ["ok", "evil"]
-    assert package_specs("npm", ["exe", "evil"]) == ["evil"]  # a command prefix npm may accept
-    assert package_specs("npx", ["--pack", "evil", "bin"]) == ["evil"]
-    assert package_specs("npx", ["-p=evil", "bin"]) == ["evil"]
-    assert package_specs("npx", ["--packa=evil", "--package", "evil2", "bin"]) == ["evil", "evil2"]
-    assert package_specs("npx", ["--", "evil", "--flag"]) == ["evil"]
-    assert package_specs("npm", ["exec", "--", "evil", "arg"]) == ["evil"]
-    assert with_before("npm", ["-p", "i", "x"], 24, 1_793_318_400.0) == ["--before=2026-10-29T00:00:00Z", "-p", "i", "x"]
-
-
 def _real_npm():
     import shutil
 
@@ -349,3 +281,40 @@ def test_a_registry_set_by_the_project_npmrc_is_not_trusted(monkeypatch, tmp_pat
     monkeypatch.setenv("GK_TRUST_PROJECT_REGISTRY", "1")  # trusting the scope still does not cover unscoped is-odd
     remote = [s["spec"] for s in npm_native_parse(exe, "npm", ["uninstall", "x"])["specs"] if s["type"] == "remote"]
     assert remote == ["https://evil.example/is-odd/-/is-odd-3.0.1.tgz (package-lock: node_modules/is-odd)"]
+
+
+# Cases a hand-written parser once got wrong, now answered by the installed npm itself.
+NATIVE_CASES = [
+    ("npm", ["-s", "install", "is-odd"], [("is-odd", "registry")]),
+    ("npm", ["-p", "install", "is-odd"], [("is-odd", "registry")]),  # top-level -p is --parseable
+    ("npm", ["--loglevel", "warn", "install", "is-odd", "--save-dev"], [("is-odd", "registry")]),
+    ("npm", ["install", "--", "is-odd"], [("is-odd", "registry")]),
+    ("npm", ["--registry", "https://registry.npmjs.org/", "i", "is-odd", "--tag", "latest"], [("is-odd", "registry")]),
+    ("npm", ["isnt", "is-odd"], [("is-odd", "registry")]),
+    ("npm", ["exec", "--", "is-odd", "arg"], [("is-odd", "registry")]),
+    ("npx", ["-p", "is-odd", "some-bin"], [("is-odd", "registry")]),
+    ("npx", ["--package=is-odd", "-c", "some-bin --x"], [("is-odd", "registry")]),
+    ("npx", ["--yes", "is-odd", "--flag"], [("is-odd", "registry")]),
+    ("npm", ["install", "github:user/evil", "user/evil#main", "https://x.test/evil.tgz", "x@git+ssh://git@host/r.git",
+             "./local-dir", "alias@npm:is-odd@3"],
+     [("github:user/evil", "remote"), ("user/evil#main", "remote"), ("https://x.test/evil.tgz", "remote"),
+      ("x@git+ssh://git@host/r.git", "remote"), ("./local-dir", "local"), ("alias@npm:is-odd@3", "registry")]),
+    ("npm", ["run", "install"], []),  # a script called install
+    ("npm", ["test"], []),
+]
+
+
+def test_native_parse_cases(monkeypatch, tmp_path):
+    import pytest
+
+    from gatekeeper.guard.core import npm_native_parse
+
+    exe = _real_npm()
+    if exe is None:
+        pytest.skip("npm not installed")
+    monkeypatch.delenv("NPM_CONFIG_REGISTRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    for tool, args, expected in NATIVE_CASES:
+        d = npm_native_parse(exe, tool, args)
+        assert d is not None, args
+        assert [(s["spec"], s["type"]) for s in d["specs"]] == expected, (tool, args)

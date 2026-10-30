@@ -312,8 +312,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import (ALLOW_FLAG, check_spec, index_age_days, load_fast_model, npm_native_parse,
-                                       registry_args, with_before)
+    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, index_age_days, load_fast_model, npm_native_parse, with_before
 
     # the shims call `gk guard run npm -- <args>`: drop that one separator, keep the user's own `--`
     args = list(ctx.args[1:] if ctx.args[:1] == ["--"] else ctx.args)
@@ -365,7 +364,7 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
                 if r is not None and r.get("requested_version"):
                     console.print(f"[dim]gatekeeper: npm will install {escape(r['name'])}@{escape(r['version'])}, the newest match "
                                   f"older than the waiting period ({escape(r['requested_version'])} is newer)[/]", highlight=False)
-                d = check_spec(shim.npm_command(cfg, "npm") + registry_args(args), spec, fast_model=fast_model, meta=meta)
+                d = check_spec(shim.npm_command(cfg, "npm"), spec, fast_model=fast_model, meta=meta)
             except Exception as exc:
                 # Fail closed: a package must not get through just because checking it failed
                 # (an attacker could craft an archive that makes the check error out).
