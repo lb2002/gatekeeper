@@ -355,10 +355,11 @@ def _record_catches() -> None:
         if not conf.get("confirmed"):
             continue
         verdicts = {b: v.get("verdict") for b, v in (it.get("verdicts") or {}).items()}
+        judged = {v for b, v in verdicts.items() if b in NOTIFY_BACKENDS}  # Muse models; Llama Guard only routes
         review = (it.get("review") or {}).get("decision")
         # Queued but judged benign by every model is not a detection, even if OSV lists it later; nor is
         # a placeholder npm itself published while taking the package down.
-        if is_placeholder_version(it["version"]) or not ({"malicious", "suspicious"} & set(verdicts.values()) or review == "malicious"):
+        if is_placeholder_version(it["version"]) or not ({"malicious", "suspicious"} & judged or review == "malicious"):
             catches.pop(key, None)
             continue
         catches[key] = {
@@ -466,7 +467,9 @@ def confirm() -> dict:
     for k in stale:
         queue.pop(k, None)
         items.pop(k, None)
-    pending = {k: it for k, it in items.items() if not (it.get("confirmation") or {}).get("confirmed")}
+    # confirmed items whose public time could not be determined (e.g. a GitHub rate limit) are checked again
+    pending = {k: it for k, it in items.items()
+               if not (it.get("confirmation") or {}).get("confirmed") or not it["confirmation"].get("earliest_public")}
     since = (now - QUEUE_TTL).isoformat()
     with feed.make_client() as client:
         results, gh_error = confirm_many(client, [(it["name"], it["version"]) for it in pending.values()], since, now=now,
@@ -484,7 +487,10 @@ def confirm() -> dict:
         item["confirmation"] = {k: row[k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at", "checked_at")}
         # write only on a change: rewriting every pending item each hour made this job slow
         if not prev or any(prev.get(k) != item["confirmation"][k] for k in ("confirmed", "earliest_public", "osv_ids", "ghsa_ids", "npm_takedown_at")):
-            queue[key] = item
+            fresh = queue.get(key, None)  # the snapshot is minutes old: keep verdicts stored since
+            if fresh is not None:
+                fresh["confirmation"] = item["confirmation"]
+                queue[key] = fresh
     _append_jsonl(DATA / "confirmations" / f"{now:%Y-%m-%d}.jsonl", rows)
     for key, it in items.items():
         if it.get("bundle") and datetime.fromisoformat(it["seen_at"]) < now - BUNDLE_KEEP:
@@ -825,9 +831,11 @@ def _closed_as_duplicate(pr: dict) -> bool:
     if listed:
         url = pr.get("html_url", "")
         state["reports_watch"] = [u for u in state.get("reports_watch", []) if u != url]
-        for r in state.get("autoreports", {}).values():
+        reports = state.get("autoreports", {})  # a copy: modal.Dict values must be written back
+        for r in reports.values():
             if r.get("pr") == url:
                 r["closed_as_duplicate"] = True
+        state["autoreports"] = reports
         _notify("Gatekeeper: report closed as duplicate", f"{url} was closed without merging, but OSV lists {name} as "
                 "malicious (another report landed first). Automatic reporting stays on.", click=url, tags="information_source")
     return listed
@@ -1215,13 +1223,12 @@ def live_recall() -> dict:
     bad = set(state.get("judged_bad", []))
     for key, it in queue.items():
         flags.setdefault(key, it["seen_at"])
-        verdicts = {v.get("verdict") for v in (it.get("verdicts") or {}).values()}
+        verdicts = {v.get("verdict") for b, v in (it.get("verdicts") or {}).items() if b in NOTIFY_BACKENDS}
         if {"malicious", "suspicious"} & verdicts or (it.get("review") or {}).get("decision") == "malicious":
             bad.add(key)
     state["judged_bad"] = sorted(bad)
     detections = {k: v for k, v in flags.items() if k in bad}
-    real_seen = {n for n, rows in seen.items() if any(not recall.is_placeholder_version(r["version"]) for r in rows)}
-    npm_times = recall.fetch_times(sorted(names - real_seen))  # when the malicious versions really came out
+    npm_times = recall.fetch_times(sorted(names))  # when the malicious versions really came out
     outcomes = [o for v in vulns for o in recall.classify(v, seen, detections, start, queued=flags, npm_times=npm_times)]
     result = {"at": datetime.now(timezone.utc).isoformat(), "since": start.isoformat(), **recall.summarize(outcomes),
               "outcomes": [o.as_dict() for o in sorted(outcomes, key=lambda o: o.first_public or "")]}
@@ -1420,7 +1427,10 @@ def api():
         flags are never named here (they appear only as salted hashes in the ledger)."""
         return _public_stats()
 
+    import threading
+
     gz_cache: dict = {}
+    gz_lock = threading.Lock()
 
     @web.get("/osv/mal_npm.json")
     def mal_index():
@@ -1430,11 +1440,20 @@ def api():
 
         from fastapi import Response
 
-        volume.reload()
-        mtime = MAL_INDEX.stat().st_mtime
-        if gz_cache.get("mtime") != mtime:
-            gz_cache.update(mtime=mtime, body=gzip.compress(MAL_INDEX.read_bytes(), 6))
-        return Response(gz_cache["body"], media_type="application/json",
+        with gz_lock:  # anyone can call this: at most one volume reload per 10 minutes, one gzip per new file
+            if time.time() - gz_cache.get("checked", 0) > 600:
+                gz_cache["checked"] = time.time()
+                try:
+                    volume.reload()
+                    mtime = MAL_INDEX.stat().st_mtime
+                    if gz_cache.get("mtime") != mtime:
+                        gz_cache.update(mtime=mtime, body=gzip.compress(MAL_INDEX.read_bytes(), 6))
+                except Exception as exc:  # missing file, or a reload during a refresh: keep serving the last copy
+                    print(f"mal index: {type(exc).__name__}: {exc}"[:200])
+            body = gz_cache.get("body")
+        if body is None:
+            return Response('{"error": "index not available yet"}', status_code=503, media_type="application/json")
+        return Response(body, media_type="application/json",
                         headers={"Content-Encoding": "gzip", "Cache-Control": "public, max-age=3600"})
 
     @web.get("/", response_class=HTMLResponse)
