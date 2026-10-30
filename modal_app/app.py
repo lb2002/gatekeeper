@@ -272,6 +272,27 @@ def _watchdog() -> None:
     _notify("Gatekeeper: monitor stalled", f"No successful poll since {last[:16]} UTC. Last error: {err}")
 
 
+def _daily_report(now: datetime) -> None:
+    """Once a day (first confirm run after 06:00 UTC): yesterday's volume, confirmations and spend."""
+    yday = f"{now - timedelta(days=1):%Y-%m-%d}"
+    if now.hour < 6 or state.get("daily_report_for") == yday:
+        return
+    d = state.get("daily", {}).get(yday, {})
+    catches = state.get("catches", {}).values()
+    new = sorted({c["name"] for c in catches if (c.get("flagged_at") or "").startswith(yday)})
+    lines = [f"{d.get('versions', 0):,} versions, {d.get('scanned', 0):,} scanned, {d.get('flagged', 0):,} flagged",
+             f"confirmed so far: {len({c['name'] for c in catches})} packages" + (f" (flagged {yday}: {', '.join(new)})" if new else "")]
+    rc = state.get("recall") or {}
+    if rc.get("in_scope"):
+        lines.append(f"live recall: {rc['flagged']}/{rc['in_scope']} ({round(100 * rc['recall'])}%)")
+    for label, key, cap in (("Muse Spark", "spark_spend", SPARK_TOTAL_CAP_USD), ("Spark Open/Fireworks", "fireworks_spend", FIREWORKS_TOTAL_CAP_USD),
+                            ("Spark Open/Baseten", "baseten_spend", BASETEN_TOTAL_CAP_USD)):
+        s = state.get(key) or {}
+        lines.append(f"{label}: ${(s.get('days') or {}).get(yday, 0):.2f} yesterday, ${s.get('total', 0):.2f} of ${cap:.0f} cap")
+    _notify(f"Gatekeeper daily: {yday}", "\n".join(lines), tags="bar_chart", priority="default")
+    state["daily_report_for"] = yday
+
+
 def _confirm_watchdog() -> None:
     """The hourly confirmation once timed out silently for 12 hours (confirmations, recall and catches all
     stood still). Alert when it has not finished for 3 hours; at most one push every 6 hours."""
@@ -482,6 +503,7 @@ def confirm() -> dict:
     stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error,
              "ledger_revealed": revealed}
     state["last_confirm"] = {"at": now.isoformat(), **stats}
+    _daily_report(now)
     print(json.dumps(stats))
     return stats
 
@@ -543,14 +565,14 @@ def _fireworks_candidates(items: dict) -> list[str]:
 NOTIFY_BACKENDS = ("glimmer-local", "spark", *SPARK_OPEN_BACKENDS)
 
 
-def _notify(title: str, body: str, click: str = "", tags: str = "warning") -> None:
+def _notify(title: str, body: str, click: str = "", tags: str = "warning", priority: str = "high") -> None:
     """Push to the reviewer's phone via ntfy (secret topic). Never raises."""
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
         return
     import httpx
 
-    headers = {"Title": title.encode("ascii", "replace").decode(), "Tags": tags, "Priority": "high"}
+    headers = {"Title": title.encode("ascii", "replace").decode(), "Tags": tags, "Priority": priority}
     if click:
         headers["Click"] = click
     try:
