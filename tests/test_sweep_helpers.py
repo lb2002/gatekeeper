@@ -54,3 +54,8 @@ def test_excerpt_refs_match_the_bundle_that_was_rendered():
     assert [(r["excerpt_id"], r["path"], r["first_line"], r["last_line"]) for r in refs] == \
         [(e.excerpt_id, e.path, e.first_line, e.last_line) for e in bundle.excerpts]
     assert refs[0]["kind"] == "manifest" and all(r["kind"] == "code" for r in refs[1:])
+
+
+def test_shared_publishers_are_never_remembered():
+    doc = {"maintainers": [{"name": "npm-support"}], "versions": {"1.0.0": {"_npmUser": {"name": "GitHub Actions"}}, "1.1.0": {"_npmUser": {"name": "mallory"}}}}
+    assert campaign.account_names(doc) == {"mallory"}

@@ -62,12 +62,21 @@ def report_iocs(vuln: dict) -> set[str]:
     return found | {ip for ip in ips if isinstance(ip, str) and _public_ip(ip)}
 
 
+SHARED_ACCOUNTS = {"npm", "npm-support", "npmjs", "github-actions", "github actions", "gitlab-ci", "circleci"}
+
+
 def account_names(doc: dict) -> set[str]:
     """npm accounts behind a package: whoever published a version, and the maintainers. `npm` itself takes
     over removed packages, so it never counts."""
     names = {(v.get("_npmUser") or {}).get("name") for v in (doc.get("versions") or {}).values() if isinstance(v, dict)}
     names |= {m.get("name") for m in doc.get("maintainers") or [] if isinstance(m, dict)}
-    return {n for n in names if n and n != "npm"}
+    return {n for n in names if n and is_person(n)}
+
+
+def is_person(account: str) -> bool:
+    """False for the registry's own accounts and for trusted publishing, where `_npmUser` says "GitHub Actions" for
+    every project on GitHub: remembering those would flag half of npm's automated releases."""
+    return account not in SHARED_ACCOUNTS and " " not in account
 
 
 # A throwaway campaign account has a handful of packages. Hundreds mean a real maintainer whose one

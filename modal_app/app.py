@@ -1543,12 +1543,14 @@ def sweep(days: int = 2) -> dict:
                 print(f"sweep search {account}: {type(exc).__name__}"[:200])
                 continue
             done_now.append(account)
-            if found is None:
+            if found is None:  # a real maintainer, hijacked at most: no reason to distrust all they publish
                 stats["too_big"] += 1
                 swept[account] = "too many packages"
+                accounts.pop(account, None)
             else:
                 swept[account] = now.isoformat()
                 names += [n for n in found if n not in popular]
+        state["campaign_publishers"] = accounts
         names = list(dict.fromkeys(names))
         stats["packages"] = len(names)
         records, deferred = process_names(
