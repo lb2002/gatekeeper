@@ -323,3 +323,29 @@ def test_a_lockfile_pointing_away_from_the_registry_is_remote(monkeypatch, tmp_p
         remote = [s["spec"] for s in d["specs"] if s["type"] == "remote"]
         assert remote == ["https://evil.example/x/-/is-number-6.0.0.tgz (package-lock: node_modules/is-number)"], args
     assert npm_native_parse(exe, "npm", ["run", "build"])["specs"] == []
+
+
+def test_a_registry_set_by_the_project_npmrc_is_not_trusted(monkeypatch, tmp_path):
+    import json
+
+    import pytest
+
+    from gatekeeper.guard.core import npm_native_parse
+
+    exe = _real_npm()
+    if exe is None:
+        pytest.skip("npm not installed")
+    monkeypatch.delenv("NPM_CONFIG_REGISTRY", raising=False)
+    monkeypatch.delenv("GK_TRUST_PROJECT_REGISTRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "package.json").write_text(json.dumps({"name": "t", "version": "1.0.0"}))
+    (tmp_path / ".npmrc").write_text("@evil:registry=https://evil.example/\n")
+    (tmp_path / "package-lock.json").write_text(json.dumps({"name": "t", "lockfileVersion": 3, "packages": {
+        "": {"name": "t"},
+        "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://evil.example/is-odd/-/is-odd-3.0.1.tgz"}}}))
+    remote = [s["spec"] for s in npm_native_parse(exe, "npm", ["ci"])["specs"] if s["type"] == "remote"]
+    assert remote == ["@evil:registry=https://evil.example/ (project .npmrc)",
+                      "https://evil.example/is-odd/-/is-odd-3.0.1.tgz (package-lock: node_modules/is-odd)"]
+    monkeypatch.setenv("GK_TRUST_PROJECT_REGISTRY", "1")  # trusting the scope still does not cover unscoped is-odd
+    remote = [s["spec"] for s in npm_native_parse(exe, "npm", ["uninstall", "x"])["specs"] if s["type"] == "remote"]
+    assert remote == ["https://evil.example/is-odd/-/is-odd-3.0.1.tgz (package-lock: node_modules/is-odd)"]
