@@ -272,6 +272,20 @@ def _watchdog() -> None:
     _notify("Gatekeeper: monitor stalled", f"No successful poll since {last[:16]} UTC. Last error: {err}")
 
 
+def _confirm_watchdog() -> None:
+    """The hourly confirmation once timed out silently for 12 hours (confirmations, recall and catches all
+    stood still). Alert when it has not finished for 3 hours; at most one push every 6 hours."""
+    last = (state.get("last_confirm") or {}).get("at")
+    now = datetime.now(timezone.utc)
+    if not last or now - datetime.fromisoformat(last) < timedelta(hours=3):
+        return
+    alerted = state.get("confirm_alert_at")
+    if alerted and now - datetime.fromisoformat(alerted) < timedelta(hours=6):
+        return
+    state["confirm_alert_at"] = now.isoformat()
+    _notify("Gatekeeper: confirmations stalled", f"The hourly confirm job has not finished since {last[:16]} UTC.")
+
+
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET], timeout=600, cpu=1.0, memory=2048)
 def poll_once() -> dict:
     """Manual single run for testing (same code path as the cron)."""
@@ -647,6 +661,7 @@ def spark() -> dict:
     """Second opinions from Muse Spark (Meta Model API) under hard spending caps, after the automatic
     reporting pass. Spark is disabled until state['spark_enabled'] is True."""
     _watchdog()
+    _confirm_watchdog()
     items = dict(queue.items())
     reported = _autoreport(items, budget_s=50)
     if not state.get("spark_enabled", False):
