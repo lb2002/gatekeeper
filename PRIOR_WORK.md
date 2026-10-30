@@ -9,3 +9,5 @@ Third-party work we build on (all used as published, with attribution):
 - [OpenSSF malicious-packages](https://github.com/ossf/malicious-packages) and [OSV](https://osv.dev) (Apache-2.0): confirmation of detections and report format.
 - [npm-high-impact](https://github.com/wooorm/npm-high-impact) (MIT): list of popular packages for typosquatting checks and benign data.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT): local inference for Muse Glimmer.
+- [Llama Guard 3 1B](https://huggingface.co/meta-llama/Llama-Guard-3-1B) (Llama 3.2 Community License): base model of the fine-tuned safety net (LoRA trained on ground truth only).
+- Meta Muse models (Muse Spark, Muse Spark Open, Muse Glimmer) through the Meta Model API, Fireworks, Baseten and the official GGUF; Muse Code as the AI agent in the demo.
