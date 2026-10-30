@@ -113,3 +113,10 @@ def test_strings_decode_what_they_find():
     import base64
     data = b"const c = '" + base64.b64encode(b"https://evil.example/collect") + b"'"
     assert "https://evil.example/collect" in inv.telling_strings(data, True)
+
+
+def test_cli_strips_terminal_escapes_from_package_text():
+    from gatekeeper.cli import plain
+
+    assert plain("lib/\x1b]0;owned\x07a.js") == "lib/?]0;owned?a.js"
+    assert plain("line one\nline two") == "line one\nline two"

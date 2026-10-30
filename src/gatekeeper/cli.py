@@ -1,6 +1,7 @@
 """`gk` command line interface."""
 
-from __future__ import annotations
+from __future__ import re
+import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -499,6 +500,14 @@ def packet(
     console.print(f"review packet: {folder / 'PACKET.md'}", markup=False)
 
 
+_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+
+
+def plain(text: object) -> str:
+    """Text a package author can influence (paths, model summaries), safe for a terminal: no escape sequences."""
+    return _CONTROL.sub("?", str(text))
+
+
 @app.command()
 def investigate(
     key: str = typer.Argument(..., help="name@version of a package on npm"),
@@ -516,18 +525,18 @@ def investigate(
         raise typer.Exit(1)
     for i, step in enumerate(res["steps"], start=1):
         target = ", ".join(step["terms"]) if step["action"] == "search" else step["path"]
-        console.print(f"[bold]{i}. {step['action']}[/bold] {escape(target)}  [dim]{escape(step['reason'])}[/dim]")
+        console.print(f"[bold]{i}. {escape(plain(step['action']))}[/bold] {escape(plain(target))}  [dim]{escape(plain(step['reason']))}[/dim]")
     v = res.get("verdict")
     if not v:
-        console.print(f"no verdict: {res['errors']}", markup=False)
+        console.print(plain(f"no verdict: {res['errors']}"), markup=False)
         raise typer.Exit(1)
     color = {"malicious": "red", "suspicious": "yellow"}.get(v["verdict"], "green")
-    console.print(f"[bold {color}]{v['verdict'].upper()}[/bold {color}] {v['confidence']:.2f}  {escape(v['category'])}")
-    console.print(v["summary"], markup=False)
+    console.print(f"[bold {color}]{v['verdict'].upper()}[/bold {color}] {v['confidence']:.2f}  {escape(plain(v['category']))}")
+    console.print(plain(v["summary"]), markup=False)
     for ev in v["evidence"]:
-        console.print(f"  {ev['excerpt_id']} lines {ev['line_start']}-{ev['line_end']}: {ev['why']}", markup=False)
+        console.print(plain(f"  {ev['excerpt_id']} lines {ev['line_start']}-{ev['line_end']}: {ev['why']}"), markup=False)
     for err in res["errors"]:
-        console.print(f"[yellow]not verified:[/yellow] {escape(err)}")
+        console.print(f"[yellow]not verified:[/yellow] {escape(plain(err))}")
     console.print(f"[dim]{len(res['steps'])} steps, ${res['cost_usd']:.4f}[/dim]")
 
 
