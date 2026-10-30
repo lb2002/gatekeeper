@@ -58,6 +58,8 @@ Decisions are cached per exact tarball integrity. The classifier ships as plain 
 
 A flag is never named before it is confirmed. Instead, within two minutes, the monitor publishes `sha256(salt || package, version, flag time)` to [gatekeeper-ledger](https://github.com/lb2002/gatekeeper-ledger), one new file per batch, each with an [OpenTimestamps](https://opentimestamps.org) proof anchored in Bitcoin. Once OSV, GitHub or npm independently confirm a detection, its salt is published and anyone can run `gk verify-flag <salt> <line>` and `ots verify` to check that we had it first.
 
+Worked example: `spectral-core@3.0.7` was flagged at 20:30:20 UTC on Oct 28. Its revealed line and salt (in `revealed/2026-10.jsonl`) hash to a digest in `commitments/2026-10-28/203107-67c23a.txt`; `ots upgrade` + `ots verify` on that batch's proof point to Bitcoin block 973597, mined at 20:42:17 UTC that evening (its merkle root `db5b3791…` matches any block explorer). The first public report (OSV import of MAL-2026-18377) came 18.5 hours later.
+
 ## Live results (Oct 27-30, 2026)
 
 In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **10 packages (27 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 23 hours.** Median time from npm publication to our flag: about 1 minute.
