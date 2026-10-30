@@ -11,8 +11,11 @@ const [npmRoot, tool, ...userArgs] = process.argv.slice(2)
 const req = (m) => require(path.join(npmRoot, 'node_modules', m))
 const Config = req('@npmcli/config')
 const { definitions, flatten, shorthands } = req('@npmcli/config/lib/definitions')
-const npa = req('npm-package-arg')
-const pacote = req('pacote')
+// loaded only when the command installs or runs something: most npm calls (run, test, ...) never need them
+const lazy = (m) => { let mod; return () => (mod = mod || req(m)) }
+const npaMod = lazy('npm-package-arg')
+const pacoteMod = lazy('pacote')
+const npa = (...a) => npaMod()(...a)
 const { deref } = require(path.join(npmRoot, 'lib', 'utils', 'cmd-list.js'))
 
 const INSTALL = new Set(['install', 'install-test', 'update'])
@@ -122,8 +125,8 @@ async function main () {
     }
     try {
       // the version npm would pick, with the user's registry, scoped registries, tag and before settings
-      const mani = await pacote.manifest(spec, { ...flat, fullMetadata: true })
-      const pack = await pacote.packument(mani.name, { ...flat, fullMetadata: true })
+      const mani = await pacoteMod().manifest(spec, { ...flat, fullMetadata: true })
+      const pack = await pacoteMod().packument(mani.name, { ...flat, fullMetadata: true })
       const deps = []
       for (const section of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
         for (const [k, v] of Object.entries(mani[section] || {})) deps.push([k, v])
