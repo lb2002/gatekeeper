@@ -433,3 +433,27 @@ def test_a_matching_sha1_does_not_excuse_a_wrong_sha512():
 def test_a_path_cannot_climb_out_of_the_package():
     url = "https://registry.npmjs.org/a/-/a-../../evil/-/evil-1.0.0.tgz"
     assert au.names_another_file(_p("a", "?", resolved=url))
+
+
+def _alias_bomb():
+    lines = ["lockfileVersion: '9.0'", "a0: &a0 [x, x, x, x, x, x, x, x, x, x]"]
+    lines += [f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 10) + "]" for i in range(1, 9)]
+    return "\n".join(lines + ["packages:", "  pkg@1.0.0:", "    resolution: {tarball: *a8}"]) + "\n"
+
+
+def test_yaml_aliases_are_refused_before_they_expand():
+    with pytest.raises(ValueError):
+        au.parse_text(_alias_bomb())
+
+
+def test_a_merge_key_bomb_is_refused_too():
+    lines = ["lockfileVersion: '9.0'", "a0: &a0 {x: 1}"]
+    lines += [f"a{i}: &a{i} {{<<: [" + ", ".join([f"*a{i - 1}"] * 10) + "]}" for i in range(1, 9)]
+    with pytest.raises(ValueError):
+        au.parse_text("\n".join(lines) + "\n")
+
+
+@pytest.mark.parametrize("text", ["lockfileVersion: 9\n" + "[" * 100000, "{" + '"a":{' * 100000], ids=["yaml", "json"])
+def test_deep_nesting_is_a_refusal_not_a_crash(text):
+    with pytest.raises(ValueError):
+        au.parse_text(text)

@@ -205,7 +205,7 @@ gk audit            # in your project; --offline sends nothing, --json for scrip
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: lb2002/gatekeeper@v2.1
+- uses: lb2002/gatekeeper@v2.3
 ```
 
 [This draft pull request](https://github.com/lb2002/gatekeeper/pull/1) shows it stopping a reported package on GitHub.
@@ -213,7 +213,7 @@ gk audit            # in your project; --offline sends nothing, --json for scrip
 The same check runs [on the demo page](https://lb2002--gatekeeper-api.us-east.modal.run/try) without installing anything. It flags an entry that points to another package's file on the registry, the usual way to poison a lockfile. It flags versions OSV lists as malware, npm's placeholders for removed packages, and locked packages that come from a server other than the registry (a poisoned lockfile); code hosts like GitHub are shown as a note. Tested on the lockfiles of Next.js, VS Code, React and Babel (9,000 packages): no false alarms. Exit code 1 means something needs a look, so it also works in CI:
 
 ```yaml
-- uses: lb2002/gatekeeper@v2.1
+- uses: lb2002/gatekeeper@v2.3
 ```
 
 ## Try the install guard

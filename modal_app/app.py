@@ -9,6 +9,7 @@ No `from __future__ import annotations` here: FastAPI must resolve the request m
 inside `api()` at runtime.
 """
 
+import hmac
 import json
 import os
 import re
@@ -1421,6 +1422,7 @@ DEMO_DAILY_CAP_USD = 2.0
 DEMO_TOTAL_CAP_USD = 8.0
 DEMO_RUNNING_FOR_S = 240  # a run older than this died: the function timeout is 200 s
 AUDIT_MAX_CHARS = 6_000_000
+AUDIT_MAX_BODY = 2 * AUDIT_MAX_CHARS  # JSON escapes every line break and quote
 AUDIT_MAX_PACKAGES = 6000
 AUDIT_RUNS_PER_CLIENT_HOUR = 30
 _DEMO_NAME = re.compile(r"(?:@[a-z0-9][a-z0-9._-]{0,100}/)?[a-z0-9][a-z0-9._-]{0,120}\Z")
@@ -1986,14 +1988,23 @@ def api():
     import os
 
     from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, JSONResponse
 
     web = FastAPI(title="gatekeeper")
     token = os.environ["GK_WORKER_TOKEN"]
 
     def auth(authorization: str = Header(default="")) -> None:
-        if authorization != f"Bearer {token}":
+        if not hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
             raise HTTPException(status_code=401, detail="unauthorized")
+
+    @web.middleware("http")
+    async def small_public_posts(request: Request, call_next):
+        """FastAPI reads a body before a route can look at it: without this, one large POST fills the container."""
+        if request.method == "POST" and request.url.path.startswith("/try/"):
+            length = request.headers.get("content-length", "")
+            if not length.isdigit() or int(length) > AUDIT_MAX_BODY:
+                return JSONResponse({"detail": "That is too large for this page. Use `gk audit` instead."}, status_code=413)
+        return await call_next(request)
 
     @web.get("/stats.json")
     def public_stats() -> dict:

@@ -186,9 +186,16 @@ def parse_yarn(text: str) -> list[Locked]:
 
 
 def parse_pnpm(text: str) -> list[Locked]:
-    """pnpm-lock.yaml. One file can hold several YAML documents (pnpm's own tooling comes first), each with its section."""
+    """pnpm-lock.yaml. One file can hold several YAML documents (pnpm's own tooling comes first), each with its section.
+    pnpm never writes aliases, and a few hundred bytes of them expand to gigabytes: anyone can post text here."""
     out = []
-    for doc in yaml.load_all(text, Loader=_YamlLoader):
+    try:
+        if any(isinstance(event, yaml.AliasEvent) for event in yaml.parse(text, Loader=_YamlLoader)):
+            raise ValueError("YAML aliases are not part of a pnpm lockfile")
+        docs = list(yaml.load_all(text, Loader=_YamlLoader))
+    except (yaml.YAMLError, RecursionError) as exc:
+        raise ValueError("not a readable pnpm lockfile") from exc
+    for doc in docs:
         packages = doc.get("packages") if isinstance(doc, dict) else None
         for key, entry in (packages or {}).items():
             key = str(key).lstrip("/").split("(")[0]
@@ -198,7 +205,7 @@ def parse_pnpm(text: str) -> list[Locked]:
             if not name:  # an entry nobody can name must not vanish from the report
                 out.append(Locked(key[:80], "?", "unreadable lockfile entry"))
                 continue
-            source = _source_of(key, *(str(v) for k, v in resolution.items() if k != "integrity"))
+            source = _source_of(key, *(v for k, v in resolution.items() if k != "integrity" and isinstance(v, str)))
             if not source and not _SEMVER_START.match(version):  # `pkg@github.com/x/y/abc`: the key names the source
                 source = version
             out.append(Locked(name, version, source, bool(resolution.get("integrity")), checksum=str(resolution.get("integrity") or "")))
@@ -214,7 +221,10 @@ def read_lockfile(path: Path) -> tuple[Path, list[Locked]]:
     candidates = [path] if path.is_file() else [path / n for n in LOCKFILES]
     for file in candidates:
         if file.exists():
-            return file, _parser_of(file)(file.read_text(encoding="utf-8"))
+            try:
+                return file, _parser_of(file)(file.read_text(encoding="utf-8"))
+            except RecursionError as exc:
+                raise ValueError("nested too deeply for a lockfile") from exc
     raise FileNotFoundError(f"no lockfile in {path}")
 
 
@@ -310,8 +320,11 @@ def review_added(added: list[Locked], ask: Callable[[dict], dict | None], client
 def parse_text(text: str) -> list[Locked]:
     """A lockfile whose name is unknown (pasted into the web page), told apart by its content."""
     head = text.lstrip()[:200]
-    if head.startswith("{"):
-        return parse_npm(text)
+    try:
+        if head.startswith("{"):
+            return parse_npm(text)
+    except RecursionError as exc:
+        raise ValueError("nested too deeply for a lockfile") from exc
     return parse_pnpm(text) if "lockfileVersion" in head else parse_yarn(text)
 
 
