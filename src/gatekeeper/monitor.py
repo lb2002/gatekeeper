@@ -17,8 +17,9 @@ import httpx
 from gatekeeper.evidence.bundle import build_bundle
 from gatekeeper.npm import packument
 from gatekeeper.npm.tarball import MAX_COMPRESSED_BYTES, ArchiveTooLarge, read_tarball
-from gatekeeper.triage.content import score_content
+from gatekeeper.triage.content import Hit, score_content
 from gatekeeper.triage.meta import score_metadata
+from gatekeeper.triage.phantom import unreadable_imports
 
 RECENT_WINDOW = timedelta(hours=6)  # versions considered "new" for a changed package
 NEW_PACKAGE_WINDOW = timedelta(hours=72)
@@ -143,6 +144,11 @@ def process_version(
         rec.error = f"archive: {type(exc).__name__}"[:300]
         return rec
     content = score_content(pkg)
+    # code that loads a package nobody can read: the payload stays out of every scanner's sight
+    hidden = unreadable_imports(client, pkg, info.name, popular)
+    for dep, (path, line, text) in hidden:
+        content.hits.append(Hit("private_dependency", path, line, text))
+        meta.reasons.append(f"+10 loads {dep}, which does not exist on the public registry")
     # an exfiltration endpoint a malicious package used before (see triage/campaign.py)
     shared = campaign_matches(pkg, campaign)
     if shared:
@@ -165,8 +171,8 @@ def process_version(
     text = bundle.render()
     young = info.package_created_at is not None and now - info.package_created_at <= timedelta(hours=NEW_PACKAGE_HOURS)
     new_with_hook = young and bool(info.install_scripts or info.gypfile)
-    rec.flagged = rules_flag or fast_flag or new_with_hook or bool(shared) or bool(known_account)
-    rec.priority += 10 * (bool(shared) + bool(known_account))
+    rec.flagged = rules_flag or fast_flag or new_with_hook or bool(shared) or bool(known_account) or bool(hidden)
+    rec.priority += 10 * (bool(shared) + bool(known_account) + bool(hidden))
     rec.bundle = text
     rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
     rec.excerpts = [e.ref() for e in bundle.excerpts]

@@ -1355,16 +1355,22 @@ def _investigate_package(name: str, version: str, meta_reasons: list[str] | None
     from gatekeeper.npm import feed, packument
     from gatekeeper.npm.tarball import read_tarball
     from gatekeeper.popular import load_popular
-    from gatekeeper.triage.content import score_content
+    from gatekeeper.triage.content import Hit, score_content
+    from gatekeeper.triage.phantom import unreadable_imports
 
     with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
         doc = packument.fetch_packument(client, name) or {}
         if version not in (doc.get("versions") or {}):
             return None
         pkg = read_tarball(download_capped(client, packument.version_info(doc, version).tarball_url))
-        references = references_for(client, doc, version, pkg, load_popular(DATA / "popular.txt"),
-                                    lambda url: read_tarball(download_capped(client, url)))
+        popular = load_popular(DATA / "popular.txt")
+        references = references_for(client, doc, version, pkg, popular, lambda url: read_tarball(download_capped(client, url)))
+        hidden = unreadable_imports(client, pkg, name, popular)
     content = score_content(pkg)
+    for dep, (path, line, text) in hidden:
+        content.hits.append(Hit("private_dependency", path, line, text))
+    meta_reasons = list(meta_reasons or []) + [f"+10 loads {dep}, which does not exist on the public registry" for dep, _ in hidden
+                                               if not any(dep in r for r in meta_reasons or [])]
     return investigate(pkg, build_bundle(name, version, pkg, content, meta_reasons=meta_reasons), content,
                        backend=backend, deep=deep, references=references)
 
@@ -1445,6 +1451,8 @@ def live_recall() -> dict:
     names = {name for v in vulns for name, _ in recall._targets(v)}
     seen: dict[str, list[dict]] = {}
     for path in sorted((DATA / "events").glob("*/*.jsonl")):
+        if path.name.startswith("sweep-"):  # old packages read after the fact: the monitor did not see them live
+            continue
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip() and any(n in line for n in names):  # cheap prefilter before parsing
                 r = json.loads(line)
