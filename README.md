@@ -114,7 +114,7 @@ uv run gk guard shell         # Windows: a PowerShell with the shims first on PA
 npm install <package>         # checked before anything is installed
 ```
 
-Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. Archives the static rules flag go to Muse Glimmer through a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja --port 8080`; `GK_LOCAL_URL` points elsewhere). Without it those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
+Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. Archives the static rules flag go to Muse Glimmer through a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja -fa on -c 8192 --port 8080 --reasoning-format deepseek --reasoning-budget 48 --alias muse-glimmer`, the [official GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF); `GK_LOCAL_URL` points elsewhere). Without it those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
 
 ## Run it
 
