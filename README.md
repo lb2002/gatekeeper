@@ -62,7 +62,7 @@ Worked example: `spectral-core@3.0.7` was flagged at 20:30:20 UTC on Oct 28. Its
 
 ## Live results (Oct 27-30, 2026)
 
-In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **10 packages (27 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 23 hours.** Median time from npm publication to our flag: about 1 minute.
+In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **10 packages (27 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 23 hours.** Median time from npm publication to our flag: about 1 minute; to the first Muse verdict with cited lines: about 9 minutes more.
 
 ![Flagged by Gatekeeper vs. first public report](docs/lead-times.svg)
 
