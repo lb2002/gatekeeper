@@ -2,19 +2,24 @@
 
 Open-source malware detection for npm, built on Meta's models. It never runs package code.
 
-- **Live monitor:** watches every new npm release (~250 changes a minute), triages it statically, and has Meta models judge the suspicious ones with cited evidence lines. Detections are reported to OpenSSF (by a human, or automatically when the static proof is unambiguous).
-- **Investigator:** a Muse agent that reads a package the way an analyst does: it picks files, searches, has strings decoded, compares with the previous version or the original of a fork, and must cite every line it relies on. [**Try it on any npm package**](https://lb2002--gatekeeper-api.us-east.modal.run/try), no account needed.
-- **Install guard:** wraps `npm install` / `npx` (for you or an AI coding agent) and blocks malicious packages before any install script runs, offline, with Muse Glimmer running on your own machine.
+| Use it | What it does | Try it |
+|---|---|---|
+| **Investigator** | A Muse agent reads a package like an analyst: picks files, searches, has strings decoded, compares with the previous version or the original of a fork. Code checks its claims. | [**Watch it work on any npm package**](https://lb2002--gatekeeper-api.us-east.modal.run/try), no account |
+| **Audit** | Am I already affected? Checks every version in your lockfile, and finds poisoned lockfiles. | [Paste a lockfile](https://lb2002--gatekeeper-api.us-east.modal.run/try), or `gk audit`, or the [GitHub Action](#check-your-project) |
+| **Install guard** | Sits in front of `npm install` and `npx`, for you or your AI coding agent, and stops malware before any install script runs. | [Three commands](#try-the-install-guard), under a minute |
+| **Live monitor** | Reads every new npm release (~250 changes a minute), has Meta models judge the suspicious ones with cited lines, and reports to OpenSSF. | [Live numbers](https://lb2002--gatekeeper-api.us-east.modal.run/) |
+
+It never runs package code.
 
 **So far (Oct 27-30):** 12 malicious packages flagged that were later confirmed by OSV / GitHub / npm, **every one before the public report, by a median of 21 hours**, about a minute after publication. Of the malware published while the monitor was running, it flagged 58% ([what it missed](#live-results-oct-27-30-2026)). Every flag time is in a public, timestamped ledger.
 
 **The find we are proudest of:** [a campaign that ships no malware at all](#a-package-with-no-malware-in-it). Every scanner passes its packages, because the payload sits in a private dependency nobody can read. Gatekeeper now flags that gap, and following it turned up [8 unreported packages and 5 new private scopes](https://github.com/ossf/malicious-packages/pull/1694), 4 of them published the same day.
 
-**Live numbers:** https://lb2002--gatekeeper-api.us-east.modal.run/ (updated every 2 minutes; detections are only named once independently confirmed). **Public ledger:** https://github.com/lb2002/gatekeeper-ledger
+The live page updates every 2 minutes and names a detection only once it is independently confirmed. **Public ledger:** https://github.com/lb2002/gatekeeper-ledger
 
 Built for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 2026). See [PRIOR_WORK.md](PRIOR_WORK.md) for what we reuse.
 
-**Contents:** [How it works](#how-it-works) · [Investigator](#the-investigator) · [Install guard](#install-guard-decisions) · [Proving when we saw something](#proving-when-we-saw-something) · [Live results](#live-results-oct-27-30-2026) · [Evaluation](#evaluation) · [Try the guard](#try-the-install-guard) · [Run it](#run-it)
+**Contents:** [How it works](#how-it-works) · [Investigator](#the-investigator) · [Check your project](#check-your-project) · [Install guard](#install-guard-decisions) · [Proving when we saw something](#proving-when-we-saw-something) · [Live results](#live-results-oct-27-30-2026) · [Evaluation](#evaluation) · [Try the guard](#try-the-install-guard) · [Run it](#run-it)
 
 ## How it works
 
