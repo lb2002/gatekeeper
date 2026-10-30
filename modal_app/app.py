@@ -1556,7 +1556,9 @@ def live_recall() -> dict:
     state["judged_bad"] = sorted(bad)
     detections = {k: v for k, v in flags.items() if k in bad}
     npm_times = recall.fetch_times(sorted(names))  # when the malicious versions really came out
-    outcomes = [o for v in vulns for o in recall.classify(v, seen, detections, start, queued=flags, npm_times=npm_times)]
+    read_later = {k for k, it in queue.items() if it.get("found_by")}
+    outcomes = [o for v in vulns for o in recall.classify(v, seen, detections, start, queued=flags, npm_times=npm_times,
+                                                          read_later=read_later)]
     result = {"at": datetime.now(timezone.utc).isoformat(), "since": start.isoformat(), **recall.summarize(outcomes),
               "outcomes": [o.as_dict() for o in sorted(outcomes, key=lambda o: o.first_public or "")]}
     state["recall"] = result

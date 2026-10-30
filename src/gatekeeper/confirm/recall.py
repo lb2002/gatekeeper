@@ -110,12 +110,14 @@ def _seen_detail(r: dict) -> str:
 
 
 def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], start: datetime,
-             queued: dict[str, str] | None = None, npm_times: dict[str, dict] | None = None) -> list[Outcome]:
+             queued: dict[str, str] | None = None, npm_times: dict[str, dict] | None = None,
+             read_later: set[str] | None = None) -> list[Outcome]:
     """One outcome per affected package.
     seen: name -> event rows {version, published_at, seen_at, scanned, flagged, content_score, meta_score, error}
     flags: "name@version" -> flagged_at, detections only (a model said malicious or suspicious).
     queued: every key that reached the models, to tell "judged benign" apart from "never queued".
     npm_times: name -> npm `time`, to date versions the monitor never saw.
+    read_later: keys the sweep read after the fact; if that was after the public report, it detected nothing.
     Versions npm itself published (`0.0.0-stage`, `0.0.1-security`, written when it takes a package down)
     are ignored: seeing only those means the malware itself came out before we looked."""
     queued = queued or {}
@@ -127,7 +129,8 @@ def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], sta
                 and not is_placeholder_version(r["version"])]
         keys = [f"{name}@{v}" for v in versions] if versions else [k for k in flags if k.rpartition("@")[0] == name]
         keys = [k for k in keys if not is_placeholder_version(k.rpartition("@")[2])]
-        hit = sorted((flags[k], k) for k in keys if k in flags)
+        hit = sorted((flags[k], k) for k in keys if k in flags
+                     and not (k in (read_later or ()) and (flag_lead_minutes(flags[k], public) or 0) <= 0))
         o = Outcome(vuln["id"], name, "", versions, public)
         if rows:
             o.published_at = min((r.get("published_at") for r in rows if r.get("published_at")), default=None)

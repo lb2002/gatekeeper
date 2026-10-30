@@ -130,3 +130,18 @@ def test_npm_placeholders_are_never_scanned():
                                          ("1.0.0-security", None, False), ("1.0.0", "someone", False)):
         info = VersionInfo(name="x", version=version, published_at=None, package_created_at=None, publisher=publisher)
         assert info.is_npm_placeholder is expected
+
+
+def test_a_sweep_that_read_a_package_after_its_report_detected_nothing():
+    from datetime import datetime, timezone
+
+    from gatekeeper.confirm.recall import classify
+
+    vuln = {"id": "MAL-1", "published": "2026-10-29T13:00:00Z", "affected": [{"package": {"ecosystem": "npm", "name": "p"}, "versions": ["1.0.0"]}]}
+    seen = {"p": [{"version": "1.0.0", "published_at": "2026-10-28T10:00:00+00:00", "scanned": True, "meta_score": 0, "content_score": 0}]}
+    start = datetime(2026, 10, 27, tzinfo=timezone.utc)
+    late = {"p@1.0.0": "2026-10-30T11:00:00+00:00"}
+    assert classify(vuln, seen, late, start, read_later={"p@1.0.0"})[0].status == "missed"
+    early = {"p@1.0.0": "2026-10-28T11:00:00+00:00"}
+    assert classify(vuln, seen, early, start, read_later={"p@1.0.0"})[0].status == "flagged"
+    assert classify(vuln, seen, late, start)[0].status == "flagged"  # flagged late by the live monitor still counts
