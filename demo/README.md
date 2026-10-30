@@ -10,6 +10,8 @@ Everything here is harmless and local:
 
 ## Run
 
+`.\demo\prepare-recording.ps1 -Start` does steps 1 and 2 and starts Muse Glimmer; without `-Start` it only shows what is ready. By hand:
+
 ```powershell
 # 1. fake secret + attacker listener
 New-Item -ItemType Directory -Force $HOME\gk-demo\.aws | Out-Null

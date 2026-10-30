@@ -1,5 +1,7 @@
 # Gatekeeper
 
+[![CI](https://github.com/lb2002/gatekeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/lb2002/gatekeeper/actions/workflows/ci.yml)
+
 Open-source malware detection for npm, built on Meta's models. It never runs package code.
 
 | Use it | What it does | Try it |

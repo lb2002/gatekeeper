@@ -23,7 +23,7 @@ button:disabled{opacity:.5;cursor:default}
 pre{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;overflow-x:auto;padding:10px;background:var(--bg);border:1px solid var(--line);border-radius:6px;margin:8px 0 0}
 details{margin-top:10px}summary{cursor:pointer;font-size:14px}
 #error,#auditerror{color:var(--accent);margin-top:12px}
-#audit{margin-top:36px;border-top:1px solid var(--line);padding-top:6px}h2{font-size:19px;margin:14px 0 4px}
+#audit,#local{margin-top:36px;border-top:1px solid var(--line);padding-top:6px}h2{font-size:19px;margin:14px 0 4px}
 textarea{display:block;width:100%;box-sizing:border-box;font:13px ui-monospace,Menlo,Consolas,monospace;padding:10px;margin:10px 0;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit}
 #auditfindings{padding-left:18px;font-size:14px}.bad{color:var(--accent)}.note{color:var(--warn)}.clean{color:var(--ok)}
 footer{color:var(--muted);font-size:13px;margin-top:28px}
@@ -47,6 +47,12 @@ locked version against reported malware and look for packages from outside the r
 <textarea id=lock rows=6 placeholder="Paste a lockfile" spellcheck=false aria-label="Lockfile text"></textarea>
 <button id=check type=button>Check my lockfile</button>
 <div id=auditerror role=alert></div><p id=auditsummary></p><ul id=auditfindings></ul></section>
+<section id=local><h2>On your own machine</h2>
+<p class=sub>Stop malware before <code>npm install</code> runs it, for you or your AI coding agent. No account and no GPU, under a minute:</p>
+<pre>uv tool install git+https://github.com/lb2002/gatekeeper
+gk guard setup
+gk guard shell</pre>
+<p class=sub>In your project, <code>gk audit</code> does the lockfile check above. In CI: <code>uses: lb2002/gatekeeper@v1</code>.</p></section>
 <footer>A model's opinion on the package you asked about, not a finding: confirmed detections are on the
 <a href="/">live page</a>. <a href="https://github.com/lb2002/gatekeeper">Source</a>. Limited to a small number of runs a day.</footer>
 <script>
