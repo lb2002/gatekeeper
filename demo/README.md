@@ -32,8 +32,9 @@ npm install axois-retry   # -> BLOCKED by Gatekeeper, the listener receives noth
 - Verdicts are cached per tarball. To show the model reading the package live (not an instant "cached:" block),
   delete `%USERPROFILE%\.gatekeepererdicts.json` before the take.
 - The demo package's publish date is in the past, so the 24 h waiting period does not apply to it: the block
-  you see comes from the model reading the code. To show the waiting period, install any brand-new real
-  version, e.g. a `@next` tag of a popular package published today.
+  you see comes from the model reading the code. To show the waiting period, request a brand-new real version
+  exactly (`npm install typescript@$(npm view typescript@next version)`): HELD with an older version suggested.
+  A tag or range (`typescript@next`) instead resolves to the newest version older than 24 h, and that one is checked.
 
 ## Muse Code (agent) take
 
