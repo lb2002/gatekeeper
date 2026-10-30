@@ -73,3 +73,18 @@ def test_catches_need_a_muse_verdict_and_skip_npm_placeholders(app):
     })
     app._record_catches()
     assert set(app.state["catches"]) == {"a@1.0.0"}
+
+
+def test_demo_accepts_only_package_specs(app):
+    assert app._demo_spec("lodash") == ("lodash", None)
+    assert app._demo_spec("lodash@4.17.21") == ("lodash", "4.17.21")
+    assert app._demo_spec("@scope/name") == ("@scope/name", None)
+    assert app._demo_spec("@scope/name@1.0.0-beta.1") == ("@scope/name", "1.0.0-beta.1")
+    for bad in ("", "../etc/passwd", "a b", "http://x/y", "<script>", "@scope", "a/b/c", "name@"):
+        assert app._demo_spec(bad) is None, bad
+
+
+def test_demo_page_never_builds_html_from_results():
+    from gatekeeper.report.try_page import TRY_PAGE
+
+    assert "innerHTML" not in TRY_PAGE and "insertAdjacentHTML" not in TRY_PAGE and "document.write" not in TRY_PAGE

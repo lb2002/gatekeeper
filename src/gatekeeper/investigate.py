@@ -19,6 +19,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 import httpx
 
@@ -358,7 +359,7 @@ def _data_block(body: str, nonce: str) -> str:
 def investigate(
     pkg: PackageFiles, bundle: Bundle, content: ContentScore, backend: str = "spark-open-baseten",
     api_key: str | None = None, max_steps: int = MAX_STEPS, timeout: float = 90, deep: bool = False,
-    references: list[Reference] | None = None,
+    references: list[Reference] | None = None, on_step: Callable[[dict], None] | None = None,
 ) -> Investigation:
     """Let the model look around the archive, then ask for a verdict that cites only what it was shown."""
     inv = Investigation(backend=backend)
@@ -401,6 +402,8 @@ def investigate(
             text, size = result, len(result)
         inv.steps.append({"action": step["next"], "reason": step.get("reason", ""), "path": path, "first_row": first,
                           "last_row": last, "terms": step.get("terms") or [], "result_chars": size})
+        if on_step:
+            on_step(inv.steps[-1])
         msgs += [{"role": "assistant", "content": raw},
                  {"role": "user", "content": _data_block(text, nonce) + "\nNext step?"}]
     msgs.append({"role": "user", "content": "Give your final verdict now. Cite excerpt IDs (E.. or T..) and their line "

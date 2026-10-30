@@ -11,6 +11,7 @@ inside `api()` at runtime.
 
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,7 @@ NTFY_SECRET = modal.Secret.from_name("ntfy", required_keys=["NTFY_TOPIC"])  # re
 QUEUE_FIELDS = ("name", "version", "published_at", "seen_at", "meta_score", "meta_reasons", "content_score", "rules", "priority", "bundle", "bundle_sha256", "excerpts", "fast_risk", "lg_risk", "low_priority", "publisher", "found_by")
 
 DATA = Path("/data")
+demo = modal.Dict.from_name("gatekeeper-demo", create_if_missing=True)  # public /try runs: progress and results
 # Time budget of one poll run (the function is killed at 115 s): every network step has a short timeout
 # and a latest start time, and whatever does not fit is picked up by the next run two minutes later.
 FEED_BUDGET_S = 25  # reading the change feed
@@ -1346,7 +1348,7 @@ def inspect_package(name: str, version: str, show_up_to: int = 20_000) -> dict:
     }
 
 
-def _investigate_package(name: str, version: str, meta_reasons: list[str] | None, deep: bool, backend: str):
+def _investigate_package(name: str, version: str, meta_reasons: list[str] | None, deep: bool, backend: str, on_step=None):
     """Fetch the archive into memory and run the investigator on it. None if the version is gone from npm."""
     from gatekeeper.evidence.bundle import build_bundle
     from gatekeeper.evidence.compare import references_for
@@ -1372,7 +1374,7 @@ def _investigate_package(name: str, version: str, meta_reasons: list[str] | None
     meta_reasons = list(meta_reasons or []) + [f"+10 loads {dep}, which does not exist on the public registry" for dep, _ in hidden
                                                if not any(dep in r for r in meta_reasons or [])]
     return investigate(pkg, build_bundle(name, version, pkg, content, meta_reasons=meta_reasons), content,
-                       backend=backend, deep=deep, references=references)
+                       backend=backend, deep=deep, references=references, on_step=on_step)
 
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[BASETEN_SECRET, FIREWORKS_SECRET], timeout=280, cpu=0.25, memory=1024)
@@ -1383,6 +1385,56 @@ def investigate_package(name: str, version: str, deep: bool = False, backend: st
         return {"error": "version not on the registry"}
     return {"verdict": res.verdict.model_dump(mode="json") if res.verdict else None, "errors": res.errors, "steps": res.steps,
             "excerpts": [e.render()[:4000] for e in res.excerpts], "cost_usd": round(res.cost_usd, 4)}
+
+
+# Public demo: anyone can point the investigator at a package, so it has its own hard limits
+DEMO_RUNS_PER_DAY = 120  # ~$2 a day at most, from the investigator's budget
+DEMO_RUNS_PER_CLIENT_HOUR = 8
+_DEMO_NAME = re.compile(r"(?:@[a-z0-9][a-z0-9._-]{0,100}/)?[a-z0-9][a-z0-9._-]{0,120}\Z")
+_DEMO_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,60}\Z")
+
+
+def _demo_spec(text: str) -> tuple[str, str | None] | None:
+    """(name, version) from `name` or `name@version`, or None if it is neither."""
+    at = text.rfind("@")
+    name, version = (text[:at], text[at + 1:]) if at > 0 else (text, None)
+    if not _DEMO_NAME.match(name) or (version is not None and not _DEMO_VERSION.match(version)):
+        return None
+    return name, version
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[BASETEN_SECRET], timeout=200, cpu=0.25, memory=1024)
+def demo_investigate(key: str, name: str, version: str) -> None:
+    """One public run: the steps appear on the page as the model takes them."""
+    from gatekeeper.investigate import BACKENDS
+
+    now = datetime.now(timezone.utc)
+    steps: list[dict] = []
+    model = BACKENDS[INVESTIGATOR_BACKEND][2]
+
+    def on_step(step: dict) -> None:
+        steps.append(step)
+        demo[key] = {"status": "running", "steps": steps}
+
+    demo[key] = {"status": "running", "steps": steps}
+    try:
+        res = _investigate_package(name, version, None, True, INVESTIGATOR_BACKEND, on_step)
+    except Exception as exc:
+        reason = "That package is too large to read here." if type(exc).__name__ == "ArchiveTooLarge" else "The run failed. Try again in a moment."
+        print(f"demo error on {key}: {type(exc).__name__}: {exc}"[:300])
+        demo[key] = {"status": "done", "error": reason, "steps": steps}
+        return
+    if res is None:
+        demo[key] = {"status": "done", "error": "That version is not on npm.", "steps": steps}
+        return
+    day = f"{now:%Y-%m-%d}"
+    spend = state.get("investigator_spend", {"total": 0.0, "days": {}})
+    spend["total"] += res.cost_usd
+    spend["days"][day] = spend["days"].get(day, 0.0) + res.cost_usd
+    state["investigator_spend"] = spend
+    demo[key] = {"status": "done", "steps": steps, "verdict": res.verdict.model_dump(mode="json") if res.verdict else None,
+                 "errors": res.errors, "excerpts": [e.render()[:3000] for e in res.excerpts], "cost_usd": res.cost_usd, "model": model,
+                 "at": now.isoformat()}
 
 
 @app.function(image=image, timeout=60)
@@ -1737,6 +1789,7 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 28px;font-size:14px}} th
 th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(--accent)}} code{{font-size:13px}}
 </style></head><body>
 <h1>Gatekeeper: live npm malware monitor</h1>
+<p><a href="/try"><b>Try it: watch a Muse agent read any npm package</b></a></p>
 <p class="sub">Every new npm release, checked statically by rules, a fast classifier and Meta models (Muse Spark, Muse Glimmer). Running since {escape(st['since'] or '-')}; last run {escape((st['updated_at'] or '-')[:16])} UTC.</p>
 <div class="kpis">
 <div class="kpi"><b>{t['versions']:,}</b><span>versions checked</span></div>
@@ -1787,7 +1840,7 @@ def api():
     """Worker API: laptop workers lease flagged bundles and post verdicts back (bearer token)."""
     import os
 
-    from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
     from fastapi.responses import HTMLResponse
 
     web = FastAPI(title="gatekeeper")
@@ -1846,6 +1899,63 @@ def api():
     @web.get("/", response_class=HTMLResponse)
     def public_page() -> str:
         return _public_html(_public_stats())
+
+    demo_clients: dict = {}
+    demo_lock = threading.Lock()
+
+    @web.get("/try", response_class=HTMLResponse)
+    def try_page():
+        from gatekeeper.report.try_page import TRY_PAGE
+
+        return HTMLResponse(TRY_PAGE, headers={
+            "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; base-uri 'none'"})
+
+    @web.post("/try/start")
+    def try_start(request: Request, body: dict = Body(...)) -> dict:
+        """Public, no auth, so bounded twice: a daily run limit and an hourly limit per client."""
+        import hashlib
+
+        from gatekeeper.npm import feed, packument
+
+        text = str(body.get("package") or "").strip().lower()[:230]
+        spec = _demo_spec(text)
+        if spec is None:
+            raise HTTPException(status_code=400, detail="That is not an npm package name.")
+        name, version = spec
+        with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
+            doc = packument.fetch_packument(client, name) or {}
+        versions = doc.get("versions") or {}
+        version = version or (doc.get("dist-tags") or {}).get("latest")
+        if not version or version not in versions:
+            raise HTTPException(status_code=404, detail="That package or version is not on npm.")
+        key = f"{name}@{version}"
+        done = demo.get(key, None)
+        if done is not None and (done.get("status") == "done" and not done.get("error") or done.get("status") == "running"):
+            return {"key": key}
+        client_id = hashlib.sha256((request.headers.get("x-forwarded-for", "?").split(",")[0]).encode()).hexdigest()[:16]
+        hour = int(time.time() // 3600)
+        with demo_lock:
+            for old in [k for k in demo_clients if k[1] != hour]:
+                demo_clients.pop(old)
+            if demo_clients.get((client_id, hour), 0) >= DEMO_RUNS_PER_CLIENT_HOUR:
+                raise HTTPException(status_code=429, detail="That is enough for this hour. Please come back later.")
+            day = f"{datetime.now(timezone.utc):%Y-%m-%d}"
+            runs = state.get("demo_runs", {})
+            if runs.get(day, 0) >= DEMO_RUNS_PER_DAY:
+                raise HTTPException(status_code=429, detail="Today's runs are used up. Please come back tomorrow.")
+            demo_clients[(client_id, hour)] = demo_clients.get((client_id, hour), 0) + 1
+            runs[day] = runs.get(day, 0) + 1
+            state["demo_runs"] = runs
+        demo[key] = {"status": "running", "steps": []}
+        demo_investigate.spawn(key, name, version)
+        return {"key": key}
+
+    @web.get("/try/result")
+    def try_result(key: str = "") -> dict:
+        if len(key) > 300:
+            raise HTTPException(status_code=400, detail="bad key")
+        return demo.get(key, None) or {"status": "done", "error": "Nothing is running for that package."}
 
     @web.get("/status", dependencies=[Depends(auth)])
     def status() -> dict:
