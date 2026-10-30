@@ -1075,6 +1075,8 @@ def _investigator_candidates(items: dict, now: datetime) -> list[str]:
         if now - datetime.fromisoformat(it["seen_at"]) > INVESTIGATOR_MAX_AGE:
             continue
         accused = any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in NOTIFY_BACKENDS)
+        # the one-shot models never saw the code behind a URL: only the investigator reads it
+        accused = accused or "url_dependency" in (it.get("rules") or [])
         todo.append((accused, it.get("fast_risk") or 0.0, it.get("priority") or 0, key))
     return [t[-1] for t in sorted(todo, reverse=True)]
 
@@ -1373,7 +1375,7 @@ def _investigate_package(name: str, version: str, meta_reasons: list[str] | None
     from gatekeeper.npm.tarball import read_tarball
     from gatekeeper.popular import load_popular
     from gatekeeper.triage.content import Hit, score_content
-    from gatekeeper.triage.phantom import unreadable_imports, with_url_dependencies
+    from gatekeeper.triage.phantom import unreadable_imports, url_dependencies, with_url_dependencies
 
     with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
         doc = packument.fetch_packument(client, name) or {}
@@ -1384,13 +1386,15 @@ def _investigate_package(name: str, version: str, meta_reasons: list[str] | None
         references = references_for(client, doc, version, pkg, popular, lambda url: read_tarball(download_capped(client, url)))
         hidden = unreadable_imports(client, pkg, name, popular)
         info = packument.version_info(doc, version)
-        fetched = with_url_dependencies(pkg, client, info.dependencies, lambda url: read_tarball(download_capped(client, url)))
+        fetched = with_url_dependencies(pkg, client, info.dependencies, lambda url: read_tarball(download_capped(client, url, public_only=True)))
+        unread = [dep for dep, _ in url_dependencies(info.dependencies) if dep not in fetched]
     content = score_content(pkg)
     for dep, (path, line, text) in hidden:
         content.hits.append(Hit("private_dependency", path, line, text))
     meta_reasons = list(meta_reasons or []) + [f"+10 loads {dep}, which does not exist on the public registry" for dep, _ in hidden
                                                if not any(dep in r for r in meta_reasons or [])]
     meta_reasons += [f"its dependency {dep} comes from a URL: its archive is in from-url/{dep}/" for dep in fetched]
+    meta_reasons += [f"its dependency {dep} comes from a URL that could not be read: nobody can check that code" for dep in unread]
     return investigate(pkg, build_bundle(name, version, pkg, content, meta_reasons=meta_reasons), content,
                        backend=backend, deep=deep, references=references, on_step=on_step)
 

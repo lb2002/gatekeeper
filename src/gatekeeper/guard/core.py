@@ -21,9 +21,10 @@ from pathlib import Path
 import httpx
 
 from gatekeeper.evidence.bundle import build_bundle
+from gatekeeper.monitor import download_capped
 from gatekeeper.npm.tarball import read_tarball
 from gatekeeper.triage.content import score_content
-from gatekeeper.triage.phantom import unreadable_imports
+from gatekeeper.triage.phantom import unreadable_imports, url_dependencies, with_url_dependencies
 
 RULES_ALLOW_BELOW = 4  # content score under this: allow without asking the model
 BLOCK_CONFIDENCE = 0.6
@@ -287,6 +288,18 @@ def private_dependencies(meta: dict, pkg) -> list[str]:
         return [name for name, _ in unreadable_imports(client, pkg, meta.get("name", ""), set(), deps)]
 
 
+def url_code(meta: dict, pkg) -> tuple[list[str], list[str]]:
+    """Put the code behind URL dependencies into `pkg`, so it gets read like the package's own. Returns the names read
+    and the names nobody could read. Only for packages from the public registry, as above."""
+    if not OSV_ONLINE or urlsplit(meta.get("tarball") or "").hostname != "registry.npmjs.org":
+        return [], []
+    deps = meta.get("dependencies") or []
+    deps = list(deps.items()) if isinstance(deps, dict) else [tuple(d) for d in deps]
+    with httpx.Client(timeout=10) as client:
+        read = with_url_dependencies(pkg, client, deps, lambda url: read_tarball(download_capped(client, url, public_only=True)))
+    return read, [name for name, _ in url_dependencies(deps) if name not in read]
+
+
 def check_spec(npm_cmd: list[str], spec: str, classify=None, fast_model=None, use_cache: bool = True,
                min_age_hours: float | None = None, meta: dict | None = None) -> Decision:
     from gatekeeper.confirm.malindex import KNOWN_MALICIOUS, TAKEN_DOWN, bad_dependencies
@@ -356,10 +369,11 @@ def _analyse(meta: dict, spec: str, started: float, classify, fast_model, use_ca
         return Decision(spec, False, "tarball integrity mismatch", meta["name"], meta["version"])
     pkg = read_tarball(data)
     hidden = private_dependencies(meta, pkg)
-    if hidden:
-        return Decision(spec, False, f"loads {hidden[0]}, which nobody can read on the public registry: the code that "
-                        "would run on this machine cannot be checked by anyone", meta["name"], meta["version"],
-                        kind="dependency", seconds=time.monotonic() - started)
+    remote, unread = url_code(meta, pkg)
+    if hidden or unread:
+        where = f"loads {hidden[0]}, which nobody can read on the public registry" if hidden else f"installs {unread[0]} from a URL that cannot be read"
+        return Decision(spec, False, f"{where}: the code that would run on this machine cannot be checked by anyone",
+                        meta["name"], meta["version"], kind="dependency", seconds=time.monotonic() - started)
     content = score_content(pkg)
     rules = sorted(content.rules)
     bundle = build_bundle(meta["name"], meta["version"], pkg, content)
@@ -367,7 +381,7 @@ def _analyse(meta: dict, spec: str, started: float, classify, fast_model, use_ca
     # no obvious pattern, the classifier catches much of that in milliseconds.
     fast_risk = fast_model.risk(bundle.render(), meta["name"], meta["version"], rules) if fast_model else None
     fast_clean = fast_risk is not None and fast_risk < fast_model.threshold
-    if content.score < RULES_ALLOW_BELOW and (fast_clean or fast_model is None):
+    if content.score < RULES_ALLOW_BELOW and (fast_clean or fast_model is None) and not remote:
         why = f"static rules clean (score {content.score})"
         why += f", classifier clean (risk {fast_risk:.2f})" if fast_risk is not None else ", no local classifier installed"
         return Decision(spec, True, why, meta["name"], meta["version"], rules=rules, seconds=time.monotonic() - started)

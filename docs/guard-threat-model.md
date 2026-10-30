@@ -47,3 +47,7 @@ Verdicts are cached per tarball integrity. `--gk-allow` skips every check for on
 - **The local classifier is public.** It has to be, to run on your machine, so an attacker can test malware against it offline. A package that passes both it and the rules is allowed without a model verdict; the OSV list, the 24 h waiting period and the monitor still apply.
 - **The model can be wrong.** On the time-split test set the Muse models block 55-57% of malware (Muse Glimmer with no
   false blocks out of 590 benign packages); the OSV list and the waiting period exist because of the rest.
+
+## Code behind a URL dependency
+
+A package can name a URL instead of a version. The guard and the hosted investigator fetch that archive and read it as text; nothing from it is run. The URL is chosen by the package author, so the fetch accepts only public addresses, follows no redirect it has not checked, verifies the address it actually reached, and gives up after 20 seconds or 5 MB. On the guard this means your machine contacts the URL, which `npm install` would do anyway. A URL dependency that cannot be read is blocked, not waved through.

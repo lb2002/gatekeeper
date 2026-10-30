@@ -276,3 +276,23 @@ def test_a_failing_download_costs_only_that_dependency(monkeypatch):
         raise OSError("gone")
 
     assert phantom.with_url_dependencies(pkg_of({}), client, [("a", "https://evil.example/a.tgz")], boom) == []
+
+
+@pytest.mark.parametrize("spec", ["HTTPS://evil.example/a.tgz", " https://evil.example/a.tgz", "Http://evil.example/a.tgz",
+                                  "https://cdn.sheetjs.com.evil.example/a.tgz", "http://cdn.sheetjs.com/a.tgz", "https://[bad/a.tgz"])
+def test_url_specs_are_read_the_way_npm_reads_them(spec):
+    assert phantom.url_dependencies([("a", spec)]) == [("a", spec.strip())]
+
+
+def test_dead_links_do_not_use_up_the_slots(monkeypatch):
+    _public_dns(monkeypatch, "evil.example")
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    archive = pkg_of({"t.js": b"steal()"})
+
+    def fetch(url):
+        if "dead" in url:
+            raise OSError("gone")
+        return archive
+
+    deps = [(f"d{i}", f"https://evil.example/dead{i}.tgz") for i in range(3)] + [("real", "https://evil.example/real.tgz")]
+    assert phantom.with_url_dependencies(pkg_of({}), client, deps, fetch) == ["real"]

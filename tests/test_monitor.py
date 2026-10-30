@@ -94,3 +94,53 @@ def test_any_new_version_from_a_known_bad_account_reaches_a_model(monkeypatch):
     rec = monitor.process_version(None, info, set(), now, publishers={"sleeper": "random-transactions-sdk@1.0.1"})
     assert rec.scanned and rec.flagged and "known_bad_publisher" in rec.rules and rec.publisher == "sleeper"
     assert any("random-transactions-sdk@1.0.1" in r for r in rec.meta_reasons)
+
+
+class _Stream:
+    def __init__(self, peer):
+        self.peer = peer
+
+    def get_extra_info(self, key):
+        return self.peer if key == "server_addr" else None
+
+
+def _author_url_client(status=200, peer=("93.184.216.34", 443), body=b"ok", headers=None):
+    import httpx
+
+    def answer(request):
+        return httpx.Response(status, content=body, headers=headers, extensions={"network_stream": _Stream(peer)})
+
+    return httpx.Client(transport=httpx.MockTransport(answer), follow_redirects=True)
+
+
+def test_a_url_chosen_by_an_author_may_not_redirect():
+    import httpx
+    import pytest
+
+    from gatekeeper import monitor
+
+    client = _author_url_client(302, headers={"location": "http://169.254.169.254/x"})
+    with pytest.raises(httpx.HTTPStatusError):
+        monitor.download_capped(client, "https://evil.example/a.tgz", public_only=True)
+
+
+def test_a_url_that_turns_out_internal_is_not_read():
+    import pytest
+
+    from gatekeeper import monitor
+
+    for peer in (("169.254.169.254", 80), ("10.0.0.1", 443), None):
+        with pytest.raises(OSError):
+            monitor.download_capped(_author_url_client(peer=peer), "https://evil.example/a.tgz", public_only=True)
+    assert monitor.download_capped(_author_url_client(), "https://evil.example/a.tgz", public_only=True) == b"ok"
+
+
+def test_a_slow_url_is_given_up(monkeypatch):
+    import pytest
+
+    from gatekeeper import monitor
+
+    ticks = iter([0, 100])
+    monkeypatch.setattr(monitor.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(OSError):
+        monitor.download_capped(_author_url_client(), "https://evil.example/a.tgz", public_only=True)

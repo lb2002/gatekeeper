@@ -26,8 +26,9 @@ _ALIAS = re.compile(r"npm:(@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)", re.I)
 MAX_LOOKUPS = 30  # registry requests per version; names already known cost nothing
 MAX_LOOKUP_FAILURES = 3
 MAX_NAMES = 400
-COMMON_URL_DEPENDENCIES = ("https://cdn.sheetjs.com/",)
+COMMON_URL_DEPENDENCIES = {"cdn.sheetjs.com"}
 MAX_URL_DEPENDENCIES = 2
+MAX_URL_ATTEMPTS = 6
 MAX_REDIRECTS = 4
 YOUNG_DEPENDENCY = timedelta(days=7)
 MAX_ADDED_LOOKUPS = 12  # registry requests per version; names already known cost nothing
@@ -97,26 +98,45 @@ def _created(client, name: str) -> datetime | None:
 
 
 def url_dependencies(deps: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Dependencies fetched from a URL: (name, url). npm runs their install scripts like any other, but no registry
-    has seen them, and the file behind the URL can change at any time. One well-known CDN build is left out."""
-    return [(n, s) for n, s in deps if isinstance(s, str) and s.startswith(("http://", "https://"))
-            and not s.startswith(COMMON_URL_DEPENDENCIES)]
+    """Dependencies fetched from a URL: (name, url), as npm reads the spec. npm runs their install scripts like any
+    other, but no registry has seen them, and the file behind the URL can change at any time. One well-known CDN is
+    left out."""
+    found = []
+    for name, spec in deps:
+        spec = spec.strip() if isinstance(spec, str) else ""
+        try:
+            parts = urlsplit(spec)
+            common = parts.scheme.lower() == "https" and parts.hostname in COMMON_URL_DEPENDENCIES
+        except ValueError:
+            parts, common = None, False
+        if spec.lower().startswith(("http://", "https://")) and not common:
+            found.append((name, spec))
+    return found
 
 
 def public_url(url: str) -> bool:
     """True only for a URL whose host resolves to public addresses: these come from package authors."""
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return False
     try:
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+            return False
         addresses = {info[4][0] for info in socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)}
-    except OSError:
+    except (OSError, ValueError):
         return False
     return bool(addresses) and all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses)
 
 
+def public_peer(resp) -> bool:
+    """True if this response really came from a public address. A name can resolve differently on the second lookup,
+    so the check before connecting is not enough; a response with no address on record fails."""
+    stream = resp.extensions.get("network_stream")
+    peer = stream.get_extra_info("server_addr") if stream else None
+    return bool(peer) and ipaddress.ip_address(peer[0].split("%")[0]).is_global
+
+
 def fetch_url_dependency(client, url: str, fetch) -> PackageFiles | None:
-    """The archive behind a URL dependency, read in memory. Redirects are followed by hand so each hop is checked."""
+    """The archive behind a URL dependency, read in memory. Redirects are followed by hand so each hop is checked,
+    and `fetch` must not follow any itself."""
     for _ in range(MAX_REDIRECTS):
         if not public_url(url):
             return None
@@ -131,9 +151,12 @@ def fetch_url_dependency(client, url: str, fetch) -> PackageFiles | None:
 
 def with_url_dependencies(pkg: PackageFiles, client, deps: list[tuple[str, str]], fetch) -> list[str]:
     """Add the archives of URL dependencies to `pkg`, under `from-url/<name>/`, so they get read like the package's own
-    code. Returns the names. The package itself is often an empty shell around one of these."""
+    code. Returns the names; what is missing from them stayed unread, and callers must say so. The package itself is
+    often an empty shell around one of these. A dead link does not use up a slot: the publisher chooses the order."""
     added = []
-    for name, url in url_dependencies(deps)[:MAX_URL_DEPENDENCIES]:
+    for name, url in url_dependencies(deps)[:MAX_URL_ATTEMPTS]:
+        if len(added) == MAX_URL_DEPENDENCIES:
+            break
         try:
             archive = fetch_url_dependency(client, url, fetch)
         except Exception:

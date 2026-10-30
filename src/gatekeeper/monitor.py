@@ -20,7 +20,7 @@ from gatekeeper.npm.tarball import MAX_COMPRESSED_BYTES, ArchiveTooLarge, read_t
 from gatekeeper.triage.content import Hit, score_content
 from gatekeeper.triage.campaign import shared_files
 from gatekeeper.triage.meta import score_metadata
-from gatekeeper.triage.phantom import unreadable_imports, url_dependencies, young_additions
+from gatekeeper.triage.phantom import public_peer, unreadable_imports, url_dependencies, young_additions
 
 RECENT_WINDOW = timedelta(hours=6)  # versions considered "new" for a changed package
 NEW_PACKAGE_WINDOW = timedelta(hours=72)
@@ -75,10 +75,17 @@ def should_scan(info: packument.VersionInfo, meta_score: int, popular: set[str],
 FastScorer = Callable[[str, str, str, list[str]], tuple[float, bool]]
 
 
-def download_capped(client: httpx.Client, url: str, limit: int = MAX_COMPRESSED_BYTES) -> bytes:
+URL_DOWNLOAD_S = 20
+
+
+def download_capped(client: httpx.Client, url: str, limit: int = MAX_COMPRESSED_BYTES, public_only: bool = False) -> bytes:
     """Stream an archive and stop as soon as it exceeds `limit`: large binary packages would otherwise
-    tie up a worker for the whole download only to be rejected afterwards."""
-    with client.stream("GET", url) as resp:
+    tie up a worker for the whole download only to be rejected afterwards. `public_only` is for URLs a package
+    author chose: no redirects, a public address at the other end, and a limit on the time as well as the size."""
+    started = time.monotonic()
+    with client.stream("GET", url, follow_redirects=not public_only) as resp:
+        if public_only and not public_peer(resp):
+            raise OSError("not a public address")
         resp.raise_for_status()
         if int(resp.headers.get("content-length") or 0) > limit:
             raise ArchiveTooLarge(f"compressed size {resp.headers['content-length']} > {limit}")
@@ -87,6 +94,8 @@ def download_capped(client: httpx.Client, url: str, limit: int = MAX_COMPRESSED_
             buf += chunk
             if len(buf) > limit:
                 raise ArchiveTooLarge(f"compressed size > {limit}")
+            if public_only and time.monotonic() - started > URL_DOWNLOAD_S:
+                raise OSError("too slow")
     return bytes(buf)
 
 

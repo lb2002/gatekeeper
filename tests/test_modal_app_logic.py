@@ -97,3 +97,10 @@ def test_a_package_the_sweep_read_after_its_report_is_no_catch(app):
     app.queue.update({"old@1.0.0": late, "new@1.0.0": early})
     app._record_catches()
     assert list(app.state["catches"]) == ["new@1.0.0"]
+
+
+def test_a_url_dependency_goes_to_the_investigator_first(app):
+    now = datetime.now(timezone.utc)
+    base = {"seen_at": now.isoformat(), "verdicts": {"spark-open-fireworks": {"verdict": "benign"}}}
+    items = {"a@1": {**base, "fast_risk": 0.9, "rules": []}, "b@1": {**base, "fast_risk": 0.0, "rules": ["url_dependency"]}}
+    assert app._investigator_candidates(items, now) == ["b@1", "a@1"]

@@ -438,3 +438,32 @@ def test_no_cloud_answer_means_none_so_the_guard_fails_closed(monkeypatch):
 def test_a_cloud_verdict_for_another_package_is_ignored(monkeypatch):
     core = _with_cloud(monkeypatch, _Cloud(result={"verdict": VERDICT}))
     assert core.cloud_verdict(_public_meta(name="Tailwind-Thing", version="1.0.0"), poll_s=0) is None
+
+
+from gatekeeper.npm.tarball import PackageFiles  # noqa: E402
+
+
+def _url_guard(monkeypatch, archive):
+    from gatekeeper.guard import core
+
+    monkeypatch.setattr(core, "OSV_ONLINE", True)
+    monkeypatch.setattr(core, "with_url_dependencies", lambda pkg, client, deps, fetch: archive(pkg, deps))
+    return core
+
+
+def test_url_code_nobody_can_read_is_named(monkeypatch):
+    core = _url_guard(monkeypatch, lambda pkg, deps: [])
+    meta = _public_meta(dependencies={"ltidisafe": "https://evil.example/a.tgz", "left-pad": "^1.0.0"})
+    assert core.url_code(meta, PackageFiles()) == ([], ["ltidisafe"])
+
+
+def test_url_code_that_was_read_is_not_unread(monkeypatch):
+    core = _url_guard(monkeypatch, lambda pkg, deps: ["ltidisafe"])
+    meta = _public_meta(dependencies={"ltidisafe": "https://evil.example/a.tgz"})
+    assert core.url_code(meta, PackageFiles()) == (["ltidisafe"], [])
+
+
+def test_url_code_is_left_alone_on_a_company_registry(monkeypatch):
+    core = _url_guard(monkeypatch, lambda pkg, deps: ["x"])
+    meta = _public_meta(tarball="https://npm.acme.example/t.tgz", dependencies={"x": "https://acme.example/x.tgz"})
+    assert core.url_code(meta, PackageFiles()) == ([], [])
