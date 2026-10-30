@@ -71,10 +71,14 @@ def report_commit_time(client: httpx.Client, name: str, github_token: str | None
     return earliest(((c.get("commit") or {}).get("committer") or {}).get("date") for c in resp.json() or [])
 
 
-def malicious_hits(client: httpx.Client, name: str, version: str) -> list[OsvHit]:
-    """MAL-* entries (not withdrawn) that affect this exact version."""
+def hits_in(vulns: list[dict], name: str, version: str) -> list[OsvHit]:
+    """MAL-* entries (not withdrawn) among `vulns` that affect this exact version."""
     return [
         OsvHit(v["id"], first_public(v))
-        for v in query(client, name)
+        for v in vulns
         if str(v.get("id", "")).startswith("MAL-") and not v.get("withdrawn") and affects(v, name, version)
     ]
+
+
+def malicious_hits(client: httpx.Client, name: str, version: str) -> list[OsvHit]:
+    return hits_in(query(client, name), name, version)

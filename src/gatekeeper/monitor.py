@@ -87,11 +87,31 @@ def download_capped(client: httpx.Client, url: str, limit: int = MAX_COMPRESSED_
     return bytes(buf)
 
 
+CAMPAIGN_TEXT_CAP = 2_000_000
+
+
+def campaign_matches(pkg, campaign: dict[str, str] | None) -> list[tuple[str, str]]:
+    """Known campaign endpoints anywhere in the package's text files (first 2 MB)."""
+    if not campaign:
+        return []
+    from gatekeeper.triage.campaign import matches
+
+    parts, size = [], 0
+    for path in sorted(pkg.files):
+        data = pkg.files[path]
+        if size >= CAMPAIGN_TEXT_CAP:
+            break
+        parts.append(data[: CAMPAIGN_TEXT_CAP - size].decode("utf-8", errors="replace"))
+        size += len(data)
+    return matches("\n".join(parts), campaign)
+
+
 def process_version(
     client: httpx.Client, info: packument.VersionInfo, popular: set[str], now: datetime,
     fast: FastScorer | None = None,
     mal_index: dict[str, dict] | None = None,
     scan: bool = True,
+    campaign: dict[str, str] | None = None,
 ) -> Record:
     meta = score_metadata(info, popular, now=now, mal_index=mal_index)
     rec = Record(
@@ -116,9 +136,13 @@ def process_version(
         rec.error = f"archive: {type(exc).__name__}"[:300]
         return rec
     content = score_content(pkg)
+    # an exfiltration endpoint a malicious package used before (see triage/campaign.py)
+    shared = campaign_matches(pkg, campaign)
+    if shared:
+        meta.reasons.append(f"+10 sends to {shared[0][0]}, the endpoint of {shared[0][1]}")
     rec.scanned = True
     rec.content_score = content.score
-    rec.rules = sorted(content.rules)
+    rec.rules = sorted(content.rules | ({"known_campaign_endpoint"} if shared else set()))
     rec.priority = meta.score + content.score
     rules_flag = content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD
     fast_flag = False
@@ -133,7 +157,9 @@ def process_version(
     text = bundle.render()
     young = info.package_created_at is not None and now - info.package_created_at <= timedelta(hours=NEW_PACKAGE_HOURS)
     new_with_hook = young and bool(info.install_scripts or info.gypfile)
-    rec.flagged = rules_flag or fast_flag or new_with_hook
+    rec.flagged = rules_flag or fast_flag or new_with_hook or bool(shared)
+    if shared:
+        rec.priority += 10
     rec.bundle = text
     rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
     rec.excerpts = [e.ref() for e in bundle.excerpts]
@@ -151,6 +177,7 @@ def process_names(
     deadline: float | None = None,
     fast: FastScorer | None = None,
     mal_index: dict[str, dict] | None = None,
+    campaign: dict[str, str] | None = None,
 ) -> tuple[list[Record], list[str]]:
     """Score every version of the changed packages published within `window`, unless already seen.
 
@@ -177,7 +204,8 @@ def process_names(
         for i, info in enumerate(todo):
             if out and deadline is not None and time.monotonic() > deadline:
                 return out, True  # unfinished: the name is deferred, `seen` skips what is done
-            out.append(process_version(client, info, popular, now, fast, mal_index, scan=i < MAX_VERSIONS_PER_NAME))
+            out.append(process_version(client, info, popular, now, fast, mal_index, scan=i < MAX_VERSIONS_PER_NAME,
+                                       campaign=campaign))
         return out, False
 
     pool = ThreadPoolExecutor(max_workers=workers)

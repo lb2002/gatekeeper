@@ -40,3 +40,31 @@ def test_a_young_package_with_an_install_hook_always_reaches_a_model(monkeypatch
     young, old = rec(1), rec(30)
     assert young.scanned and young.flagged
     assert old.scanned and not old.flagged
+
+
+def test_a_reupload_to_a_known_campaign_endpoint_is_flagged(monkeypatch):
+    import io
+    import json
+    import tarfile
+    from datetime import datetime, timedelta, timezone
+
+    from gatekeeper import monitor
+    from gatekeeper.npm.packument import VersionInfo
+
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as tar:
+        for name, body in (("package/package.json", json.dumps({"name": "y", "version": "2.0.0"})),
+                           ("package/lib.js", 'module.exports = () => fetch("https://203.0.114.9:8443/");\n')):
+            data = body.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    monkeypatch.setattr(monitor, "download_capped", lambda client, url: raw.getvalue())
+    now = datetime(2026, 10, 30, tzinfo=timezone.utc)
+    info = VersionInfo(name="y", version="2.0.0", published_at=now, package_created_at=now - timedelta(days=30),
+                       has_repository=True, tarball_url="https://r/y.tgz", version_count=3)
+    plain = monitor.process_version(None, info, set(), now)
+    assert plain.scanned and not plain.flagged
+    rec = monitor.process_version(None, info, set(), now, campaign={"203.0.114.9": "evil@1.0.0"})
+    assert rec.flagged and "known_campaign_endpoint" in rec.rules
+    assert any("evil@1.0.0" in r for r in rec.meta_reasons)

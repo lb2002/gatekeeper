@@ -99,6 +99,33 @@ def _mal_index() -> dict:
     return _MAL_CACHE["index"]
 
 
+_CAMPAIGN_CACHE: dict = {}
+
+
+def _campaign_iocs() -> dict:
+    """Endpoints of model-agreed malicious packages (built hourly by `confirm`), cached per container for 5 min."""
+    if time.time() - _CAMPAIGN_CACHE.get("at", 0) > 300:
+        _CAMPAIGN_CACHE.update(at=time.time(), iocs=state.get("campaign_iocs", {}) or {})
+    return _CAMPAIGN_CACHE["iocs"]
+
+
+def _update_campaign_iocs(items: dict) -> int:
+    """Remember the specific endpoints of packages at least two Muse models call malicious (kept after the
+    bundles leave the queue). Returns how many are known."""
+    from gatekeeper.triage.campaign import specific_iocs
+
+    known = state.get("campaign_iocs", {}) or {}
+    for key, it in items.items():
+        votes = sum((it.get("verdicts", {}).get(b) or {}).get("verdict") == "malicious" for b in NOTIFY_BACKENDS)
+        if votes >= 2 and it.get("bundle"):
+            for ioc in specific_iocs(it["bundle"]):
+                known.setdefault(ioc, key)
+    if len(known) > 5000:  # keep the newest entries (dicts keep insertion order)
+        known = dict(list(known.items())[-5000:])
+    state["campaign_iocs"] = known
+    return len(known)
+
+
 def _run_poll() -> dict:
     import httpx
 
@@ -147,7 +174,7 @@ def _run_poll() -> dict:
         todo = list(dict.fromkeys(pending + list(names)))
         records, deferred = process_names(
             client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S,
-            fast=_fast_scorer(), mal_index=_mal_index(), workers=32,
+            fast=_fast_scorer(), mal_index=_mal_index(), campaign=_campaign_iocs(), workers=32,
         )
         stats["deferred"] = len(deferred)
 
@@ -455,14 +482,22 @@ def backfill_queue() -> dict:
     return {"flagged_records": total, "added": added}
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET, NTFY_SECRET], schedule=modal.Period(hours=1), timeout=900, cpu=0.5, memory=2048)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[LEDGER_SECRET, NTFY_SECRET], schedule=modal.Period(hours=1), timeout=1800, cpu=2.0, memory=2048)
 def confirm() -> dict:
     """Hourly: check every queued flag against OSV, GitHub malware advisories and npm takedowns."""
     from gatekeeper.confirm.batch import confirm_many
     from gatekeeper.npm import feed
 
     now = datetime.now(timezone.utc)
+    clock, timings = time.monotonic(), {}
+
+    def lap(name: str) -> None:
+        nonlocal clock
+        timings[name] = round(time.monotonic() - clock, 1)
+        clock = time.monotonic()
+
     items = dict(queue.items())
+    lap("read_queue")
     stale = [k for k, it in items.items() if datetime.fromisoformat(it["seen_at"]) < now - QUEUE_TTL]
     for k in stale:
         queue.pop(k, None)
@@ -470,10 +505,15 @@ def confirm() -> dict:
     # confirmed items whose public time could not be determined (e.g. a GitHub rate limit) are checked again
     pending = {k: it for k, it in items.items()
                if not (it.get("confirmation") or {}).get("confirmed") or not it["confirmation"].get("earliest_public")}
+    # flags older than two days are checked every 6 hours only: the job must finish within its timeout as the
+    # queue grows to a week of flags, and most reports arrive within a day (median ~10 h)
+    if now.hour % 6:
+        pending = {k: it for k, it in pending.items() if datetime.fromisoformat(it["seen_at"]) > now - timedelta(hours=48)}
     since = (now - QUEUE_TTL).isoformat()
     with feed.make_client() as client:
         results, gh_error = confirm_many(client, [(it["name"], it["version"]) for it in pending.values()], since, now=now,
-                                         github_token=os.environ.get("GITHUB_TOKEN"))
+                                         github_token=os.environ.get("GITHUB_TOKEN"), workers=32)
+    lap("check")
     newly = 0
     rows = []
     for (key, item), conf in zip(pending.items(), results):
@@ -492,6 +532,7 @@ def confirm() -> dict:
                 fresh["confirmation"] = item["confirmation"]
                 queue[key] = fresh
     _append_jsonl(DATA / "confirmations" / f"{now:%Y-%m-%d}.jsonl", rows)
+    lap("store")
     for key, it in items.items():
         if it.get("bundle") and datetime.fromisoformat(it["seen_at"]) < now - BUNDLE_KEEP:
             fresh = queue.get(key, None)
@@ -499,15 +540,19 @@ def confirm() -> dict:
                 fresh.pop("bundle", None)
                 fresh["bundle_archived"] = f"events/{fresh['seen_at'][:10]}/ (flagged rows keep their bundle)"
                 queue[key] = fresh
+    lap("archive_bundles")
     _record_catches()
+    lap("catches")
+    _update_campaign_iocs(items)
     revealed = _reveal_confirmed()
+    lap("reveal")
     volume.commit()
     live_recall.spawn()  # separate container: reads all event logs and the OSV feed
     last = (state.get("mal_index") or {}).get("at")
     if not last or now - datetime.fromisoformat(last) > timedelta(hours=24):
         refresh_mal_index.spawn()
     stats = {"checked": len(results), "newly_confirmed": newly, "expired": len(stale), "github_error": gh_error,
-             "ledger_revealed": revealed}
+             "ledger_revealed": revealed, "seconds": timings}
     state["last_confirm"] = {"at": now.isoformat(), **stats}
     _daily_report(now)
     print(json.dumps(stats))
