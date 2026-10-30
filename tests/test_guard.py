@@ -273,3 +273,24 @@ def test_npm_itself_reads_project_context_and_side_doors(monkeypatch, tmp_path):
     (tmp_path / ".npmrc").write_text("before=notadate\n")
     d = npm_native_parse(exe, "npm", ["install", "is-odd"])
     assert d is not None and d["before"] == "invalid" and d["specs"][0].get("error")  # resolution fails: blocked
+
+
+def test_a_lockfile_pointing_away_from_the_registry_is_remote(monkeypatch, tmp_path):
+    import json
+
+    import pytest
+
+    from gatekeeper.guard.core import npm_native_parse
+
+    exe = _real_npm()
+    if exe is None:
+        pytest.skip("npm not installed")
+    monkeypatch.delenv("NPM_CONFIG_REGISTRY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "package.json").write_text(json.dumps({"name": "t", "version": "1.0.0", "dependencies": {"is-odd": "^3.0.0"}}))
+    (tmp_path / "package-lock.json").write_text(json.dumps({"name": "t", "lockfileVersion": 3, "packages": {
+        "": {"name": "t"},
+        "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://evil.example/x/-/is-odd-3.0.1.tgz",
+                                "integrity": "sha512-AAAA"}}}))
+    d = npm_native_parse(exe, "npm", ["install", "is-odd"])
+    assert d is not None and [(s["spec"], s["type"]) for s in d["specs"]] == [("https://evil.example/x/-/is-odd-3.0.1.tgz", "remote")]

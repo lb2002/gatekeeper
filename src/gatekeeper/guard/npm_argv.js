@@ -28,6 +28,8 @@ const fs = require('fs')
 
 // what `npm install <bare name>` really resolves when the project already has it: arborist keeps the lockfile's
 // version, or else the range saved in package.json (build-ideal-tree: "if it's just @'' ... reload what's there")
+const lockInfo = new Map()
+
 function projectSpec (spec) {
   let r
   try { r = npa(spec) } catch (e) { return spec }
@@ -36,9 +38,11 @@ function projectSpec (spec) {
   const lock = read('package-lock.json') || read('npm-shrinkwrap.json')
   const locked = lock && lock.packages && lock.packages['node_modules/' + r.name]
   if (locked && locked.version && !locked.link) {
-    // a lock entry pointing outside the registry (git, a tarball URL) is fetched from there: nothing to check
-    if (locked.resolved && !/^https?:\/\/[^/]+\/.+\/-\/[^/]+\.tgz$/.test(locked.resolved)) return locked.resolved
-    return `${r.name}@${locked.version}`
+    // npm installs from the lock entry's `resolved` URL and checks it against the lock's `integrity`, both of
+    // which a cloned repository controls: remembered here and compared with the registry after resolving
+    const pinned = `${r.name}@${locked.version}`
+    lockInfo.set(pinned, { resolved: locked.resolved || null, integrity: locked.integrity || null })
+    return pinned
   }
   const pkg = read('package.json') || {}
   for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
@@ -185,6 +189,18 @@ async function main () {
       } catch (e) {
         if (!flat.before || e.code !== 'ETARGET') throw e
         mani = await pacoteMod().manifest(spec, { ...flat, before: null, fullMetadata: true })
+      }
+      const lock = lockInfo.get(spec)
+      if (lock) {
+        // only a lock entry that is exactly what the configured registry serves counts as a registry install
+        const tarball = mani._resolved || (mani.dist && mani.dist.tarball)
+        const integrity = mani._integrity || (mani.dist && mani.dist.integrity)
+        const sameUrl = !lock.resolved || lock.resolved === tarball
+        const sameHash = !lock.integrity || lock.integrity === integrity
+        if (!sameUrl || !sameHash) {
+          resolved.push({ spec: lock.resolved || spec, type: 'remote', error: 'package-lock.json points elsewhere than the registry' })
+          continue
+        }
       }
       const pack = await pacoteMod().packument(mani.name, { ...flat, fullMetadata: true })
       const deps = []
