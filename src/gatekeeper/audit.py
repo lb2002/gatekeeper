@@ -10,6 +10,7 @@ so those versions go to the hosted investigator, which reads them. That is the p
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -108,16 +109,24 @@ def is_local(source: str) -> bool:
 
 
 def on_registry(source: str) -> bool:
-    """A real URL on the registry; a value without a scheme is never taken for one."""
-    return bool(re.match(r"https?://", source, re.I)) and host_of(source) in TRUSTED_HOSTS
+    """A plain URL on the registry; a value without a scheme is never taken for one. Nor is anything npm's URL parser
+    could read differently from ours: for it, `https://evil.example\\@registry.npmjs.org/` is a URL on evil.example."""
+    try:
+        parts = urlsplit(source)
+    except ValueError:
+        return False
+    return (parts.scheme.lower() in ("http", "https") and parts.hostname in TRUSTED_HOSTS and "@" not in parts.netloc
+            and not re.search(r"[\\\s\x00-\x1f]", source))
 
 
 def names_another_file(p: Locked) -> bool:
     """A registry URL for another package or version than the entry claims. The host is right, so the host check passes
     it, and a reviewer sees an entry for a familiar name: this is how a lockfile gets poisoned."""
-    if not on_registry(p.resolved) or p.version == "?":
+    if not on_registry(p.resolved):
         return False
-    return unquote(urlsplit(p.resolved).path) != f"/{p.name}/-/{p.name.rsplit('/', 1)[-1]}-{p.version}.tgz"
+    path = unquote(urlsplit(p.resolved).path)
+    prefix = f"/{p.name}/-/{p.name.rsplit('/', 1)[-1]}-"
+    return not path.startswith(prefix) if p.version == "?" else path != f"{prefix}{p.version}.tgz"
 
 
 def host_of(source: str) -> str:
@@ -170,7 +179,7 @@ def parse_yarn(text: str) -> list[Locked]:
         named = re.match(r'((?:@[^/@\s]+/)?[^/@\s]+)@npm:', fields.get("resolution", ""))
         names = [named.group(1)] if named else list(dict.fromkeys(n for n, _ in keys))
         integrity = "integrity" in fields or "checksum" in fields
-        out += [Locked(n, version, source, integrity, checksum=fields.get("integrity", "")) for n in names]
+        out += [Locked(n, version, source, integrity, checksum=fields.get("integrity") or fields.get("checksum", "")) for n in names]
     return out
 
 
@@ -226,45 +235,58 @@ def added_since(locked: list[Locked], before: list[Locked]) -> list[Locked]:
 
     had = {identity(p) for p in before}
     names = {p.name for p in before}
-    new = {(p.name, p.version): p for p in locked if identity(p) not in had}
-    return sorted(new.values(), key=lambda p: (p.name in names, p.name))
+    new = {identity(p): p for p in locked if identity(p) not in had}
+    return sorted(new.values(), key=lambda p: (not p.install_script, p.name in names, p.name))
 
 
-def public_release(client: httpx.Client, p: Locked) -> dict | None:
-    """The public registry's record of exactly this version. None for anything else: a private package is not sent on."""
+def public_release(client: httpx.Client, p: Locked) -> tuple[str, dict | None]:
+    """("public", the registry's record of exactly this version), or ("private", None) for a package that is not on the
+    public registry and is not sent on, or ("failed", None): that one is not known to be anything, so it stays unread."""
     if p.resolved and not on_registry(p.resolved):
-        return None
+        return "private", None
+    if p.version == "?":
+        return "failed", None
     try:
         resp = client.get(f"{packument_url(p.name)}/{p.version}")
+        if resp.status_code == 404:
+            return "private", None
         doc = resp.json() if resp.status_code == 200 else {}
-        tarball = (doc.get("dist") or {}).get("tarball")
+        dist, scripts = doc.get("dist") or {}, doc.get("scripts") or {}
     except (httpx.HTTPError, ValueError, AttributeError):
-        return None
-    if not tarball:
-        return None
-    dist, scripts = doc.get("dist") or {}, doc.get("scripts") or {}
-    return {"name": p.name, "version": p.version, "tarball": tarball, "integrity": str(dist.get("integrity") or ""),
-            "runs_at_install": bool(doc.get("gypfile")) or any(hook in scripts for hook in ("preinstall", "install", "postinstall"))}
+        return "failed", None
+    if not dist.get("tarball"):
+        return "failed", None
+    return "public", {"name": p.name, "version": p.version, "tarball": dist["tarball"], "integrity": str(dist.get("integrity") or ""),
+                      "shasum": str(dist.get("shasum") or ""), "runs_at_install": p.install_script or bool(doc.get("gypfile"))
+                      or any(hook in scripts for hook in ("preinstall", "install", "postinstall"))}
 
 
-def _hash_differs(p: Locked, published: str) -> bool:
-    mine = next((h for h in p.checksum.split() if h.startswith("sha512-")), "")
-    return bool(mine) and published.startswith("sha512-") and mine != published
+def _hash_differs(p: Locked, release: dict) -> bool:
+    """False if the two share no algorithm: an entry with no hash at all is the NO_INTEGRITY note."""
+    for h in p.checksum.split():
+        if h.startswith("sha512-") and release["integrity"].startswith("sha512-"):
+            return h != release["integrity"]
+        if h.startswith("sha1-") and release["shasum"]:
+            try:
+                return base64.b64decode(h[5:]).hex() != release["shasum"].lower()
+            except ValueError:
+                return True
+    return False
 
 
 def review_added(added: list[Locked], ask: Callable[[dict], dict | None], client: httpx.Client, block_at: float) -> dict:
     """Have up to MAX_REVIEWED of the `added` versions read, what runs at install first. That comes from the registry:
     the lockfile is the thing under review. `ask` returns a verdict, or None if it has no answer."""
-    public, private, findings = [], [], []
+    public, private, findings = {}, [], []
     for p in added[:MAX_LOOKUPS]:
-        release = public_release(client, p)
-        if release is None:
+        status, release = public_release(client, p)
+        if status == "private":
             private.append(f"{p.name}@{p.version}")
-        elif _hash_differs(p, release["integrity"]):
+        elif release and _hash_differs(p, release):
             findings.append(Finding(UNTRUSTED_SOURCE, p.name, p.version, "the hash in the lockfile is not the hash of the file the registry published"))
-        else:
-            public.append(release)
-    releases = sorted(public, key=lambda r: not r["runs_at_install"])
+        elif release:
+            public[p.name, p.version] = release
+    releases = sorted(public.values(), key=lambda r: not r["runs_at_install"])
     with ThreadPoolExecutor(REVIEW_WORKERS) as pool:
         answers = list(pool.map(ask, releases[:MAX_REVIEWED]))
     read = []
@@ -276,8 +298,9 @@ def review_added(added: list[Locked], ask: Callable[[dict], dict | None], client
         if v["verdict"] == "malicious" or (v["verdict"] == "suspicious" and v["confidence"] >= block_at):
             findings.append(Finding(MODEL_FLAGGED, row["name"], row["version"], f"Muse Spark Open read it: {v['verdict']} ({v['confidence']:.2f}), {row['summary'][:300]}"))
     done = {f"{r['name']}@{r['version']}" for r in read} | {f"{f.name}@{f.version}" for f in findings} | set(private)
-    return {"added": len(added), "read": read, "private": private, "findings": [asdict(f) for f in findings],
-            "unread": [f"{p.name}@{p.version}" for p in added if f"{p.name}@{p.version}" not in done]}
+    unread = dict.fromkeys(f"{p.name}@{p.version}" for p in added)
+    return {"added": len(unread), "read": read, "private": private, "findings": [asdict(f) for f in findings],
+            "unread": [key for key in unread if key not in done]}
 
 
 def parse_text(text: str) -> list[Locked]:

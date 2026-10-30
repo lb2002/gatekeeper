@@ -285,10 +285,10 @@ def _p(name, version="1.0.0", **kw):
     return au.Locked(name, version, **kw)
 
 
-def test_new_names_come_first_among_added_versions():
+def test_added_versions_start_with_what_the_lockfile_says_runs_at_install():
     before = [_p("old"), _p("kept")]
     now = [_p("kept"), _p("old", "2.0.0"), _p("brand-new"), _p("hook", install_script=True)]
-    assert [p.name for p in au.added_since(now, before)] == ["brand-new", "hook", "old"]
+    assert [p.name for p in au.added_since(now, before)] == ["hook", "brand-new", "old"]
 
 
 def _registry(*public):
@@ -381,3 +381,40 @@ def test_an_entry_that_points_to_another_file_of_the_registry_is_caught(name, ve
                                               ("@a/b", "1.0.0", "https://registry.npmjs.org/@a%2fb/-/b-1.0.0.tgz")])
 def test_the_matching_file_is_fine(name, version, url):
     assert au.check_index([_p(name, version, resolved=url)], {}) == []
+
+
+@pytest.mark.parametrize("url", ["https://evil.example\\@registry.npmjs.org/a/-/a-1.0.0.tgz", "https://user@registry.npmjs.org/a/-/a-1.0.0.tgz",
+                                 "https://registry.npmjs.org\\.evil.example/a/-/a-1.0.0.tgz", "https://registry.npmjs.org/a/-/a-1.0.0.tgz\n"])
+def test_urls_npm_could_read_differently_are_not_the_registry(url):
+    assert not au.on_registry(url)
+
+
+def test_a_failed_lookup_is_not_called_private():
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503)))
+    review = au.review_added([_p("a")], lambda r: pytest.fail("must not be asked"), client, 0.6)
+    assert review["private"] == [] and review["unread"] == ["a@1.0.0"]
+
+
+def test_two_entries_of_one_version_are_both_checked():
+    entries = [_p("a", checksum="sha512-published"), _p("a", checksum="sha512-forged")]
+    added = au.added_since(entries, [])
+    review = au.review_added(added, lambda r: {"verdict": "benign", "confidence": 1, "summary": ""}, _registry("a"), 0.6)
+    assert len(added) == 2 and [f["kind"] for f in review["findings"]] == [au.UNTRUSTED_SOURCE]
+
+
+def test_an_old_sha1_hash_is_compared_too():
+    import base64 as b64
+
+    mine = "sha1-" + b64.b64encode(bytes.fromhex("aa" * 20)).decode()
+    assert au._hash_differs(_p("a", checksum=mine), {"integrity": "", "shasum": "bb" * 20})
+    assert not au._hash_differs(_p("a", checksum=mine), {"integrity": "", "shasum": "aa" * 20})
+
+
+def test_a_berry_checksum_counts_as_the_entry_s_identity():
+    text = '"a@npm:^1":\n  version: 1.0.0\n  resolution: "a@npm:1.0.0"\n  checksum: 10c0/abc\n'
+    assert au.parse_yarn(text)[0].checksum == "10c0/abc"
+
+
+def test_an_entry_with_no_version_still_has_to_name_its_package():
+    assert au.names_another_file(_p("a", "?", resolved="https://registry.npmjs.org/evil/-/evil-1.0.0.tgz"))
+    assert not au.names_another_file(_p("a", "?", resolved="https://registry.npmjs.org/a/-/a-1.0.0.tgz"))
