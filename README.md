@@ -101,6 +101,21 @@ Live false positives are measured on 1,459 npm releases from days the models nev
 
 Gatekeeper never executes package code. Package archives are read in memory; malware samples are only unpacked inside isolated cloud containers. This repository contains no malware: only package identifiers and scripts to rebuild datasets. The demo package in `demo/villain-pkg` is a harmless imitation that only talks to localhost.
 
+## Try the install guard
+
+Needs Python with [uv](https://docs.astral.sh/uv/) and Node/npm. No account or API key.
+
+```bash
+uv sync
+uv run gk guard enable        # writes npm/npx shims to ~/.gatekeeper/bin
+uv run gk guard update-osv    # offline list of 222k malicious npm names (3 MB)
+uv run gk guard shell         # Windows: a PowerShell with the shims first on PATH
+# macOS/Linux instead: export PATH="$HOME/.gatekeeper/bin:$PATH"
+npm install <package>         # checked before anything is installed
+```
+
+Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. Archives the static rules flag go to Muse Glimmer through a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja --port 8080`; `GK_LOCAL_URL` points elsewhere). Without it those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
+
 ## Run it
 
 ```bash
