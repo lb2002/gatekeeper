@@ -1,4 +1,4 @@
-﻿"""Gatekeeper live monitor on Modal.
+"""Gatekeeper live monitor on Modal.
 
 Deploy:  uv run modal deploy modal_app/app.py
 Test:    uv run modal run modal_app/app.py::poll_once
@@ -1237,6 +1237,9 @@ def _public_stats() -> dict:
         "flagged_before_public_report": sum(1 for c in first if (c.get("lead_over_public_min") or 0) > 0),
         "median_lead_over_public_min": _median([c["lead_over_public_min"] for c in first if (c.get("lead_over_public_min") or 0) > 0]),
         "live_recall": {k: v for k, v in (state.get("recall") or {}).items() if k != "outcomes"},
+        # already public (each has an OSV report), so naming them reveals nothing unconfirmed
+        "recall_misses": [{k: o.get(k) for k in ("id", "name", "published_at", "detail")}
+                          for o in (state.get("recall") or {}).get("outcomes", []) if o["status"] in ("missed", "not_seen")],
         "catches": catches,
         "repo": REPO_URL,
         "ledger": LEDGER_URL,
@@ -1252,12 +1255,37 @@ def _fmt_minutes(m: float | None) -> str:
 def _public_html(st: dict) -> str:
     from html import escape
 
+    by_pkg: dict[str, list] = {}
+    for c in st["catches"]:
+        by_pkg.setdefault(c["name"], []).append(c)
+
+    def span(vals):
+        vals = sorted(v for v in vals if v is not None)
+        lo, hi = (_fmt_minutes(vals[0]), _fmt_minutes(vals[-1])) if vals else ("-", "-")
+        return lo if lo == hi else f"{lo} to {hi}"
+
     rows = "".join(
-        f"<tr><td><code>{escape(c['name'])}@{escape(c['version'])}</code></td><td>{escape((c['published_at'] or '')[:16])}</td>"
-        f"<td>{_fmt_minutes(c['publish_to_flag_min'])}</td><td>{_fmt_minutes(c['lead_over_public_min'])}</td>"
-        f"<td>{' '.join(escape(i) for i in (c.get('osv_ids') or []) + (c.get('ghsa_ids') or []))}</td></tr>"
-        for c in st["catches"]
+        f"<tr><td><code>{escape(name)}</code><br><span class=m>{len(cs)} version{'s' if len(cs) > 1 else ''}: "
+        f"{escape(', '.join(c['version'] for c in cs[:4]))}{' ...' if len(cs) > 4 else ''}</span></td>"
+        f"<td>{escape((cs[0]['published_at'] or '')[:16].replace('T', ' '))}</td>"
+        f"<td>{span([c['publish_to_flag_min'] for c in cs])}</td><td>{span([c['lead_over_public_min'] for c in cs])}</td>"
+        f"<td>{' '.join(sorted({escape(i) for c in cs for i in (c.get('osv_ids') or []) + (c.get('ghsa_ids') or [])}))}</td></tr>"
+        for name, cs in by_pkg.items()
     ) or '<tr><td colspan="5">none yet</td></tr>'
+    rc = st.get("live_recall") or {}
+    misses = "".join(
+        f"<tr><td><code>{escape(o['name'])}</code></td><td>{escape((o.get('published_at') or '')[:16].replace('T', ' '))}</td>"
+        f"<td>{escape(o.get('detail') or '')}</td><td>{escape(o['id'])}</td></tr>"
+        for o in st.get("recall_misses", [])
+    )
+    recall_html = "" if not rc.get("in_scope") else (
+        f"<h2>What it missed</h2><p class=sub>Every hour, each new OSV report of npm malware is checked against the monitor's "
+        f"own logs. Of the {rc['in_scope']} malicious packages published while it was running (since "
+        f"{escape(rc.get('since', '')[:16].replace('T', ' '))} UTC), it flagged <b>{rc['flagged']}</b> "
+        f"({round(100 * (rc.get('recall') or 0))}%), {rc.get('flagged_before_osv', 0)} of them before the report. Reports about "
+        f"malware published before the monitor started ({rc.get('before_monitor', 0)}) are left out.</p>"
+        f"<div class=wrap><table><tr><th>missed package</th><th>published (UTC)</th><th>what the monitor saw</th><th>report</th></tr>"
+        f"{misses}</table></div>")
     days = "".join(
         f"<tr><td>{escape(d['day'])}</td><td>{d['versions']:,}</td><td>{d['scanned']:,}</td><td>{d['flagged']:,}</td></tr>"
         for d in reversed(st["daily"])
@@ -1270,7 +1298,7 @@ def _public_html(st: dict) -> str:
 body{{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;max-width:880px;margin:0 auto;padding:24px 16px}}
 h1{{font-size:22px;margin:0}} .sub{{color:var(--muted);margin:4px 0 24px}}
 .kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:28px}}
-.kpi{{border:1px solid var(--line);border-radius:8px;padding:12px}} .kpi b{{display:block;font-size:24px}} .kpi span{{color:var(--muted);font-size:13px}}
+.kpi{{border:1px solid var(--line);border-radius:8px;padding:12px}} .m{{color:var(--muted);font-size:12px}} .kpi b{{display:block;font-size:24px}} .kpi span{{color:var(--muted);font-size:13px}}
 table{{border-collapse:collapse;width:100%;margin:8px 0 28px;font-size:14px}} th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}}
 th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(--accent)}} code{{font-size:13px}}
 </style></head><body>
@@ -1286,10 +1314,11 @@ th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(-
 </div>
 <h2>Confirmed catches</h2>
 <p class="sub">Only detections confirmed by OSV / OpenSSF, GitHub advisories or an npm takedown are named. Flag times are committed as salted hashes to the <a href="{st['ledger']}">public ledger</a> when they happen.</p>
-<div class="wrap"><table><tr><th>package</th><th>published (UTC)</th><th>publish to flag</th><th>lead over public report</th><th>public records</th></tr>{rows}</table></div>
+<div class="wrap"><table><tr><th>package</th><th>first published (UTC)</th><th>publish to flag</th><th>ahead of the public report</th><th>public records</th></tr>{rows}</table></div>
+{recall_html}
 <h2>Daily volume</h2>
 <div class="wrap"><table><tr><th>day (UTC)</th><th>versions</th><th>scanned</th><th>flagged</th></tr>{days}</table></div>
-<p class="sub">Open source: <a href="{st['repo']}">{st['repo']}</a> Â· JSON: <a href="stats.json">stats.json</a></p>
+<p class="sub">Open source: <a href="{st['repo']}">{st['repo']}</a> · JSON: <a href="stats.json">stats.json</a></p>
 </body></html>"""
 
 
