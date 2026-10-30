@@ -187,52 +187,94 @@ def older_version(meta: dict, min_age_h: float, now: float | None = None) -> str
 
 
 RESOLVE_COMMANDS = INSTALL_COMMANDS | {"update", "up", "upgrade", "udpate"}
+# npm options that take the next argument as their value (`--registry URL`); `--flag=value` needs no entry
+VALUE_FLAGS = {"--registry", "--prefix", "-C", "--workspace", "-w", "--tag", "--loglevel", "--userconfig", "--globalconfig",
+               "--cache", "--otp", "--package", "-p", "--call", "-c", "--before", "--omit", "--include", "--install-strategy",
+               "--script-shell", "--node-options"}
+NPM_COMMANDS = RESOLVE_COMMANDS | EXEC_COMMANDS | {
+    "ci", "clean-install", "install-clean", "ic", "run", "run-script", "rum", "urn", "test", "t", "tst", "start", "stop", "restart",
+    "publish", "uninstall", "un", "unlink", "remove", "rm", "r", "view", "v", "info", "show", "ls", "list", "ll", "la",
+    "outdated", "audit", "init", "create", "innit", "link", "ln", "pack", "config", "c", "get", "set", "cache", "login",
+    "logout", "adduser", "whoami", "version", "help", "doctor", "fund", "dedupe", "ddp", "find-dupes", "prune", "rebuild",
+    "rb", "explain", "why", "query", "pkg", "search", "s", "se", "find", "owner", "access", "token", "team", "org", "profile",
+    "ping", "root", "prefix", "completion", "edit", "explore", "diff", "dist-tag", "deprecate", "unpublish", "hook",
+    "shrinkwrap", "sbom", "star", "unstar", "stars", "docs", "home", "bugs", "repo", "issues", "install-test", "it",
+    "install-ci-test", "cit", "help-search", "undeprecate"}
 
 
-def before_flag(tool: str, args: list[str], min_age_hours: float | None = None, now: float | None = None) -> list[str]:
-    """`--before=<now - waiting period>` for npm commands that resolve versions: npm then picks, for the whole
-    dependency tree, only versions published before that moment. The explicit package is checked (and held) by
-    check_spec; this covers what npm resolves on its own, such as a hijacked patch release of a dependency."""
-    from datetime import datetime, timezone
+def _positionals(args: list[str]) -> list[int]:
+    """Indexes of the arguments that are not options or option values (scanning stops at `--`)."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            break
+        if a.startswith("-"):
+            i += 2 if a in VALUE_FLAGS else 1
+            continue
+        out.append(i)
+        i += 1
+    return out
 
-    hours = MIN_AGE_HOURS if min_age_hours is None else min_age_hours
-    args = [a for a in args if a != ALLOW_FLAG]
-    if tool != "npm" or hours <= 0 or not args or args[0] not in RESOLVE_COMMANDS:
-        return []
-    if any(a == "--before" or a.startswith("--before=") for a in args):
-        return []
-    cutoff = datetime.fromtimestamp((now or time.time()) - hours * 3600, timezone.utc)
-    return [f"--before={cutoff:%Y-%m-%dT%H:%M:%SZ}"]
+
+def command_index(args: list[str]) -> int | None:
+    """Where the npm command is, after any leading options (`npm --loglevel warn install x`). The first positional
+    that is a known npm command: a value of an option this parser does not know is skipped instead of
+    being mistaken for the command, which would let the install through unchecked."""
+    return next((i for i in _positionals(args) if args[i] in NPM_COMMANDS), None)
+
+
+def _exec_specs(args: list[str]) -> list[str]:
+    """npx / npm exec: packages given with -p/--package, otherwise the first positional (the package to run)."""
+    pkgs, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            break
+        if a in ("-p", "--package") and i + 1 < len(args):
+            pkgs.append(args[i + 1])
+        elif a.startswith("--package="):
+            pkgs.append(a.split("=", 1)[1])
+        i += 1
+    if not pkgs:
+        pos = _positionals(args)
+        pkgs = [args[pos[0]]] if pos else []
+    return [p for p in pkgs if _is_registry_spec(p)]
 
 
 def package_specs(tool: str, args: list[str]) -> list[str]:
     """Registry package specs that this npm/npx invocation would install or run."""
     args = [a for a in args if a != ALLOW_FLAG]
     if tool == "npx":
-        for a in args:
-            if not a.startswith("-"):
-                return [a] if _is_registry_spec(a) else []
+        return _exec_specs(args)
+    i = command_index(args)
+    if i is None:
         return []
-    if not args:
-        return []
-    cmd, rest = args[0], args[1:]
+    cmd, rest = args[i], args[i + 1:]
     if cmd in EXEC_COMMANDS:
-        return package_specs("npx", rest)
+        return _exec_specs(rest)
     if cmd not in INSTALL_COMMANDS:
         return []
-    specs, skip_next = [], False
-    for a in rest:
-        if skip_next:
-            skip_next = False
-            continue
-        if a in ("--registry", "--prefix", "-C", "--workspace", "-w", "--tag"):
-            skip_next = True
-            continue
-        if a.startswith("-"):
-            continue
-        if _is_registry_spec(a):
-            specs.append(a)
-    return specs
+    return [rest[j] for j in _positionals(rest) if _is_registry_spec(rest[j])]
+
+
+def with_before(tool: str, args: list[str], min_age_hours: float | None = None, now: float | None = None) -> list[str]:
+    """`args` with `--before=<now - waiting period>` for npm/npx commands that resolve versions: npm then picks,
+    for the whole dependency tree, only versions published before that moment. The explicit package is checked
+    (and held) by check_spec; this covers what npm resolves on its own, such as a hijacked patch release of a
+    dependency. The flag goes right after the command, so `npx pkg --x` / `npm exec pkg -- --x` never pass it on."""
+    from datetime import datetime, timezone
+
+    hours = MIN_AGE_HOURS if min_age_hours is None else min_age_hours
+    if hours <= 0 or any(a == "--before" or a.startswith("--before=") for a in args):
+        return list(args)
+    flag = f"--before={datetime.fromtimestamp((now or time.time()) - hours * 3600, timezone.utc):%Y-%m-%dT%H:%M:%SZ}"
+    if tool == "npx":
+        return [flag, *args]
+    i = command_index(args)
+    if tool != "npm" or i is None or args[i] not in RESOLVE_COMMANDS | EXEC_COMMANDS:
+        return list(args)
+    return [*args[: i + 1], flag, *args[i + 1:]]
 
 
 def _is_registry_spec(a: str) -> bool:

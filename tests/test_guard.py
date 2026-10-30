@@ -144,15 +144,35 @@ def test_offline_osv_check_fails_open_to_the_other_checks(monkeypatch, tmp_path)
 
 
 def test_waiting_period_reaches_the_whole_dependency_tree():
-    from gatekeeper.guard.core import ALLOW_FLAG, before_flag
+    from gatekeeper.guard.core import with_before
 
     now = 1_793_318_400.0  # 2026-10-30T00:00:00Z
-    assert before_flag("npm", ["install", "lodash"], 24, now) == ["--before=2026-10-29T00:00:00Z"]
-    assert before_flag("npm", ["install"], 24, now) == ["--before=2026-10-29T00:00:00Z"]  # from package.json
-    assert before_flag("npm", ["update"], 72, now) == ["--before=2026-10-27T00:00:00Z"]
-    assert before_flag("npm", ["run", "build"], 24, now) == []
-    assert before_flag("npx", ["cowsay"], 24, now) == []
-    assert before_flag("npm", ["install", "x", "--before=2020-01-01"], 24, now) == []  # the user's own choice wins
-    assert before_flag("npm", ["install", "x"], 0, now) == []
-    # the override flag is not npm's; guard_run skips the waiting period altogether when it is given
-    assert before_flag("npm", [ALLOW_FLAG, "install", "x"], 24, now) == ["--before=2026-10-29T00:00:00Z"]
+    flag = "--before=2026-10-29T00:00:00Z"
+    assert with_before("npm", ["install", "lodash"], 24, now) == ["install", flag, "lodash"]
+    assert with_before("npm", ["install"], 24, now) == ["install", flag]  # from package.json
+    assert with_before("npm", ["--loglevel", "warn", "i", "x"], 24, now) == ["--loglevel", "warn", "i", flag, "x"]
+    assert with_before("npm", ["update"], 72, now) == ["update", "--before=2026-10-27T00:00:00Z"]
+    assert with_before("npm", ["exec", "pkg", "--", "--x"], 24, now) == ["exec", flag, "pkg", "--", "--x"]
+    assert with_before("npx", ["cowsay", "--x"], 24, now) == [flag, "cowsay", "--x"]
+    assert with_before("npm", ["run", "build"], 24, now) == ["run", "build"]
+    assert with_before("npm", ["install", "x", "--before=2020-01-01"], 24, now) == ["install", "x", "--before=2020-01-01"]
+    assert with_before("npm", ["install", "x"], 0, now) == ["install", "x"]
+
+
+def test_leading_options_do_not_hide_the_install():
+    from gatekeeper.guard.core import package_specs
+
+    assert package_specs("npm", ["-s", "install", "evil"]) == ["evil"]
+    assert package_specs("npm", ["--loglevel", "warn", "install", "evil", "--save-dev"]) == ["evil"]
+    assert package_specs("npm", ["--some-new-flag", "value", "install", "evil"]) == ["evil"]  # unknown value: skipped
+    assert package_specs("npm", ["--registry", "http://r", "i", "a", "--tag", "next", "b"]) == ["a", "b"]
+    assert package_specs("npm", ["run", "install"]) == []  # a script called install
+
+
+def test_npx_packages_given_with_p_are_the_ones_checked():
+    from gatekeeper.guard.core import package_specs
+
+    assert package_specs("npx", ["-p", "evil", "some-bin"]) == ["evil"]
+    assert package_specs("npx", ["--package=evil", "-c", "some-bin --x"]) == ["evil"]
+    assert package_specs("npx", ["--yes", "cowsay", "hi"]) == ["cowsay"]
+    assert package_specs("npm", ["exec", "-p", "evil", "--", "bin"]) == ["evil"]

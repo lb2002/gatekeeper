@@ -312,9 +312,10 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
     from rich.panel import Panel
 
     from gatekeeper.guard import shim
-    from gatekeeper.guard.core import ALLOW_FLAG, before_flag, check_spec, index_age_days, load_fast_model, package_specs
+    from gatekeeper.guard.core import ALLOW_FLAG, check_spec, index_age_days, load_fast_model, package_specs, with_before
 
-    args = [a for a in ctx.args if a != "--"]
+    # the shims call `gk guard run npm -- <args>`: drop that one separator, keep the user's own `--`
+    args = list(ctx.args[1:] if ctx.args[:1] == ["--"] else ctx.args)
     cfg = shim.config()
     real = shim.npm_command(cfg, tool)
     allow = ALLOW_FLAG in args
@@ -361,11 +362,13 @@ def guard_run(ctx: typer.Context, tool: str = typer.Argument(..., help="npm or n
             # message for AI coding agents reading stderr
             typer.echo("Gatekeeper blocked this install because the package looks malicious. Do not retry with other flags or names; ask the user.", err=True)
             raise typer.Exit(1)
-    before = [] if allow else before_flag(tool, args)
+    plain = [a for a in args if a != ALLOW_FLAG]
+    final = plain if allow else with_before(tool, plain)
+    before = [a for a in final if a not in plain]
     if before:
         console.print(f"[dim]gatekeeper: dependencies limited to versions published {before[0][9:]} or earlier "
                       f"(waiting period; GK_MIN_AGE_HOURS=0 turns it off)[/]", highlight=False)
-    result = subprocess.run(real + [a for a in args if a != ALLOW_FLAG] + before)
+    result = subprocess.run(real + final)
     if result.returncode and before:
         console.print("[yellow]gatekeeper[/] if npm could not find a version (ETARGET), a dependency may require a release "
                       f"younger than the waiting period. If you trust it, re-run with {ALLOW_FLAG}.", highlight=False)
