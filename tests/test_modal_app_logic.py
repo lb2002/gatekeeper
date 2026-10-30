@@ -104,3 +104,13 @@ def test_a_url_dependency_goes_to_the_investigator_first(app):
     base = {"seen_at": now.isoformat(), "verdicts": {"spark-open-fireworks": {"verdict": "benign"}}}
     items = {"a@1": {**base, "fast_risk": 0.9, "rules": []}, "b@1": {**base, "fast_risk": 0.0, "rules": ["url_dependency"]}}
     assert app._investigator_candidates(items, now) == ["b@1", "a@1"]
+
+
+def test_past_the_daily_cap_only_urgent_packages_are_read(app):
+    now = datetime.now(timezone.utc)
+    base = {"seen_at": now.isoformat()}
+    quiet = {"spark-open-fireworks": {"verdict": "benign"}}
+    items = {"a@1": {**base, "verdicts": quiet}, "b@1": {**base, "verdicts": quiet, "rules": ["url_dependency"]},
+             "c@1": {**base, "verdicts": {"spark-open-fireworks": {"verdict": "malicious"}}}}
+    assert sorted(app._investigator_candidates(items, now, urgent_only=True)) == ["b@1", "c@1"]
+    assert len(app._investigator_candidates(items, now)) == 3

@@ -1053,6 +1053,7 @@ def spark_open() -> dict:
 # benign packages, and it reports what it looked at, so its finding is a reviewable trace.
 INVESTIGATOR_BACKEND = "spark-open-baseten"  # measured here; on Fireworks the step schema comes back unparseable
 INVESTIGATOR_DAILY_CAP_USD = 12.0
+INVESTIGATOR_URGENT_CAP_USD = 15.0  # past the daily cap, only what a model accused or what nothing else can read
 INVESTIGATOR_TOTAL_CAP_USD = 55.0
 INVESTIGATOR_PER_RUN = 24
 INVESTIGATOR_WORKERS = 3
@@ -1062,7 +1063,7 @@ INVESTIGATOR_MAX_TRIES = 2
 INVESTIGATOR_PROVEN = 0.8  # confidence of a citation-clean malicious finding that alerts on its own
 
 
-def _investigator_candidates(items: dict, now: datetime) -> list[str]:
+def _investigator_candidates(items: dict, now: datetime, urgent_only: bool = False) -> list[str]:
     """What a model called bad comes first (the closer look confirms or clears it), then the riskiest of
     the flags the one-shot models passed. Only after Spark Open answered, and only once."""
     todo = []
@@ -1077,7 +1078,8 @@ def _investigator_candidates(items: dict, now: datetime) -> list[str]:
         accused = any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in NOTIFY_BACKENDS)
         # the one-shot models never saw the code behind a URL: only the investigator reads it
         accused = accused or "url_dependency" in (it.get("rules") or [])
-        todo.append((accused, it.get("fast_risk") or 0.0, it.get("priority") or 0, key))
+        if accused or not urgent_only:
+            todo.append((accused, it.get("fast_risk") or 0.0, it.get("priority") or 0, key))
     return [t[-1] for t in sorted(todo, reverse=True)]
 
 
@@ -1096,11 +1098,13 @@ def investigate_batch() -> dict:
     # the same Baseten switch and credits as the one-shot verdicts: both count against the host's total cap
     if not state.get("baseten_enabled", False):
         return {"enabled": False}
+    urgent_only = spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD
+    day_cap = INVESTIGATOR_URGENT_CAP_USD if urgent_only else INVESTIGATOR_DAILY_CAP_USD
     if (_baseten_credits_used() >= BASETEN_TOTAL_CAP_USD or spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD
-            or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD):
+            or spend["days"].get(day, 0.0) >= day_cap):
         return {"capped": True}
     backend = INVESTIGATOR_BACKEND
-    keys = _investigator_candidates(dict(queue.items()), now)[:INVESTIGATOR_PER_RUN]
+    keys = _investigator_candidates(dict(queue.items()), now, urgent_only)[:INVESTIGATOR_PER_RUN]
     if not keys:
         return {"todo": 0}
     state["investigator_busy_until"] = (now + timedelta(seconds=270)).isoformat()
@@ -1111,7 +1115,7 @@ def investigate_batch() -> dict:
 
     def one(key: str) -> None:
         with lock:
-            if (time.monotonic() - started > INVESTIGATOR_BUDGET_S or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD
+            if (time.monotonic() - started > INVESTIGATOR_BUDGET_S or spend["days"].get(day, 0.0) >= day_cap
                     or _baseten_credits_used() >= BASETEN_TOTAL_CAP_USD):
                 return
         item = queue.get(key, None)
