@@ -60,6 +60,8 @@ A flag is never named before it is confirmed. Instead, within two minutes, the m
 
 In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **10 packages (27 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 23 hours.** Median time from npm publication to our flag: about 1 minute.
 
+![Flagged by Gatekeeper vs. first public report](docs/lead-times.svg)
+
 | Package (versions) | What it does | Flagged after publish | Ahead of the public report |
 |---|---|---|---|
 | `@webapp-shared/login-vmok` (5) | dependency confusion: postinstall beacons host data to a raw IP | 1.0-1.6 min | 13 h ([MAL-2026-18356](https://osv.dev/vulnerability/MAL-2026-18356)) |
