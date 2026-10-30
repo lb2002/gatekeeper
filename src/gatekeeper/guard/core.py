@@ -38,6 +38,7 @@ MAL_INDEX_FILE = BUSY_FILE.parent / "mal_npm.json"  # `gk guard update-osv`: npm
 # was publicly reported within a day of publication (OSV, measured from the report's import time).
 MIN_AGE_HOURS = float(os.environ.get("GK_MIN_AGE_HOURS", "24"))
 MAL_INDEX_URL = os.environ.get("GK_MAL_INDEX_URL", "https://lb2002--gatekeeper-api.us-east.modal.run/osv/mal_npm.json")
+FAST_MODEL_URL = os.environ.get("GK_FAST_MODEL_URL", MAL_INDEX_URL.rsplit("/osv/", 1)[0] + "/models/fastclf.json")
 OSV_ONLINE = os.environ.get("GK_OFFLINE", "") != "1"  # GK_OFFLINE=1: never contact OSV, local list only
 CACHE_VERSION = "v2"
 

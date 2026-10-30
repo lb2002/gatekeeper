@@ -184,13 +184,12 @@ Open weights: the investigator and every-flag verdicts run on **Muse Spark Open*
 
 ## Try the install guard
 
-Needs Python with [uv](https://docs.astral.sh/uv/) and Node/npm. No account or API key.
+Needs [uv](https://docs.astral.sh/uv/) and Node/npm. No account or API key, under a minute:
 
 ```bash
-uv sync
-uv run gk guard enable        # writes npm/npx shims to ~/.gatekeeper/bin
-uv run gk guard update-osv    # offline list of 222k malicious npm names (3 MB)
-uv run gk guard shell         # Windows: a PowerShell with the shims first on PATH
+uv tool install git+https://github.com/lb2002/gatekeeper
+gk guard setup                # shims, list of 222k malicious npm names (3 MB), local classifier (6 MB)
+gk guard shell                # Windows: a PowerShell with the shims first on PATH
 # macOS/Linux instead: export PATH="$HOME/.gatekeeper/bin:$PATH"
 npm install <package>         # checked before anything is installed
 ```

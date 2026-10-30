@@ -258,15 +258,45 @@ def guard_shell() -> None:
 
 @guard_app.command("update-model")
 def guard_update_model() -> None:
-    """Download the local first-stage classifier (plain JSON, ~6 MB) from the Modal volume."""
-    import subprocess
+    """Download the local first-stage classifier (plain JSON, about 6 MB, no account needed)."""
+    import httpx
 
-    from gatekeeper.guard.core import FAST_MODEL_FILE, load_fast_model
+    from gatekeeper.guard.core import FAST_MODEL_FILE, FAST_MODEL_URL, load_fast_model
 
+    resp = httpx.get(FAST_MODEL_URL, timeout=120, follow_redirects=True)
+    resp.raise_for_status()
+    resp.json()  # parse before replacing the old model
     FAST_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["modal", "volume", "get", "--force", "gatekeeper-data", "models/fastclf.json", str(FAST_MODEL_FILE)], check=True)
+    tmp = FAST_MODEL_FILE.with_suffix(".tmp")
+    tmp.write_bytes(resp.content)
+    tmp.replace(FAST_MODEL_FILE)
     model = load_fast_model()
     console.print(f"local classifier: {len(model.index):,} terms, threshold {model.threshold:.3f}", markup=False)
+
+
+@guard_app.command("setup")
+def guard_setup() -> None:
+    """Everything the guard needs in one step: the npm/npx shims, the list of known malware, the local classifier."""
+    import os
+
+    import httpx
+
+    from gatekeeper.guard import shim
+    from gatekeeper.models.backends import LOCAL_URL
+
+    guard_enable()
+    guard_update_osv(from_osv=False)
+    guard_update_model()
+    try:
+        httpx.get(f"{LOCAL_URL}/models", timeout=2).raise_for_status()
+        console.print(f"Muse Glimmer: running at {LOCAL_URL}", markup=False)
+    except httpx.HTTPError:
+        console.print("Muse Glimmer: not running. Known malware, private dependencies and brand-new versions are still "
+                      "stopped; a package the rules flag is blocked until the model can judge it (see the README).", markup=False)
+    if os.name == "nt":
+        console.print("Ready. Start a guarded shell with: gk guard shell", markup=False)
+    else:
+        console.print(f'Ready. Add this to your shell profile: export PATH="{shim.BIN}:$PATH"', markup=False)
 
 
 @guard_app.command("update-osv")

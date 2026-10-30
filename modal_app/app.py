@@ -1905,32 +1905,43 @@ def api():
 
     import threading
 
-    gz_cache: dict = {}
+    gz_caches: dict = {}
     gz_lock = threading.Lock()
+
+    def gzipped_file(path: Path):
+        """Serve a volume file gzipped. Anyone can call this: at most one volume reload per 10 minutes per file,
+        one gzip per new version of it."""
+        import gzip
+
+        from fastapi import Response
+
+        with gz_lock:
+            cache = gz_caches.setdefault(path, {})
+            if time.time() - cache.get("checked", 0) > 600:
+                cache["checked"] = time.time()
+                try:
+                    volume.reload()
+                    mtime = path.stat().st_mtime
+                    if cache.get("mtime") != mtime:
+                        cache.update(mtime=mtime, body=gzip.compress(path.read_bytes(), 6))
+                except Exception as exc:  # missing file, or a reload during a refresh: keep serving the last copy
+                    print(f"{path.name}: {type(exc).__name__}: {exc}"[:200])
+            body = cache.get("body")
+        if body is None:
+            return Response('{"error": "not available yet"}', status_code=503, media_type="application/json")
+        return Response(body, media_type="application/json",
+                        headers={"Content-Encoding": "gzip", "Cache-Control": "public, max-age=3600"})
 
     @web.get("/osv/mal_npm.json")
     def mal_index():
         """Public, no auth: the npm names OSV lists as malicious (built daily from OSV's all.zip, Apache-2.0
         data from OpenSSF malicious-packages), for the install guard's offline check."""
-        import gzip
+        return gzipped_file(MAL_INDEX)
 
-        from fastapi import Response
-
-        with gz_lock:  # anyone can call this: at most one volume reload per 10 minutes, one gzip per new file
-            if time.time() - gz_cache.get("checked", 0) > 600:
-                gz_cache["checked"] = time.time()
-                try:
-                    volume.reload()
-                    mtime = MAL_INDEX.stat().st_mtime
-                    if gz_cache.get("mtime") != mtime:
-                        gz_cache.update(mtime=mtime, body=gzip.compress(MAL_INDEX.read_bytes(), 6))
-                except Exception as exc:  # missing file, or a reload during a refresh: keep serving the last copy
-                    print(f"mal index: {type(exc).__name__}: {exc}"[:200])
-            body = gz_cache.get("body")
-        if body is None:
-            return Response('{"error": "index not available yet"}', status_code=503, media_type="application/json")
-        return Response(body, media_type="application/json",
-                        headers={"Content-Encoding": "gzip", "Cache-Control": "public, max-age=3600"})
+    @web.get("/models/fastclf.json")
+    def fast_model():
+        """Public, no auth: the install guard's local classifier, as plain numbers (no pickle)."""
+        return gzipped_file(DATA / "models" / "fastclf.json")
 
     @web.get("/lead-times.svg")
     def lead_chart():
