@@ -139,10 +139,10 @@ def parse_yarn(text: str) -> list[Locked]:
         keys = [_yarn_key(k) for k in re.findall(r'"[^"]*"|[^,\s][^,]*', header)]
         fields = dict(m.groups() for m in map(_YARN_FIELD.match, body) if m)
         fields = {k.strip('"'): v for k, v in fields.items()}
-        source = _source_of(header, fields.get("resolution", ""))
+        source = _source_of(header, fields.get("resolved", ""), fields.get("resolution", ""))
         resolved = fields.get("resolved", "")
-        if resolved and not source and not is_local(resolved):  # whatever its form: only a registry URL is left alone
-            source = resolved
+        if resolved and not is_local(resolved) and not on_registry(resolved) and (not source or on_registry(source)):
+            source = resolved  # whatever its form: only a registry URL is left alone
         if not keys or (not source and all(spec.startswith(_YARN_LOCAL) for _, spec in keys)):
             continue
         version = fields.get("version") or "?"

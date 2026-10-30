@@ -8,9 +8,12 @@ A hit only sends the version to the models, so a stray monorepo leftover costs a
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import socket
 from datetime import datetime, timedelta
+from urllib.parse import urljoin, urlsplit
 
 from gatekeeper.npm import packument
 from gatekeeper.npm.tarball import PackageFiles
@@ -23,6 +26,9 @@ _ALIAS = re.compile(r"npm:(@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)", re.I)
 MAX_LOOKUPS = 30  # registry requests per version; names already known cost nothing
 MAX_LOOKUP_FAILURES = 3
 MAX_NAMES = 400
+COMMON_URL_DEPENDENCIES = ("https://cdn.sheetjs.com/",)
+MAX_URL_DEPENDENCIES = 2
+MAX_REDIRECTS = 4
 YOUNG_DEPENDENCY = timedelta(days=7)
 MAX_ADDED_LOOKUPS = 12  # registry requests per version; names already known cost nothing
 MISSING = object()  # a dependency the registry does not have
@@ -88,6 +94,57 @@ def _created(client, name: str) -> datetime | None:
     body = resp.json()
     created = (body.get("time") or {}).get("created") if isinstance(body, dict) else None
     return packument._parse_time(created) if isinstance(created, str) else None
+
+
+def url_dependencies(deps: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Dependencies fetched from a URL: (name, url). npm runs their install scripts like any other, but no registry
+    has seen them, and the file behind the URL can change at any time. One well-known CDN build is left out."""
+    return [(n, s) for n, s in deps if isinstance(s, str) and s.startswith(("http://", "https://"))
+            and not s.startswith(COMMON_URL_DEPENDENCIES)]
+
+
+def public_url(url: str) -> bool:
+    """True only for a URL whose host resolves to public addresses: these come from package authors."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)}
+    except OSError:
+        return False
+    return bool(addresses) and all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses)
+
+
+def fetch_url_dependency(client, url: str, fetch) -> PackageFiles | None:
+    """The archive behind a URL dependency, read in memory. Redirects are followed by hand so each hop is checked."""
+    for _ in range(MAX_REDIRECTS):
+        if not public_url(url):
+            return None
+        head = client.head(url, follow_redirects=False)
+        if head.status_code not in (301, 302, 303, 307, 308):
+            break
+        url = urljoin(url, head.headers.get("location", ""))
+    else:
+        return None
+    return fetch(url) if public_url(url) else None
+
+
+def with_url_dependencies(pkg: PackageFiles, client, deps: list[tuple[str, str]], fetch) -> list[str]:
+    """Add the archives of URL dependencies to `pkg`, under `from-url/<name>/`, so they get read like the package's own
+    code. Returns the names. The package itself is often an empty shell around one of these."""
+    added = []
+    for name, url in url_dependencies(deps)[:MAX_URL_DEPENDENCIES]:
+        try:
+            archive = fetch_url_dependency(client, url, fetch)
+        except Exception:
+            continue
+        if archive is None:
+            continue
+        for path, data in archive.files.items():
+            pkg.files[f"from-url/{name}/{path}"] = data
+            pkg.sizes[f"from-url/{name}/{path}"] = archive.sizes.get(path, len(data))
+        added.append(name)
+    return added
 
 
 def young_additions(client, info, now: datetime, popular: set[str]) -> list[tuple[str, float | None]]:

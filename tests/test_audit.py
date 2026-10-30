@@ -273,3 +273,8 @@ def test_only_a_real_url_counts_as_the_registry():
     assert not au.on_registry("registry.npmjs.org/a.tgz")
     text = 'a@^1:\n  version "1.0.0"\n  resolved "registry.npmjs.org/a.tgz"\n'
     assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE
+
+
+def test_a_foreign_resolved_field_wins_over_registry_urls_elsewhere():
+    text = '"a@https://registry.npmjs.org/a.tgz":\n  version "1.0.0"\n  resolved "evil.example/a.tgz"\n'
+    assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE

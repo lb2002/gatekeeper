@@ -57,6 +57,7 @@ Steps: "read" (rows of one file), "search" (find literal terms in all text files
 When the data lists what this version adds compared with its previous version or an original, read that first: harmless updates add features, attacks add a call that does not belong. A fork that keeps the original's code but adds a hidden action on the user's account or data is malicious.
 Use your steps where the payload would hide: files run by install hooks, the entry file, code after the end of an otherwise normal library, very long lines, files with odd names, HTML pages (fake logins, wallet seed forms), and calls that send data to a host the package has no reason to contact.
 Malicious also covers phishing pages and wallet drainers published on npm.
+Files under `from-url/<name>/` are the archive of a dependency the package installs from a URL, fetched for you: npm runs its install scripts too, so judge them as part of this package.
 A public package whose code loads a package that does not exist on the public registry keeps its working part where no reviewer can read it. Unless that load is plainly an unused leftover, this is at least suspicious, and malicious if it runs on load or install with no reason the package gives.
 A package that does what its description says, with nothing hidden, is benign however much it spawns or fetches. Ask what runs without the user asking for it and where data goes.
 Obfuscated code proves nothing either way. Do not call it benign because you could not read it: use "strings" on it, and if the part that does the work stays unreadable and the package gives no reason to hide it, answer suspicious. Known build output (minified bundles, source maps) is not obfuscation.
@@ -424,6 +425,6 @@ def trigger_errors(verdict: Verdict, bundle: Bundle, pkg: PackageFiles) -> list[
         return []
     excerpts = [bundle.excerpt(ev.excerpt_id) for ev in verdict.evidence]
     cited = {ex.path for ex in excerpts if ex is not None and ex.kind != "manifest"}
-    if not cited or cited & runs_at_install(pkg):
+    if not cited or cited & runs_at_install(pkg) or any(p.startswith("from-url/") for p in cited):
         return []
     return [f"install trigger not verified: {sorted(cited)[0]} is not reachable from an install hook"]

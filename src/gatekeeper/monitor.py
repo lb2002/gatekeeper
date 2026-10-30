@@ -20,7 +20,7 @@ from gatekeeper.npm.tarball import MAX_COMPRESSED_BYTES, ArchiveTooLarge, read_t
 from gatekeeper.triage.content import Hit, score_content
 from gatekeeper.triage.campaign import shared_files
 from gatekeeper.triage.meta import score_metadata
-from gatekeeper.triage.phantom import unreadable_imports, young_additions
+from gatekeeper.triage.phantom import unreadable_imports, url_dependencies, young_additions
 
 RECENT_WINDOW = timedelta(hours=6)  # versions considered "new" for a changed package
 NEW_PACKAGE_WINDOW = timedelta(hours=72)
@@ -138,10 +138,15 @@ def process_version(
         dep, hours = fresh[0]
         meta.reasons.append(f"+10 this update adds {dep}, " + ("which is not on the public registry" if hours is None
                                                                 else f"a package created {hours:.0f} hours ago"))
+    # code from a URL, in a package small enough that nobody would notice: hs-framework is one log line around such a dependency
+    small = info.version_count is not None and info.version_count <= SMALL_PACKAGE_VERSIONS and info.name not in popular
+    remote = url_dependencies(info.dependencies) if small else []
+    if remote:
+        meta.reasons.append(f"+10 installs {remote[0][0]} from {remote[0][1][:80]}, outside the registry")
     # past the per-name cap only a strong metadata signal (e.g. a known-malicious dependency) earns a download
-    if not scan and meta.score < FLAG_TOTAL_THRESHOLD and not known_account and not fresh:
+    if not scan and meta.score < FLAG_TOTAL_THRESHOLD and not known_account and not fresh and not remote:
         return rec
-    if not info.tarball_url or not (should_scan(info, meta.score, popular, now) or known_account or fresh):
+    if not info.tarball_url or not (should_scan(info, meta.score, popular, now) or known_account or fresh or remote):
         return rec
     try:
         pkg = read_tarball(download_capped(client, info.tarball_url))
@@ -169,7 +174,7 @@ def process_version(
     rec.content_score = content.score
     rec.rules = sorted(content.rules | ({"known_campaign_endpoint"} if shared else set())
                        | ({"known_bad_publisher"} if known_account else set()) | ({"known_bad_file"} if copied else set())
-                       | ({"fresh_dependency"} if fresh else set()))
+                       | ({"fresh_dependency"} if fresh else set()) | ({"url_dependency"} if remote else set()))
     rec.priority = meta.score + content.score
     rules_flag = content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD
     fast_flag = False
@@ -184,8 +189,8 @@ def process_version(
     text = bundle.render()
     young = info.package_created_at is not None and now - info.package_created_at <= timedelta(hours=NEW_PACKAGE_HOURS)
     new_with_hook = young and bool(info.install_scripts or info.gypfile)
-    rec.flagged = rules_flag or fast_flag or new_with_hook or any((shared, known_account, hidden, copied, fresh))
-    rec.priority += 10 * (bool(shared) + bool(known_account) + bool(hidden) + bool(copied) + bool(fresh))
+    rec.flagged = rules_flag or fast_flag or new_with_hook or any((shared, known_account, hidden, copied, fresh, remote))
+    rec.priority += 10 * sum(map(bool, (shared, known_account, hidden, copied, fresh, remote)))
     rec.bundle = text
     rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
     rec.excerpts = [e.ref() for e in bundle.excerpts]

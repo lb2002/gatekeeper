@@ -1373,7 +1373,7 @@ def _investigate_package(name: str, version: str, meta_reasons: list[str] | None
     from gatekeeper.npm.tarball import read_tarball
     from gatekeeper.popular import load_popular
     from gatekeeper.triage.content import Hit, score_content
-    from gatekeeper.triage.phantom import unreadable_imports
+    from gatekeeper.triage.phantom import unreadable_imports, with_url_dependencies
 
     with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
         doc = packument.fetch_packument(client, name) or {}
@@ -1383,11 +1383,14 @@ def _investigate_package(name: str, version: str, meta_reasons: list[str] | None
         popular = load_popular(DATA / "popular.txt")
         references = references_for(client, doc, version, pkg, popular, lambda url: read_tarball(download_capped(client, url)))
         hidden = unreadable_imports(client, pkg, name, popular)
+        info = packument.version_info(doc, version)
+        fetched = with_url_dependencies(pkg, client, info.dependencies, lambda url: read_tarball(download_capped(client, url)))
     content = score_content(pkg)
     for dep, (path, line, text) in hidden:
         content.hits.append(Hit("private_dependency", path, line, text))
     meta_reasons = list(meta_reasons or []) + [f"+10 loads {dep}, which does not exist on the public registry" for dep, _ in hidden
                                                if not any(dep in r for r in meta_reasons or [])]
+    meta_reasons += [f"its dependency {dep} comes from a URL: its archive is in from-url/{dep}/" for dep in fetched]
     return investigate(pkg, build_bundle(name, version, pkg, content, meta_reasons=meta_reasons), content,
                        backend=backend, deep=deep, references=references, on_step=on_step)
 

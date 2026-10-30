@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 import httpx
+import pytest
 
 from gatekeeper.npm.tarball import PackageFiles
 from gatekeeper.triage import phantom
@@ -226,3 +227,52 @@ def test_lookups_stop_after_a_few_failures():
     pkg = pkg_of({"a.js": b"\n".join(b"require('@a/p%d')" % i for i in range(20))})
     phantom.unreadable_imports(httpx.Client(transport=httpx.MockTransport(boom)), pkg, "x", set())
     assert len(calls) == phantom.MAX_LOOKUP_FAILURES
+
+
+def test_url_dependencies_are_listed_except_the_common_cdn():
+    deps = [("a", "^1.0.0"), ("b", "https://evil.example/b.tgz"), ("xlsx", "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"), ("c", "github:x/y")]
+    assert phantom.url_dependencies(deps) == [("b", "https://evil.example/b.tgz")]
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1/a.tgz", "http://10.0.77.5:8000/a.tgz", "http://169.254.169.254/latest/meta-data",
+                                 "http://[::1]/a.tgz", "file:///etc/passwd", "ftp://example.com/a.tgz", "https:///nohost"])
+def test_internal_addresses_are_never_fetched(url):
+    assert not phantom.public_url(url)
+
+
+def _public_dns(monkeypatch, *allowed):
+    real = phantom.socket.getaddrinfo
+
+    def fake(host, *a, **kw):
+        if host in allowed:
+            return [(2, 1, 6, "", ("93.184.216.34", 443))]
+        return real(host, *a, **kw)
+
+    monkeypatch.setattr(phantom.socket, "getaddrinfo", fake)
+
+
+def test_a_redirect_to_an_internal_address_stops_the_fetch(monkeypatch):
+    _public_dns(monkeypatch, "evil.example")
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(302, headers={"location": "http://169.254.169.254/x"})))
+    fetched = []
+    assert phantom.fetch_url_dependency(client, "https://evil.example/a.tgz", fetched.append) is None
+    assert fetched == []
+
+
+def test_url_dependency_archives_join_the_package(monkeypatch):
+    _public_dns(monkeypatch, "evil.example")
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    archive = pkg_of({"package.json": b'{"scripts":{"preinstall":"node t.js"}}', "t.js": b"steal()"})
+    pkg = pkg_of({"index.js": b"console.log(1)"})
+    assert phantom.with_url_dependencies(pkg, client, [("ltidisafe", "https://evil.example/a.tgz")], lambda url: archive) == ["ltidisafe"]
+    assert pkg.files["from-url/ltidisafe/t.js"] == b"steal()" and pkg.sizes["from-url/ltidisafe/t.js"] == 7
+
+
+def test_a_failing_download_costs_only_that_dependency(monkeypatch):
+    _public_dns(monkeypatch, "evil.example")
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+
+    def boom(url):
+        raise OSError("gone")
+
+    assert phantom.with_url_dependencies(pkg_of({}), client, [("a", "https://evil.example/a.tgz")], boom) == []
