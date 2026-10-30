@@ -367,7 +367,7 @@ INVESTIGATE_SECRETS = [modal.Secret.from_name("baseten-api", required_keys=["BAS
 
 @app.function(image=image, volumes={str(DATA): volume}, secrets=INVESTIGATE_SECRETS, timeout=3 * 3600, cpu=2.0, memory=4096)
 def eval_investigator(subset: str = "missed", backend: str = "spark-open-baseten", tag: str = "v1", max_usd: float = 6.0,
-                      parallel: int = 3, limit: int = 0) -> dict:
+                      parallel: int = 3, limit: int = 0, deep: bool = False, max_steps: int = 6) -> dict:
     """The investigator on time-split test packages. Subsets: `missed` (malware all three one-shot models passed),
     `caught` (40 they found), `hard` (benign with install scripts), `benign` (60 others). Needs the archives, so it
     lives here next to the decryption; rows already done are skipped. Outputs are for evaluation only."""
@@ -422,7 +422,7 @@ def eval_investigator(subset: str = "missed", backend: str = "spark-open-baseten
                     info = packument.version_info(packument.fetch_packument(client, r["name"]), r["version"])
                     pkg = read_tarball(client.get(info.tarball_url).content)
             content = score_content(pkg)
-            res = investigate(pkg, build_bundle(r["name"], r["version"], pkg, content), content, backend=backend)
+            res = investigate(pkg, build_bundle(r["name"], r["version"], pkg, content), content, backend=backend, deep=deep, max_steps=max_steps)
         except Exception as exc:
             return base | {"verdict": None, "errors": [f"{type(exc).__name__}: {exc}"[:200]], "cost_usd": 0.0}
         v = res.verdict

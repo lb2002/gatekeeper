@@ -643,7 +643,7 @@ def _fireworks_candidates(items: dict) -> list[str]:
     return [k for *_, k in sorted(todo, reverse=True)]
 
 
-NOTIFY_BACKENDS = ("glimmer-local", "spark", *SPARK_OPEN_BACKENDS)
+NOTIFY_BACKENDS = ("glimmer-local", "spark", *SPARK_OPEN_BACKENDS, "investigator")
 
 
 def _notify(title: str, body: str, click: str = "", tags: str = "warning", priority: str = "high") -> None:
@@ -669,7 +669,11 @@ def _maybe_notify_candidate(key: str, item: dict) -> dict:
     calls = {("spark-open" if b in SPARK_OPEN_BACKENDS else b): v for b, v in (item.get("verdicts") or {}).items()
              if b in NOTIFY_BACKENDS and v.get("verdict")}
     bad = {b: v for b, v in calls.items() if v["verdict"] in ("malicious", "suspicious")}
-    if len(bad) < 2 or not any(v["verdict"] == "malicious" for v in bad.values()):
+    probe = calls.get("investigator") or {}
+    if probe.get("verdict") == "benign":
+        return item
+    proven = probe.get("verdict") == "malicious" and not probe.get("errors") and (probe.get("confidence") or 0) >= INVESTIGATOR_PROVEN
+    if not proven and (len(bad) < 2 or not any(v["verdict"] == "malicious" for v in bad.values())):
         return item
     now = datetime.now(timezone.utc)
     item["notified"] = now.isoformat()
@@ -1024,7 +1028,118 @@ def spark_open() -> dict:
         return {"enabled": False}
     backend, spend_key, daily_cap, total_cap = host
     keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]
+    investigate_batch.spawn()
     return _run_cloud(backend, keys, spend_key, daily_cap, total_cap, workers=8, budget_s=140)
+
+
+# The investigator reads the archive itself (see gatekeeper/investigate.py): ~$0.012 a package. On the
+# time-split test it found 9 of the 83 samples all one-shot models passed, with no false positive in 131
+# benign packages, and it reports what it looked at, so its finding is a reviewable trace.
+INVESTIGATOR_DAILY_CAP_USD = 12.0
+INVESTIGATOR_TOTAL_CAP_USD = 55.0
+INVESTIGATOR_PER_RUN = 24
+INVESTIGATOR_WORKERS = 3
+INVESTIGATOR_BUDGET_S = 200
+INVESTIGATOR_MAX_AGE = timedelta(hours=36)
+INVESTIGATOR_MAX_TRIES = 2
+INVESTIGATOR_PROVEN = 0.8  # confidence of a citation-clean malicious finding that alerts on its own
+
+
+def _investigator_candidates(items: dict, now: datetime) -> list[str]:
+    """What a model called bad comes first (the closer look confirms or clears it), then the riskiest of
+    the flags the one-shot models passed. Only after Spark Open answered, and only once."""
+    todo = []
+    for key, it in items.items():
+        verdicts = it.get("verdicts") or {}
+        if "investigator" in verdicts or it.get("investigated") or it.get("investigator_failures", 0) >= INVESTIGATOR_MAX_TRIES:
+            continue
+        if not any((verdicts.get(b) or {}).get("verdict") for b in SPARK_OPEN_BACKENDS):
+            continue
+        if now - datetime.fromisoformat(it["seen_at"]) > INVESTIGATOR_MAX_AGE:
+            continue
+        accused = any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in NOTIFY_BACKENDS)
+        todo.append((accused, it.get("fast_risk") or 0.0, it.get("priority") or 0, key))
+    return [t[-1] for t in sorted(todo, reverse=True)]
+
+
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET, BASETEN_SECRET, NTFY_SECRET], timeout=280, cpu=0.25, memory=1024)
+def investigate_batch() -> dict:
+    """Spawned by `spark_open` every 5 minutes; a run that finds another still active leaves at once."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    now = datetime.now(timezone.utc)
+    busy = state.get("investigator_busy_until")
+    if busy and datetime.fromisoformat(busy) > now:
+        return {"busy": True}
+    spend = state.get("investigator_spend", {"total": 0.0, "days": {}})
+    day = f"{now:%Y-%m-%d}"
+    if spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD:
+        return {"capped": True}
+    host = _spark_open_host()
+    backend = host[0] if host else "spark-open-baseten"
+    keys = _investigator_candidates(dict(queue.items()), now)[:INVESTIGATOR_PER_RUN]
+    if not keys:
+        return {"todo": 0}
+    state["investigator_busy_until"] = (now + timedelta(seconds=270)).isoformat()
+    started = time.monotonic()
+    lock = threading.Lock()
+    counts = {"done": 0, "gone": 0, "errors": 0}
+
+    def one(key: str) -> None:
+        with lock:
+            if time.monotonic() - started > INVESTIGATOR_BUDGET_S or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD:
+                return
+        item = queue.get(key, None)
+        if item is None:
+            return
+        try:
+            res = _investigate_package(item["name"], item["version"], item.get("meta_reasons"), True, backend)
+        except Exception as exc:
+            print(f"investigator error on {key}: {type(exc).__name__}: {exc}"[:300])
+            with lock:
+                counts["errors"] += 1
+            fresh = queue.get(key, None)
+            if fresh is not None:
+                fresh["investigator_failures"] = fresh.get("investigator_failures", 0) + 1
+                queue[key] = fresh
+            return
+        fresh = queue.get(key, None)
+        if fresh is None:
+            return
+        if res is None:
+            fresh["investigated"] = "version no longer on npm"
+            queue[key] = fresh
+            with lock:
+                counts["gone"] += 1
+            return
+        v = res.verdict
+        row = {"key": key, "backend": backend, "verdict": v.model_dump(mode="json") if v else None, "errors": res.errors,
+               "steps": res.steps, "excerpts": [e.render()[:3000] for e in res.excerpts], "input_tokens": res.input_tokens,
+               "cached_tokens": res.cached_tokens, "output_tokens": res.output_tokens, "cost_usd": res.cost_usd,
+               "received_at": datetime.now(timezone.utc).isoformat()}
+        _append_jsonl(DATA / "verdicts" / day / "investigator.jsonl", [row])
+        with lock:
+            counts["done"] += 1
+            spend["total"] += res.cost_usd
+            spend["days"][day] = spend["days"].get(day, 0.0) + res.cost_usd
+            state["investigator_spend"] = spend
+        if v:
+            fresh.setdefault("verdicts", {})["investigator"] = {
+                "verdict": v.verdict.value, "confidence": v.confidence, "at": row["received_at"], "errors": res.errors[:3], "full": row["verdict"],
+                "steps": res.steps, "excerpts": row["excerpts"][:6], "host": backend}
+            queue[key] = _maybe_notify_candidate(key, fresh)
+        else:
+            fresh["investigator_failures"] = fresh.get("investigator_failures", 0) + 1
+            queue[key] = fresh
+
+    with ThreadPoolExecutor(max_workers=INVESTIGATOR_WORKERS) as pool:
+        list(pool.map(one, keys))
+    state["investigator_busy_until"] = None
+    volume.commit()
+    stats = {**counts, "todo": len(keys), "spend_today": round(spend["days"].get(day, 0.0), 3), "spend_total": round(spend["total"], 3)}
+    print(json.dumps(stats))
+    return stats
 
 
 def _spark_open_host() -> tuple[str, str, float, float] | None:
@@ -1214,6 +1329,36 @@ def inspect_package(name: str, version: str, show_up_to: int = 20_000) -> dict:
         "text": {p: (pkg.text(p) or "")[:show_up_to] for p in install + [info_main for info_main in ("index.js",) if info_main in pkg.files]},
         "still_on_registry": version in (doc.get("versions") or {}),
     }
+
+
+def _investigate_package(name: str, version: str, meta_reasons: list[str] | None, deep: bool, backend: str):
+    """Fetch the archive into memory and run the investigator on it. None if the version is gone from npm."""
+    from gatekeeper.evidence.bundle import build_bundle
+    from gatekeeper.investigate import investigate
+    from gatekeeper.monitor import download_capped
+    from gatekeeper.npm import feed, packument
+    from gatekeeper.npm.tarball import read_tarball
+    from gatekeeper.triage.content import score_content
+
+    with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
+        doc = packument.fetch_packument(client, name) or {}
+        if version not in (doc.get("versions") or {}):
+            return None
+        data = download_capped(client, packument.version_info(doc, version).tarball_url)
+    pkg = read_tarball(data)
+    content = score_content(pkg)
+    return investigate(pkg, build_bundle(name, version, pkg, content, meta_reasons=meta_reasons), content,
+                       backend=backend, deep=deep)
+
+
+@app.function(image=image, secrets=[BASETEN_SECRET, FIREWORKS_SECRET], timeout=280, cpu=0.25, memory=1024)
+def investigate_package(name: str, version: str, deep: bool = False, backend: str = "spark-open-baseten") -> dict:
+    """Run the investigator on one version and return its steps, excerpts and verdict (for review)."""
+    res = _investigate_package(name, version, None, deep, backend)
+    if res is None:
+        return {"error": "version not on the registry"}
+    return {"verdict": res.verdict.model_dump(mode="json") if res.verdict else None, "errors": res.errors, "steps": res.steps,
+            "excerpts": [e.render()[:4000] for e in res.excerpts], "cost_usd": round(res.cost_usd, 4)}
 
 
 @app.function(image=image, timeout=60)

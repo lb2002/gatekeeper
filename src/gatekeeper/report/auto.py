@@ -61,6 +61,8 @@ _REQUEST_METHOD = re.compile(r"\.(?:request|get)\s*\(")
 _ENV_READ = re.compile(r"JSON\.stringify\(\s*process\.env\s*\)|Object\.entries\(\s*process\.env\s*\)|\{\s*\.\.\.process\.env\s*\}|/proc/(?:\d+|self)/environ")
 _CREDENTIAL = r"\.npmrc|\.ssh/id_\w+|\.aws/credentials|\.git-credentials|\.docker/config\.json|\.kube/config|/(?:var/)?run/secrets"
 _CREDENTIAL_READ = re.compile(rf"\breadFile(?:Sync)?\s*\([^)]{{0,200}}?({_CREDENTIAL})|\bcat\s+[^'\"\n|;&]{{0,80}}?({_CREDENTIAL})")
+# dependency-confusion probes send the host's identity instead of secrets; one call alone is ordinary code
+_HOST_READ = re.compile(r"\bos\.(hostname|homedir|userInfo)\s*\(\s*\)")
 _SCRIPT = re.compile(r"(?:node|bun)\s+(?:\./)?((?:[\w-][\w.-]*/)*[\w-][\w.-]*\.(?:c?js|mjs))")
 
 UPSTREAM = "ossf/malicious-packages"
@@ -110,6 +112,8 @@ def judge_verdicts(verdicts: dict) -> dict[str, dict]:
 
 
 def models_agree(verdicts: dict) -> tuple[bool, str]:
+    if ((verdicts or {}).get("investigator") or {}).get("verdict") == "benign":
+        return False, "the investigator read further and says benign"
     judges = judge_verdicts(verdicts)
     for j in REQUIRED_JUDGES:
         if j not in judges:
@@ -188,7 +192,7 @@ def _unit_facts(code: str) -> tuple[list[Fact], list[str], list[str]] | None:
     """Facts for one piece of install-time code, or None unless destination, read and request are
     all present and a destination lies within PROXIMITY_LINES of a read."""
     lines = code.splitlines() or [code]
-    dests, reads, requests = [], [], []
+    dests, reads, requests, host_reads = [], [], [], []
     hosts, urls = set(), set()
     for no, line in enumerate(lines, start=1):
         for m in _URL.finditer(line):
@@ -211,11 +215,14 @@ def _unit_facts(code: str) -> tuple[list[Fact], list[str], list[str]] | None:
             reads.append(Fact("read", no, m.group(0), "environment"))
         for m in _CREDENTIAL_READ.finditer(line):
             reads.append(Fact("read", no, m.group(0), m.group(1) or m.group(2)))
+        host_reads += [Fact("read", no, m.group(0), "host") for m in _HOST_READ.finditer(line)]
         for m in _REQUEST.finditer(line):
             requests.append(Fact("request", no, m.group(0)))
     if not requests and _NET_MODULE.search(code):
         for no, line in enumerate(lines, start=1):
             requests += [Fact("request", no, m.group(0)) for m in _REQUEST_METHOD.finditer(line)]
+    if len({f.text for f in host_reads}) >= 2:
+        reads += host_reads
     if not (dests and reads and requests):
         return None
     if not any(abs(d.line - r.line) <= PROXIMITY_LINES for d in dests for r in reads):
@@ -328,7 +335,8 @@ def _fact_text(f: Fact, lines: bool) -> str:
                 "webhook": "a webhook address"}[f.note]
         return f"{what}, `{_code(f.text, 100)}`{where}"
     if f.kind == "read":
-        what = "a read of the process environment" if f.note == "environment" else f"a read of the credential path `{_code(f.note, 40)}`"
+        what = {"environment": "a read of the process environment", "host": "a read of the machine's identity"}.get(
+            f.note, f"a read of the credential path `{_code(f.note, 40)}`")
         return f"{what}, `{_code(f.text, 80)}`{where}"
     return f"a network request call, `{_code(f.text, 40)}`{where}"
 
@@ -349,7 +357,7 @@ def build_osv(name: str, evidence: list[Evidence], published: dict[str, str], ju
             + _join([_fact_text(f, e.file != "binding.gyp") for f in e.facts]) + "."
         )
     details = (
-        f"{name} runs code during `npm install` that reads the process environment or credential files and contains "
+        f"{name} runs code during `npm install` that reads the process environment, credential files or the machine's identity and contains "
         f"a request to an external collection endpoint:\n\n" + "\n".join(bullets) + "\n\n"
         f"The code is quoted from the published archive. Gatekeeper (https://github.com/lb2002/gatekeeper) flagged it "
         f"statically, and the Meta models {judges} classified it as malicious. Submitted automatically by Gatekeeper on "
@@ -437,7 +445,8 @@ def submit(client, osv: dict, name: str) -> dict:
         "title": f"Add malicious npm package {name}", "head": f"{FORK_OWNER}:{branch}", "base": "main",
         "body": "Submitted automatically by Gatekeeper (https://github.com/lb2002/gatekeeper) on behalf of Linus Baumberger, "
                 "who maintains it. Gatekeeper only submits on its own when the install-time code in the published archive "
-                "reads the environment or credential files and sends a request to an external collection endpoint, and "
+                "reads the environment, credential files or the machine's identity and sends a request to an external "
+                "collection endpoint, and "
                 "Muse Spark and Muse Spark Open both classify the version as malicious. The code in the report is quoted "
                 "from the archive (file, location, SHA-256).",
     })
