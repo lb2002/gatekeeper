@@ -7,6 +7,7 @@ webhook.site token, a tunnel subdomain). Only endpoints specific enough to name 
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import re
@@ -91,6 +92,30 @@ def packages_of(client, account: str) -> list[str] | None:
     r.raise_for_status()
     names = [o["package"]["name"] for o in r.json().get("objects", [])]
     return None if len(names) > SWEEP_MAX_PACKAGES else names
+
+
+# Campaigns copy their files byte for byte: the fake-job-interview template shares plugin.js across 30 packages.
+# Very small files say nothing, and so do the big bundled libraries a package happens to vendor.
+FILE_MIN_BYTES = 200
+FILE_MAX_BYTES = 256_000
+FILE_ID_CHARS = 20
+
+
+def code_fingerprints(pkg) -> dict[str, str]:
+    """Short content hash -> path, for the code files worth remembering."""
+    out = {}
+    for path, data in pkg.files.items():
+        if path.endswith((".js", ".cjs", ".mjs", ".ts", ".sh", ".ps1", ".py")) and not path.endswith(".d.ts") \
+                and FILE_MIN_BYTES <= len(data) <= FILE_MAX_BYTES:
+            out[hashlib.sha256(data).hexdigest()[:FILE_ID_CHARS]] = path
+    return out
+
+
+def shared_files(pkg, known: dict[str, str]) -> list[tuple[str, str]]:
+    """(path here, reported package) for every file identical to one in a reported package."""
+    if not known:
+        return []
+    return [(path, known[digest]) for digest, path in code_fingerprints(pkg).items() if digest in known]
 
 
 def matches(text: str, known: dict[str, str]) -> list[tuple[str, str]]:

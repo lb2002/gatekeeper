@@ -27,3 +27,25 @@ def test_shared_path_words_are_not_tokens():
     text = ('get("https://cdn.discordapp.com/attachments/1029384756/abc.png"); '
             'post("https://discord.com/api/webhooks/1234567890123/AbC-dEf_9")')
     assert specific_iocs(text) == {"cdn.discordapp.com/1029384756", "discord.com/1234567890123"}
+
+
+def _pkg(files):
+    from gatekeeper.npm.tarball import PackageFiles
+
+    return PackageFiles(files=files, sizes={p: len(b) for p, b in files.items()})
+
+
+def test_a_copied_file_is_recognised_under_any_name():
+    from gatekeeper.triage.campaign import code_fingerprints, shared_files
+
+    body = b"module.exports = function plugin() { return 1 }\n" * 10
+    known = {d: "tailwind-fabric (MAL-2026-18082)" for d in code_fingerprints(_pkg({"plugin.js": body}))}
+    assert shared_files(_pkg({"lib/renamed.js": body}), known) == [("lib/renamed.js", "tailwind-fabric (MAL-2026-18082)")]
+    assert shared_files(_pkg({"lib/renamed.js": body + b"// one more line"}), known) == []
+
+
+def test_fingerprints_skip_what_says_nothing():
+    from gatekeeper.triage.campaign import FILE_MAX_BYTES, code_fingerprints
+
+    pkg = _pkg({"tiny.js": b"x", "types.d.ts": b"x" * 500, "README.md": b"x" * 500, "bundle.js": b"x" * (FILE_MAX_BYTES + 1)})
+    assert code_fingerprints(pkg) == {}

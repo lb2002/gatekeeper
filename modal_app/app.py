@@ -120,10 +120,17 @@ def _campaign_publishers() -> dict:
     return _CAMPAIGN_CACHE["publishers"]
 
 
+def _campaign_files() -> dict:
+    """Content hashes of code files from publicly reported packages (built by `sweep`) -> that package."""
+    _refresh_campaign_cache()
+    return _CAMPAIGN_CACHE["files"]
+
+
 def _refresh_campaign_cache() -> None:
     if time.time() - _CAMPAIGN_CACHE.get("at", 0) > 300:
         _CAMPAIGN_CACHE.update(at=time.time(), iocs=state.get("campaign_iocs", {}) or {},
-                               publishers=state.get("campaign_publishers", {}) or {})
+                               publishers=state.get("campaign_publishers", {}) or {},
+                               files=state.get("campaign_files", {}) or {})
 
 
 def _update_campaign_iocs(items: dict) -> int:
@@ -211,7 +218,8 @@ def _run_poll() -> dict:
         todo = list(dict.fromkeys(pending + list(names)))
         records, deferred = process_names(
             client, todo, popular, seen_keys, now=now, window=window, deadline=started + PROCESS_BUDGET_S,
-            fast=_fast_scorer(), mal_index=_mal_index(), campaign=_campaign_iocs(), publishers=_campaign_publishers(), workers=32,
+            fast=_fast_scorer(), mal_index=_mal_index(), campaign=_campaign_iocs(), publishers=_campaign_publishers(),
+            known_files=_campaign_files(), workers=32,
         )
         stats["deferred"] = len(deferred)
 
@@ -1565,10 +1573,11 @@ def sweep(days: int = 2) -> dict:
     the npm account; its endpoints join the campaign memory; and its other packages are read now, because
     campaigns keep clean-looking siblings that nobody has reported yet. Spawned by `confirm` every hour."""
     from gatekeeper.confirm import recall
-    from gatekeeper.monitor import process_names
+    from gatekeeper.monitor import download_capped, process_names
     from gatekeeper.npm import feed, packument
+    from gatekeeper.npm.tarball import read_tarball
     from gatekeeper.popular import load_popular
-    from gatekeeper.triage.campaign import account_names, packages_of, report_iocs
+    from gatekeeper.triage.campaign import account_names, code_fingerprints, packages_of, report_iocs
 
     volume.reload()
     now = datetime.now(timezone.utc)
@@ -1578,7 +1587,9 @@ def sweep(days: int = 2) -> dict:
     iocs = state.get("campaign_iocs", {}) or {}
     reported = state.get("reported_publishers", {}) or {}
     swept = state.get("swept_accounts", {}) or {}
-    stats = {"reports": 0, "new_accounts": 0, "new_iocs": 0, "packages": 0, "flagged": 0, "too_big": 0}
+    files = state.get("campaign_files", {}) or {}
+    read_reports = set(state.get("sweep_read_reports", []))
+    stats = {"reports": 0, "new_accounts": 0, "new_iocs": 0, "packages": 0, "flagged": 0, "too_big": 0, "new_files": 0}
     with feed.make_client(timeout=20) as client:
         vulns = recall.fetch_recent(client, now - timedelta(days=days))
         stats["reports"] = len(vulns)
@@ -1597,6 +1608,22 @@ def sweep(days: int = 2) -> dict:
                     if account not in accounts:
                         accounts[account] = f"{name} ({vuln['id']})"
                         stats["new_accounts"] += 1
+                # the reported archive, while npm still serves it: its files mark later copies
+                on_npm = [v for v in recall._targets(vuln) if v[0] == name][0][1]
+                on_npm = [v for v in on_npm if v in (doc.get("versions") or {}) and not packument.is_placeholder_version(v)]
+                if on_npm and vuln["id"] not in read_reports and time.monotonic() - started < SWEEP_BUDGET_S / 2:
+                    read_reports.add(vuln["id"])
+                    try:
+                        pkg = read_tarball(download_capped(client, packument.version_info(doc, on_npm[-1]).tarball_url))
+                    except Exception as exc:
+                        print(f"sweep archive {name}: {type(exc).__name__}"[:200])
+                        continue
+                    for digest in code_fingerprints(pkg):
+                        if digest not in files:
+                            files[digest] = f"{name} ({vuln['id']})"
+                            stats["new_files"] += 1
+        state["campaign_files"] = files
+        state["sweep_read_reports"] = sorted(read_reports)
         state["campaign_iocs"] = iocs
         state["campaign_publishers"] = accounts
         names: list[str] = []
@@ -1620,7 +1647,7 @@ def sweep(days: int = 2) -> dict:
         stats["packages"] = len(names)
         records, deferred = process_names(
             client, names, popular, set(queue.keys()), now=now, window=SWEEP_WINDOW, deadline=started + SWEEP_BUDGET_S,
-            fast=_fast_scorer(), mal_index=_mal_index(), campaign=iocs, publishers=accounts, workers=8,
+            fast=_fast_scorer(), mal_index=_mal_index(), campaign=iocs, publishers=accounts, known_files=files, workers=8,
         )
     rows = [r.to_json() | {"found_by": "sweep"} for r in records]
     flagged = [r for r in rows if r["flagged"]]

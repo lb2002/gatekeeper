@@ -18,6 +18,7 @@ from gatekeeper.evidence.bundle import build_bundle
 from gatekeeper.npm import packument
 from gatekeeper.npm.tarball import MAX_COMPRESSED_BYTES, ArchiveTooLarge, read_tarball
 from gatekeeper.triage.content import Hit, score_content
+from gatekeeper.triage.campaign import shared_files
 from gatekeeper.triage.meta import score_metadata
 from gatekeeper.triage.phantom import unreadable_imports
 
@@ -115,6 +116,7 @@ def process_version(
     scan: bool = True,
     campaign: dict[str, str] | None = None,
     publishers: dict[str, str] | None = None,
+    known_files: dict[str, str] | None = None,
 ) -> Record:
     meta = score_metadata(info, popular, now=now, mal_index=mal_index)
     rec = Record(
@@ -149,6 +151,10 @@ def process_version(
     for dep, (path, line, text) in hidden:
         content.hits.append(Hit("private_dependency", path, line, text))
         meta.reasons.append(f"+10 loads {dep}, which does not exist on the public registry")
+    # a file identical to one in a reported package: a re-upload, however clean it looks
+    copied = shared_files(pkg, known_files or {})
+    if copied:
+        meta.reasons.append(f"+10 {copied[0][0]} is identical to a file of {copied[0][1]}")
     # an exfiltration endpoint a malicious package used before (see triage/campaign.py)
     shared = campaign_matches(pkg, campaign)
     if shared:
@@ -156,7 +162,7 @@ def process_version(
     rec.scanned = True
     rec.content_score = content.score
     rec.rules = sorted(content.rules | ({"known_campaign_endpoint"} if shared else set())
-                       | ({"known_bad_publisher"} if known_account else set()))
+                       | ({"known_bad_publisher"} if known_account else set()) | ({"known_bad_file"} if copied else set()))
     rec.priority = meta.score + content.score
     rules_flag = content.score >= FLAG_CONTENT_THRESHOLD or rec.priority >= FLAG_TOTAL_THRESHOLD
     fast_flag = False
@@ -171,8 +177,8 @@ def process_version(
     text = bundle.render()
     young = info.package_created_at is not None and now - info.package_created_at <= timedelta(hours=NEW_PACKAGE_HOURS)
     new_with_hook = young and bool(info.install_scripts or info.gypfile)
-    rec.flagged = rules_flag or fast_flag or new_with_hook or bool(shared) or bool(known_account) or bool(hidden)
-    rec.priority += 10 * (bool(shared) + bool(known_account) + bool(hidden))
+    rec.flagged = rules_flag or fast_flag or new_with_hook or bool(shared) or bool(known_account) or bool(hidden) or bool(copied)
+    rec.priority += 10 * (bool(shared) + bool(known_account) + bool(hidden) + bool(copied))
     rec.bundle = text
     rec.bundle_sha256 = hashlib.sha256(text.encode()).hexdigest()
     rec.excerpts = [e.ref() for e in bundle.excerpts]
@@ -192,6 +198,7 @@ def process_names(
     mal_index: dict[str, dict] | None = None,
     campaign: dict[str, str] | None = None,
     publishers: dict[str, str] | None = None,
+    known_files: dict[str, str] | None = None,
 ) -> tuple[list[Record], list[str]]:
     """Score every version of the changed packages published within `window`, unless already seen.
 
@@ -219,7 +226,7 @@ def process_names(
             if out and deadline is not None and time.monotonic() > deadline:
                 return out, True  # unfinished: the name is deferred, `seen` skips what is done
             out.append(process_version(client, info, popular, now, fast, mal_index, scan=i < MAX_VERSIONS_PER_NAME,
-                                       campaign=campaign, publishers=publishers))
+                                       campaign=campaign, publishers=publishers, known_files=known_files))
         return out, False
 
     pool = ThreadPoolExecutor(max_workers=workers)
