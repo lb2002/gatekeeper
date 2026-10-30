@@ -129,6 +129,7 @@ Known-malicious packages and dependencies are blocked and brand-new versions are
 ```bash
 uv sync
 uv run pytest
+uv run gk watch                                          # live view of new npm releases (metadata only)
 uv run gk check <package>@<version> --backend local      # needs llama-server with Muse Glimmer
 uv run gk guard enable                                   # npm/npx shims
 uv run gk guard update-osv                               # offline list of 222k malicious npm names
