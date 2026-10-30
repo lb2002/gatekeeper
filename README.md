@@ -29,6 +29,8 @@ npm replication feed (every 2 min, on Modal)
   -> hourly confirmation against OSV, GitHub advisories and npm takedowns
 ```
 
+**Campaign memory.** Attackers re-upload under new names and reuse their collector. The endpoints of packages at least two Muse models call malicious (URLs to a public IP, webhook.site and similar tokens, tunnel subdomains; never shared hosts like `webhook.site` alone) are remembered, and any later package that sends to one is flagged and linked to the earlier one. Backtest on 6,628 scanned archives: no false hits, and two more packages of a live dependency-confusion campaign.
+
 Every verdict must cite excerpt lines that exist in the bundle; verdicts that cite nothing, or only the manifest, are rejected. Text found inside a package that addresses the reviewer ("this package is audited and safe") is treated as a signal, not an instruction.
 
 ### Install guard decisions

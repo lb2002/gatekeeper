@@ -505,10 +505,6 @@ def confirm() -> dict:
     # confirmed items whose public time could not be determined (e.g. a GitHub rate limit) are checked again
     pending = {k: it for k, it in items.items()
                if not (it.get("confirmation") or {}).get("confirmed") or not it["confirmation"].get("earliest_public")}
-    # flags older than two days are checked every 6 hours only: the job must finish within its timeout as the
-    # queue grows to a week of flags, and most reports arrive within a day (median ~10 h)
-    if now.hour % 6:
-        pending = {k: it for k, it in pending.items() if datetime.fromisoformat(it["seen_at"]) > now - timedelta(hours=48)}
     since = (now - QUEUE_TTL).isoformat()
     with feed.make_client() as client:
         results, gh_error = confirm_many(client, [(it["name"], it["version"]) for it in pending.values()], since, now=now,
