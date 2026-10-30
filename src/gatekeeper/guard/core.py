@@ -348,7 +348,7 @@ def npm_root(npm_exe: str) -> Path | None:
     return next((c for c in candidates if (c / "lib" / "utils" / "cmd-list.js").exists()), None)
 
 
-def npm_native_parse(npm_exe: str, tool: str, args: list[str], timeout: float = 90, before: str | None = None) -> dict | None:
+def npm_native_parse(npm_exe: str, tool: str, args: list[str], timeout: float = 90) -> dict | None:
     """Ask the installed npm itself what this command line installs or runs: npm's config loader (options,
     shorthands, abbreviations, .npmrc, npm_config_* variables), its command aliases, npm-package-arg for the
     spec type and pacote for the exact version, with the user's registry, tag and before settings. Re-parsing
@@ -359,9 +359,8 @@ def npm_native_parse(npm_exe: str, tool: str, args: list[str], timeout: float = 
         return None
     node = next((str(p) for p in (Path(npm_exe).parent / "node.exe", Path(npm_exe).parent / "node") if p.exists()), "node")
     try:
-        env = {**os.environ, "GK_BEFORE": before} if before else None
         out = subprocess.run([node, str(NPM_ARGV_JS), str(root), tool, *args], capture_output=True, text=True,
-                             timeout=timeout, encoding="utf-8", env=env)
+                             timeout=timeout, encoding="utf-8")
         data = json.loads(out.stdout or "{}")
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None

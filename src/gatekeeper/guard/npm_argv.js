@@ -35,7 +35,11 @@ function projectSpec (spec) {
   const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')) } catch (e) { return null } }
   const lock = read('package-lock.json') || read('npm-shrinkwrap.json')
   const locked = lock && lock.packages && lock.packages['node_modules/' + r.name]
-  if (locked && locked.version && !locked.link) return `${r.name}@${locked.version}`
+  if (locked && locked.version && !locked.link) {
+    // a lock entry pointing outside the registry (git, a tarball URL) is fetched from there: nothing to check
+    if (locked.resolved && !/^https?:\/\/[^/]+\/.+\/-\/[^/]+\.tgz$/.test(locked.resolved)) return locked.resolved
+    return `${r.name}@${locked.version}`
+  }
   const pkg = read('package.json') || {}
   for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
     const range = (pkg[section] || {})[r.name]
@@ -167,19 +171,20 @@ async function main () {
     }
     try {
       // the version npm would pick, with the user's registry, scoped registries, tag and before settings
-      let mani = await pacoteMod().manifest(spec, { ...flat, fullMetadata: true })
+      // The arguments are the final ones, including Gatekeeper's --before, so npm's own precedence decides
+      // which cutoff applies and this is the version the install will get. When nothing is old enough, npm
+      // would fail; resolve without the cutoff to name the version, which the guard then holds.
+      let mani
       let requested = null
-      // Gatekeeper's waiting period (GK_BEFORE) goes onto the real install as --before unless the user set one:
-      // resolve with it too, so the version checked is the version npm will install. If nothing old enough
-      // matches, keep the requested one: the guard holds it and suggests an older version.
-      if (process.env.GK_BEFORE && !before) {
-        try {
-          const old = await pacoteMod().manifest(spec, { ...flat, before: new Date(process.env.GK_BEFORE), fullMetadata: true })
-          if (old.version !== mani.version) {
-            requested = mani.version
-            mani = old
-          }
-        } catch (e) {}
+      try {
+        mani = await pacoteMod().manifest(spec, { ...flat, fullMetadata: true })
+        if (flat.before) {
+          const latest = await pacoteMod().manifest(spec, { ...flat, before: null, fullMetadata: true })
+          if (latest.version !== mani.version) requested = latest.version
+        }
+      } catch (e) {
+        if (!flat.before || e.code !== 'ETARGET') throw e
+        mani = await pacoteMod().manifest(spec, { ...flat, before: null, fullMetadata: true })
       }
       const pack = await pacoteMod().packument(mani.name, { ...flat, fullMetadata: true })
       const deps = []
