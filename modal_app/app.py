@@ -1038,6 +1038,7 @@ def spark_open() -> dict:
 # The investigator reads the archive itself (see gatekeeper/investigate.py): ~$0.012 a package. On the
 # time-split test it found 9 of the 83 samples all one-shot models passed, with no false positive in 131
 # benign packages, and it reports what it looked at, so its finding is a reviewable trace.
+INVESTIGATOR_BACKEND = "spark-open-baseten"  # measured here; on Fireworks the step schema comes back unparseable
 INVESTIGATOR_DAILY_CAP_USD = 12.0
 INVESTIGATOR_TOTAL_CAP_USD = 55.0
 INVESTIGATOR_PER_RUN = 24
@@ -1079,8 +1080,7 @@ def investigate_batch() -> dict:
     day = f"{now:%Y-%m-%d}"
     if spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD:
         return {"capped": True}
-    host = _spark_open_host()
-    backend = host[0] if host else "spark-open-baseten"
+    backend = INVESTIGATOR_BACKEND
     keys = _investigator_candidates(dict(queue.items()), now)[:INVESTIGATOR_PER_RUN]
     if not keys:
         return {"todo": 0}
