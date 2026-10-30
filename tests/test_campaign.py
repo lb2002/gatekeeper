@@ -21,3 +21,9 @@ def test_a_reupload_with_the_same_collector_matches_its_source():
     text = 'https.request("https://130.162.231.177:8443/", {method: "POST"})'
     assert matches(text, known) == [("130.162.231.177", "@pcb-dp/qa-commons@1.0.10")]
     assert matches("nothing here", known) == []
+
+
+def test_shared_path_words_are_not_tokens():
+    text = ('get("https://cdn.discordapp.com/attachments/1029384756/abc.png"); '
+            'post("https://discord.com/api/webhooks/1234567890123/AbC-dEf_9")')
+    assert specific_iocs(text) == {"cdn.discordapp.com/1029384756", "discord.com/1234567890123"}

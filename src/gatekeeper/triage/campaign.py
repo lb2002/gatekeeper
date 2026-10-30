@@ -20,7 +20,8 @@ _PATH_TOKEN_HOSTS = ("webhook.site", "requestbin.net", "pipedream.net", "discord
 _SUBDOMAIN_HOSTS = ("trycloudflare.com", "ngrok.io", "ngrok-free.app", "ngrok.app", "oast.fun", "oast.pro", "oast.live",
                     "oast.site", "oast.online", "oast.me", "interact.sh", "burpcollaborator.net", "pipedream.net",
                     "requestbin.net", "loca.lt", "serveo.net", "m.pipedream.net")
-_TOKEN = re.compile(r"[A-Za-z0-9_-]{8,}")
+# an identifier, not a word: path segments like "attachments" or "webhooks" are shared by everyone
+_TOKEN = re.compile(r"(?=[A-Za-z_-]*[0-9])[A-Za-z0-9_-]{8,}")
 
 
 def _public_ip(host: str) -> bool:
