@@ -749,8 +749,9 @@ def _run_cloud(
 
     def one(key: str) -> None:
         with lock:
+            used = _baseten_credits_used() if backend == "spark-open-baseten" else spend["total"]
             stop = (
-                spend["total"] >= total_cap or spend["days"].get(day, 0.0) >= daily_cap
+                used >= total_cap or spend["days"].get(day, 0.0) >= daily_cap
                 or counts["consecutive_errors"] >= 3 or time.monotonic() - started > budget_s
             )
         item = None if stop else queue.get(key, None)
@@ -1081,8 +1082,7 @@ def investigate_batch() -> dict:
     # the same Baseten switch and credits as the one-shot verdicts: both count against the host's total cap
     if not state.get("baseten_enabled", False):
         return {"enabled": False}
-    host_total = (state.get("baseten_spend") or {}).get("total", 0.0) + spend["total"]
-    if (host_total >= BASETEN_TOTAL_CAP_USD or spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD
+    if (_baseten_credits_used() >= BASETEN_TOTAL_CAP_USD or spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD
             or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD):
         return {"capped": True}
     backend = INVESTIGATOR_BACKEND
@@ -1096,7 +1096,8 @@ def investigate_batch() -> dict:
 
     def one(key: str) -> None:
         with lock:
-            if time.monotonic() - started > INVESTIGATOR_BUDGET_S or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD:
+            if (time.monotonic() - started > INVESTIGATOR_BUDGET_S or spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD
+                    or _baseten_credits_used() >= BASETEN_TOTAL_CAP_USD):
                 return
         item = queue.get(key, None)
         if item is None:
@@ -1150,13 +1151,19 @@ def investigate_batch() -> dict:
     return stats
 
 
+def _baseten_credits_used() -> float:
+    """One-shot verdicts and the investigator draw on the same Baseten credits."""
+    return sum((state.get(key) or {}).get("total", 0.0) for key in ("baseten_spend", "investigator_spend"))
+
+
 def _spark_open_host() -> tuple[str, str, float, float] | None:
     day = f"{datetime.now(timezone.utc):%Y-%m-%d}"
     hosts = [("fireworks_enabled", "spark-open-fireworks", "fireworks_spend", FIREWORKS_DAILY_CAP_USD, FIREWORKS_TOTAL_CAP_USD),
              ("baseten_enabled", "spark-open-baseten", "baseten_spend", BASETEN_DAILY_CAP_USD, BASETEN_TOTAL_CAP_USD)]
     for flag, backend, spend_key, daily_cap, total_cap in hosts:
         spend = state.get(spend_key, {"total": 0.0, "days": {}})
-        if state.get(flag, False) and spend["total"] < total_cap and spend["days"].get(day, 0.0) < daily_cap:
+        used = _baseten_credits_used() if backend == "spark-open-baseten" else spend["total"]
+        if state.get(flag, False) and used < total_cap and spend["days"].get(day, 0.0) < daily_cap:
             return backend, spend_key, daily_cap, total_cap
     return None
 
