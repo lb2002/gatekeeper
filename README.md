@@ -25,7 +25,9 @@ npm replication feed (every 2 min, on Modal)
   -> metadata triage (install hooks, typosquats, maintainer changes, new packages, OSV-listed dependencies)
   -> in-memory tarball scan: static rules + a fast first-stage classifier;
      every package younger than 72 h that runs code at install time goes to the models;
-     so does any package that loads a dependency the public registry does not have
+     so does any package that loads a dependency the public registry does not have,
+     any update that adds a package created days ago (the shape of a hijacked release),
+     and any package with a file identical to one in a reported package
   -> every 30 min: fine-tuned Llama Guard 3 1B (v2) over everything the cheap stages let through
      (both learned stages only route, so they run wide: ~5% of live npm each)
   -> evidence bundle: numbered excerpts of the code that matters (max 8000 chars)
@@ -70,7 +72,9 @@ But the absence is visible. [`phantom.py`](src/gatekeeper/triage/phantom.py) fla
 
 Following the campaign's fingerprint through npm then found what nobody had reported: **8 new packages and 2 new versions, still live, 4 of the packages published that same day** (one borrows the name of a famous animation library), using **5 private scopes unknown until then**. The attackers had rotated to new scopes after the first reports. Reported as [ossf/malicious-packages#1694](https://github.com/ossf/malicious-packages/pull/1694).
 
-**Sweep.** Reports are also leads. Every hour, each new OSV report and each package two Muse models agree on is traced to its npm account; the endpoints it names join the campaign memory, and the account's other packages are read at once, because campaigns keep clean-looking siblings. Shared publishers (`GitHub Actions` for trusted publishing) are excluded: remembering one flagged 600 automated releases in 25 minutes before we caught it.
+The install guard applies the same check: a public package that loads something nobody can read is blocked before it reaches your machine.
+
+**Sweep.** Reports are also leads. Every hour, each new OSV report and each package two Muse models agree on is traced to its npm account; the endpoints it names join the campaign memory, the code files of the reported archive become fingerprints (the campaign above shares one `plugin.js` byte for byte across dozens of packages, so a new copy is flagged within two minutes), and the account's other packages are read at once, because campaigns keep clean-looking siblings. Shared publishers (`GitHub Actions` for trusted publishing) are excluded: remembering one flagged 600 automated releases in 25 minutes before we caught it.
 
 ### Install guard decisions
 
