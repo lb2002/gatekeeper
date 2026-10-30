@@ -132,7 +132,6 @@ def _update_campaign_iocs(items: dict) -> int:
     from gatekeeper.npm import feed, packument
     from gatekeeper.triage.campaign import is_person, specific_iocs
 
-    cleared_accounts = state.get("swept_accounts", {}) or {}
     known = state.get("campaign_iocs", {}) or {}
     accounts = state.get("campaign_publishers", {}) or {}
     lookups = 0
@@ -155,7 +154,7 @@ def _update_campaign_iocs(items: dict) -> int:
                     publisher = (((doc.get("versions") or {}).get(it["version"]) or {}).get("_npmUser") or {}).get("name")
                 except Exception:
                     publisher = None
-            if publisher and is_person(publisher) and cleared_accounts.get(publisher) != "too many packages":
+            if publisher and is_person(publisher):
                 accounts.setdefault(publisher, key)
     if len(known) > 5000:  # keep the newest entries (dicts keep insertion order)
         known = dict(list(known.items())[-5000:])
@@ -1155,7 +1154,7 @@ def investigate_batch() -> dict:
 
 def _baseten_credits_used() -> float:
     """One-shot verdicts and the investigator draw on the same Baseten credits."""
-    return sum((state.get(key) or {}).get("total", 0.0) for key in ("baseten_spend", "investigator_spend"))
+    return sum((state.get(key) or {}).get("total", 0.0) for key in ("baseten_spend", "investigator_spend", "demo_spend"))
 
 
 def _spark_open_host() -> tuple[str, str, float, float] | None:
@@ -1388,10 +1387,20 @@ def investigate_package(name: str, version: str, deep: bool = False, backend: st
 
 
 # Public demo: anyone can point the investigator at a package, so it has its own hard limits
-DEMO_RUNS_PER_DAY = 120  # ~$2 a day at most, from the investigator's budget
-DEMO_RUNS_PER_CLIENT_HOUR = 8
+DEMO_RUNS_PER_DAY = 120  # the hard bound: a failed run is not billed in `demo_spend`, a run always counts here
+DEMO_RUNS_PER_CLIENT_HOUR = 8  # a courtesy limit; the daily limits are what protect the credits
+DEMO_DAILY_CAP_USD = 2.0
+DEMO_TOTAL_CAP_USD = 8.0
+DEMO_RUNNING_FOR_S = 240  # a run older than this died: the function timeout is 200 s
 _DEMO_NAME = re.compile(r"(?:@[a-z0-9][a-z0-9._-]{0,100}/)?[a-z0-9][a-z0-9._-]{0,120}\Z")
 _DEMO_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,60}\Z")
+
+
+def _demo_open() -> bool:
+    day = f"{datetime.now(timezone.utc):%Y-%m-%d}"
+    spend = state.get("demo_spend", {"total": 0.0, "days": {}})
+    return (bool(state.get("baseten_enabled", False)) and _baseten_credits_used() < BASETEN_TOTAL_CAP_USD
+            and spend["total"] < DEMO_TOTAL_CAP_USD and spend["days"].get(day, 0.0) < DEMO_DAILY_CAP_USD)
 
 
 def _demo_spec(text: str) -> tuple[str, str | None] | None:
@@ -1411,12 +1420,14 @@ def demo_investigate(key: str, name: str, version: str) -> None:
     now = datetime.now(timezone.utc)
     steps: list[dict] = []
     model = BACKENDS[INVESTIGATOR_BACKEND][2]
+    if not _demo_open():
+        demo[key] = {"status": "done", "error": "The demo is paused right now. Please come back later.", "steps": steps}
+        return
 
     def on_step(step: dict) -> None:
         steps.append(step)
-        demo[key] = {"status": "running", "steps": steps}
+        demo[key] = {"status": "running", "steps": steps, "started": now.timestamp()}
 
-    demo[key] = {"status": "running", "steps": steps}
     try:
         res = _investigate_package(name, version, None, True, INVESTIGATOR_BACKEND, on_step)
     except Exception as exc:
@@ -1428,10 +1439,10 @@ def demo_investigate(key: str, name: str, version: str) -> None:
         demo[key] = {"status": "done", "error": "That version is not on npm.", "steps": steps}
         return
     day = f"{now:%Y-%m-%d}"
-    spend = state.get("investigator_spend", {"total": 0.0, "days": {}})
+    spend = state.get("demo_spend", {"total": 0.0, "days": {}})
     spend["total"] += res.cost_usd
     spend["days"][day] = spend["days"].get(day, 0.0) + res.cost_usd
-    state["investigator_spend"] = spend
+    state["demo_spend"] = spend
     demo[key] = {"status": "done", "steps": steps, "verdict": res.verdict.model_dump(mode="json") if res.verdict else None,
                  "errors": res.errors, "excerpts": [e.render()[:3000] for e in res.excerpts], "cost_usd": res.cost_usd, "model": model,
                  "at": now.isoformat()}
@@ -1581,7 +1592,7 @@ def sweep(days: int = 2) -> dict:
                     print(f"sweep: {name}: {type(exc).__name__}"[:200])
                     continue
                 for account in account_names(doc) | ({reported[name]} if name in reported else set()):
-                    if account not in accounts and swept.get(account) != "too many packages":
+                    if account not in accounts:
                         accounts[account] = f"{name} ({vuln['id']})"
                         stats["new_accounts"] += 1
         state["campaign_iocs"] = iocs
@@ -1594,11 +1605,11 @@ def sweep(days: int = 2) -> dict:
             except Exception as exc:
                 print(f"sweep search {account}: {type(exc).__name__}"[:200])
                 continue
-            done_now.append(account)
-            if found is None:  # a real maintainer, hijacked at most: no reason to distrust all they publish
+            if found is not None:
+                done_now.append(account)
+            if found is None:  # too many to read now; the account stays remembered, so its new versions are still read
                 stats["too_big"] += 1
                 swept[account] = "too many packages"
-                accounts.pop(account, None)
             else:
                 swept[account] = now.isoformat()
                 names += [n for n in found if n not in popular]
@@ -1923,17 +1934,22 @@ def api():
         if spec is None:
             raise HTTPException(status_code=400, detail="That is not an npm package name.")
         name, version = spec
-        with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:
-            doc = packument.fetch_packument(client, name) or {}
+        if not _demo_open():
+            raise HTTPException(status_code=503, detail="The demo is paused right now. Please come back later.")
+        with feed.make_client(timeout=HTTP_TIMEOUT_S) as client:  # the short form: enough to check the name, and small
+            resp = client.get(packument.packument_url(name), headers={"Accept": "application/vnd.npm.install-v1+json"})
+        doc = resp.json() if resp.status_code == 200 else {}
         versions = doc.get("versions") or {}
         version = version or (doc.get("dist-tags") or {}).get("latest")
         if not version or version not in versions:
             raise HTTPException(status_code=404, detail="That package or version is not on npm.")
         key = f"{name}@{version}"
-        done = demo.get(key, None)
-        if done is not None and (done.get("status") == "done" and not done.get("error") or done.get("status") == "running"):
+        done = demo.get(key, None) or {}
+        live = done.get("status") == "running" and time.time() - done.get("started", 0) < DEMO_RUNNING_FOR_S
+        if live or (done.get("status") == "done" and not done.get("error")):
             return {"key": key}
-        client_id = hashlib.sha256((request.headers.get("x-forwarded-for", "?").split(",")[0]).encode()).hexdigest()[:16]
+        # the last hop is the one the platform's proxy added; anything before it comes from the client
+        client_id = hashlib.sha256((request.headers.get("x-forwarded-for", "?").split(",")[-1].strip()).encode()).hexdigest()[:16]
         hour = int(time.time() // 3600)
         with demo_lock:
             for old in [k for k in demo_clients if k[1] != hour]:
@@ -1947,8 +1963,12 @@ def api():
             demo_clients[(client_id, hour)] = demo_clients.get((client_id, hour), 0) + 1
             runs[day] = runs.get(day, 0) + 1
             state["demo_runs"] = runs
-        demo[key] = {"status": "running", "steps": []}
-        demo_investigate.spawn(key, name, version)
+        demo[key] = {"status": "running", "steps": [], "started": time.time()}
+        try:
+            demo_investigate.spawn(key, name, version)
+        except Exception:
+            demo.pop(key, None)
+            raise HTTPException(status_code=503, detail="Could not start a run. Please try again.") from None
         return {"key": key}
 
     @web.get("/try/result")
