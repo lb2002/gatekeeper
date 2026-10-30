@@ -242,3 +242,14 @@ def test_package_names_and_deprecation_notes_are_not_sources():
     assert au._source_of("simple-git@^3.10.0") == ""
     assert au._source_of("@npmcli/git@5.0.8") == ""
     assert au._source_of("git@evil.example:x/y.git") == "git@evil.example:x/y.git"
+
+
+def test_every_url_scheme_counts_as_a_source():
+    assert au._source_of("git://evil.example/x.git") == "git://evil.example/x.git"
+    assert au._source_of("ftp://evil.example/x.tgz") == "ftp://evil.example/x.tgz"
+    assert au._source_of("github:evil/repo") == "github:evil/repo"
+
+
+def test_an_unknown_yarn_source_form_fails_closed():
+    text = 'a@^1:\n  version "1.0.0"\n  resolved "evil.example/a.tgz"\n'
+    assert au.check_index(au.parse_yarn(text), {})[0].kind == au.UNTRUSTED_SOURCE

@@ -73,7 +73,7 @@ def parse_npm(text: str) -> list[Locked]:
 
 
 # `git@` only as an ssh address: `simple-git@^3.10.0` and `@npmcli/git@5.0.8` are package names
-_ANY_SOURCE = re.compile(r"""(?:https?://|git\+|ssh://|(?<![\w-])git@[\w.-]+[:/])[^\s"',}#&]*""", re.I)
+_ANY_SOURCE = re.compile(r"""(?:[a-z][a-z0-9+.-]*://|git\+|(?<![\w-])git@[\w.-]+[:/]|(?<![\w-])(?:github|gitlab|bitbucket|gist):)[^\s"',}#&]*""", re.I)
 _YARN_ALIAS = re.compile(r"((?:@[^/@\s]+/)?[^/@\s]+)(?:@.*)?\Z")
 _YARN_FIELD = re.compile(r'  ("?[\w-]+"?):? "?([^"]*)"?\s*\Z')
 _YARN_LOCAL = ("link:", "file:", "workspace:", "portal:", "patch:")
@@ -128,7 +128,8 @@ def parse_yarn(text: str) -> list[Locked]:
         keys = [_yarn_key(k) for k in re.findall(r'"[^"]*"|[^,\s][^,]*', header)]
         fields = dict(m.groups() for m in map(_YARN_FIELD.match, body) if m)
         fields = {k.strip('"'): v for k, v in fields.items()}
-        source = _source_of(header, fields.get("resolved", ""), fields.get("resolution", ""))
+        # a `resolved` value of an unknown form fails closed: it is taken as it stands
+        source = _source_of(header, fields.get("resolved", ""), fields.get("resolution", "")) or fields.get("resolved", "")
         if not keys or (not source and all(spec.startswith(_YARN_LOCAL) for _, spec in keys)):
             continue
         version = fields.get("version") or "?"
