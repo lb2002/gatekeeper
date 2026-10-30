@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import time
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,18 +34,20 @@ BUSY_FILE = Path(os.environ.get("USERPROFILE") or Path.home()) / ".gatekeeper" /
 FAST_MODEL_FILE = BUSY_FILE.parent / "fastclf.json"  # exported by modal_app/fastclf.py::export
 CACHE_FILE = BUSY_FILE.parent / "verdicts.json"
 MAL_INDEX_FILE = BUSY_FILE.parent / "mal_npm.json"  # `gk guard update-osv`: npm names OSV lists as malicious
-# Versions younger than this are held back even when every check is clean: 82% of October's npm malware
-# was publicly reported within an hour of publication, 89% within a day (OSV, 785 entries).
+# Versions younger than this are held back even when every check is clean: 58% of October's npm malware
+# was publicly reported within a day of publication (OSV, measured from the report's import time).
 MIN_AGE_HOURS = float(os.environ.get("GK_MIN_AGE_HOURS", "24"))
 MAL_INDEX_URL = os.environ.get("GK_MAL_INDEX_URL", "https://lb2002--gatekeeper-api.us-east.modal.run/osv/mal_npm.json")
 OSV_ONLINE = os.environ.get("GK_OFFLINE", "") != "1"  # GK_OFFLINE=1: never contact OSV, local list only
+CACHE_VERSION = "v2"
 
 
 def _cache_key(meta: dict) -> str | None:
     # Only versions with a sha512 integrity are cached: npm verifies the tarball it installs against
     # that same value, so a cached decision always refers to exactly the bytes being installed.
     integrity = meta.get("integrity") or ""
-    return f"{meta['name']}@{meta['version']} {integrity}" if integrity.startswith("sha512-") else None
+    # the version prefix drops decisions made before the current set of checks
+    return f"{CACHE_VERSION} {meta['name']}@{meta['version']} {integrity}" if integrity.startswith("sha512-") else None
 
 
 def _cache_get(meta: dict) -> dict | None:
@@ -273,7 +276,7 @@ def verify_integrity(data: bytes, integrity: str | None) -> bool:
 def private_dependencies(meta: dict, pkg) -> list[str]:
     """Packages this public package loads that do not exist for the public (a live campaign hides its payload that
     way). Only for packages from the public registry: on a company registry, private dependencies are normal."""
-    if not OSV_ONLINE or "registry.npmjs.org" not in (meta.get("tarball") or ""):
+    if not OSV_ONLINE or urlsplit(meta.get("tarball") or "").hostname != "registry.npmjs.org":
         return []
     deps = meta.get("dependencies") or []
     deps = list(deps.items()) if isinstance(deps, dict) else [tuple(d) for d in deps]

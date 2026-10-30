@@ -21,6 +21,7 @@ _SCOPED_NAME = re.compile(r"@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*\Z", re.I)
 _TEST_DIR = re.compile(r"(?:^|/)(?:test|tests|__tests__|fixtures)/")
 _ALIAS = re.compile(r"npm:(@[a-z0-9][\w.-]*/[a-z0-9][\w.-]*)", re.I)
 MAX_LOOKUPS = 30  # registry requests per version; names already known cost nothing
+MAX_LOOKUP_FAILURES = 3
 MAX_NAMES = 400
 YOUNG_DEPENDENCY = timedelta(days=7)
 MAX_ADDED_LOOKUPS = 12  # registry requests per version; names already known cost nothing
@@ -52,18 +53,14 @@ def _manifest_deps(pkg: PackageFiles) -> list[tuple[str, str]]:
 
 
 def scoped_imports(pkg: PackageFiles, registry_deps: list[tuple[str, str]] | None = None) -> dict[str, tuple[str, int, str]]:
-    """Scoped packages the package loads or declares -> where (path, line, text). Code that runs first comes first,
-    then what the registry and the archive declare (they can differ, and npm installs the registry's), then other
-    files, test folders last: filler imports cannot push the real one past the lookup limit."""
-    found: dict[str, tuple[str, int, str]] = {}
+    """Scoped packages the package declares or loads -> where (path, line, text). What npm will install comes first
+    (the registry's list, then the archive's, which can differ), then code that runs first, then other files, test
+    folders last: filler imports cannot push the real one past the lookup limit."""
+    found = _declared(list(registry_deps or []) + _manifest_deps(pkg))
     focus = focus_files(pkg)
     others = sorted((p for p in pkg.files if p not in focus and p.endswith(CODE_EXT) and not p.endswith(".d.ts")),
                     key=lambda p: bool(_TEST_DIR.search(p)))
-    for path in focus:
-        _scan(pkg, path, found)
-    for name, where in _declared(list(registry_deps or []) + _manifest_deps(pkg)).items():
-        found.setdefault(name, where)
-    for path in others:
+    for path in focus + others:
         _scan(pkg, path, found)
     return found
 
@@ -136,24 +133,23 @@ def _lookup(client, name: str) -> bool | None:
 def unreadable_imports(client, pkg: PackageFiles, own_name: str, popular: set[str],
                        registry_deps: list[tuple[str, str]] | None = None) -> list[tuple[str, tuple[str, int, str]]]:
     """Scoped packages it loads that do not exist for the public: (name, (path, line, text)). A failed lookup
-    counts as readable and is not remembered: the monitor must not stop for a registry hiccup, and the next
-    version of the package asks again."""
-    out = []
-    lookups = 0
-    for name, where in scoped_imports(pkg, registry_deps).items():
-        if name in popular or name == own_name:
+    counts as readable and is not remembered: the monitor must not stop for a registry hiccup, the next version
+    of the package asks again, and the offline guard still has its other checks. Names already known always count,
+    whatever happens to the lookups."""
+    candidates = {n: w for n, w in scoped_imports(pkg, registry_deps).items() if n not in popular and n != own_name}
+    lookups = failures = 0
+    for name in candidates:
+        if name in _KNOWN:
             continue
-        if name not in _KNOWN:
-            if lookups >= MAX_LOOKUPS:
-                continue
-            lookups += 1
-            try:
-                readable = _lookup(client, name)
-            except Exception:  # no network: the remaining lookups would only wait for the same timeout
-                break
-            if readable is None:
-                continue
+        if lookups >= MAX_LOOKUPS or failures >= MAX_LOOKUP_FAILURES:
+            break
+        lookups += 1
+        try:
+            readable = _lookup(client, name)
+        except Exception:
+            failures += 1  # a few in a row mean no network: the others would only wait for the same timeout
+            continue
+        failures = 0
+        if readable is not None:
             _KNOWN[name] = readable
-        if not _KNOWN[name]:
-            out.append((name, where))
-    return out
+    return [(n, w) for n, w in candidates.items() if _KNOWN.get(n) is False]

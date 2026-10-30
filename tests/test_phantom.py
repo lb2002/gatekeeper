@@ -198,3 +198,31 @@ def test_a_garbled_registry_answer_is_no_evidence_and_no_crash():
     client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=["not", "a", "packument"])))
     assert phantom.young_additions(client, _update(["odd"]), NOW, set()) == []
     assert phantom._CREATED == {}
+
+
+def test_declared_dependencies_are_checked_before_any_import():
+    pkg = pkg_of({"package.json": b'{"main": "index.js"}', "index.js": b"require('@a/imported')"})
+    assert list(phantom.scoped_imports(pkg, [("@a/declared", "1.0.0")])) == ["@a/declared", "@a/imported"]
+
+
+def test_known_names_count_even_when_the_network_is_gone():
+    phantom._KNOWN["@evil/payload"] = False
+
+    def boom(request):
+        raise httpx.ConnectError("offline")
+
+    client = httpx.Client(transport=httpx.MockTransport(boom))
+    pkg = pkg_of({"a.js": b"require('@a/one');require('@a/two');require('@a/three');require('@a/four');require('@evil/payload')"})
+    assert [n for n, _ in phantom.unreadable_imports(client, pkg, "x", set())] == ["@evil/payload"]
+
+
+def test_lookups_stop_after_a_few_failures():
+    calls = []
+
+    def boom(request):
+        calls.append(request.url)
+        raise httpx.ConnectError("offline")
+
+    pkg = pkg_of({"a.js": b"\n".join(b"require('@a/p%d')" % i for i in range(20))})
+    phantom.unreadable_imports(httpx.Client(transport=httpx.MockTransport(boom)), pkg, "x", set())
+    assert len(calls) == phantom.MAX_LOOKUP_FAILURES
