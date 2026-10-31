@@ -424,7 +424,7 @@ def trigger_errors(verdict: Verdict, bundle: Bundle, pkg: PackageFiles) -> list[
     if verdict.trigger != Trigger.install_script or verdict.verdict == VerdictLabel.benign:
         return []
     excerpts = [bundle.excerpt(ev.excerpt_id) for ev in verdict.evidence]
-    cited = {ex.path for ex in excerpts if ex is not None and ex.kind != "manifest"}
+    cited = {ex.path for ex in excerpts if ex is not None and ex.kind != "manifest" and ex.path != "package.json"}  # a hook can sit inline there
     if not cited or cited & runs_at_install(pkg) or any(p.startswith("from-url/") for p in cited):
         return []
     return [f"install trigger not verified: {sorted(cited)[0]} is not reachable from an install hook"]

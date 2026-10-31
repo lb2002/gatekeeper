@@ -62,6 +62,11 @@ def test_install_claim_on_reachable_code_stands():
     assert trigger_errors(verdict("install_script"), cited("bin/build.js"), PKG) == []
 
 
+def test_an_inline_install_hook_is_cited_from_package_json():
+    pkg = pkg_of({"postinstall": "node -e \"require('http').get('http://192.0.2.1')\""}, {})
+    assert trigger_errors(verdict("install_script"), cited("package.json"), pkg) == []
+
+
 def test_other_triggers_are_not_checked():
     assert trigger_errors(verdict("bin"), cited("bin/cli.js"), PKG) == []
     assert trigger_errors(verdict("install_script", "benign"), cited("bin/cli.js"), PKG) == []
