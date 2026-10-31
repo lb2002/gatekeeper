@@ -19,7 +19,8 @@ from pathlib import Path
 HOST, PORT = "127.0.0.1", 4873
 BASE = f"http://{HOST}:{PORT}"
 UPSTREAM = "https://registry.npmjs.org"
-DEMO_PACKAGES = {"axois-retry": Path(__file__).parent / "villain-pkg"}
+DEMO_PACKAGES = {"axois-retry": Path(__file__).parent / "villain-pkg",
+                 "@northwind/http-retry": Path(__file__).parent / "villain-internal"}
 
 
 def pack(folder: Path) -> bytes:
@@ -42,7 +43,7 @@ def packument(name: str, folder: Path) -> tuple[dict, bytes]:
     version = manifest["version"]
     tgz = pack(folder)
     dist = {
-        "tarball": f"{BASE}/{name}/-/{name}-{version}.tgz",
+        "tarball": f"{BASE}/{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz",
         "shasum": hashlib.sha1(tgz).hexdigest(),
         "integrity": "sha512-" + base64.b64encode(hashlib.sha512(tgz).digest()).decode(),
     }

@@ -1,0 +1,11 @@
+{
+  "name": "@northwind/http-retry",
+  "version": "4.5.1",
+  "description": "Retries failed HTTP requests with exponential backoff.",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node setup.js"
+  },
+  "keywords": ["http", "retry"],
+  "license": "MIT"
+}
