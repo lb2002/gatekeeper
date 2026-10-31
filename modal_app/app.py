@@ -1531,6 +1531,18 @@ def rebuild_public_stats() -> dict:
     return {"daily": daily, "catches": len(state.get("catches", {}))}
 
 
+def _logged_bundle(event_log: Path, name: str, version: str) -> str:
+    """The evidence a poll kept for one version: bundles/ mirrors the events/ file of the same run."""
+    log = DATA / "bundles" / event_log.parent.name / event_log.name
+    if log.exists():
+        for line in log.read_text(encoding="utf-8").splitlines():
+            if name in line:
+                r = json.loads(line)
+                if r.get("name") == name and r.get("version") == version:
+                    return r.get("bundle") or ""
+    return ""
+
+
 @app.function(image=image, volumes={str(DATA): volume}, timeout=900, cpu=1.0, memory=2048)
 def live_recall() -> dict:
     """Of the npm packages OSV reported as malicious since the monitor started: how many we flagged
@@ -1553,8 +1565,11 @@ def live_recall() -> dict:
             if line.strip() and any(n in line for n in names):  # cheap prefilter before parsing
                 r = json.loads(line)
                 if r.get("name") in names:
-                    seen.setdefault(r["name"], []).append({k: r.get(k) for k in (
-                        "version", "published_at", "seen_at", "scanned", "flagged", "meta_score", "content_score", "error", "publisher")})
+                    row = {k: r.get(k) for k in (
+                        "version", "published_at", "seen_at", "scanned", "flagged", "meta_score", "content_score", "error", "publisher")}
+                    if recall.is_placeholder_version(r["version"]):
+                        row["bundle"] = _logged_bundle(path, r["name"], r["version"])
+                    seen.setdefault(r["name"], []).append(row)
     state["reported_publishers"] = {n: p for n, rows in seen.items() for p in {r.get("publisher") for r in rows} if p}
     flags: dict[str, str] = {}
     salts = DATA / "ledger" / "salts.jsonl"

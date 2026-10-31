@@ -3,6 +3,7 @@ how many did we flag, how fast, and why did we miss the others."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 
@@ -77,12 +78,28 @@ def _real_publish_times(versions: list[str], times: dict) -> list[datetime]:
     return [t for t in (parse_ts(times.get(v)) if isinstance(times.get(v), str) else None for v in real) if t]
 
 
+def holds_no_code(bundle: str) -> bool:
+    """True when an evidence bundle shows a README and a bare package.json, and nothing else."""
+    files = re.search(r"^files \(largest first\): (.+)$", bundle, re.M)
+    return bool(files) and {f.rsplit(" (", 1)[0] for f in files[1].split(", ")} <= {"README.md", "package.json"} \
+        and not any(field in bundle for field in ('"scripts"', 'ependencies"', '"bin"'))
+
+
 def _author_placeholder(rows: list[dict], public: str | None) -> str | None:
-    """When the monitor saw a package's `0.0.0-stage` come out well before its report. That is the author's first
-    publish; npm writes the same version when it removes a package, but then the report follows within minutes."""
+    """When the monitor saw a package's `0.0.0-stage` come out well before its report, with nothing in it. That is the
+    author's first publish; npm writes the same version when it removes a package, but then the report follows
+    within minutes. The version string proves nothing by itself: anyone can publish it, so the archive has to agree."""
     report = parse_ts(public)
-    stamps = [r["published_at"] for r in rows if is_placeholder_version(r["version"]) and r.get("published_at")]
+    stamps = [r["published_at"] for r in rows if is_placeholder_version(r["version"]) and r.get("published_at")
+              and holds_no_code(r.get("bundle") or "")]
     return min((s for s in stamps if report and (ts := parse_ts(s)) and ts < report - TAKEDOWN_WINDOW), default=None)
+
+
+def _only_placeholders(versions: list[str], times: dict) -> bool:
+    """Neither OSV nor npm names a real version, not even one npm has since unpublished."""
+    gone = times.get("unpublished")
+    listed = (set(versions) | set(times)) - {"created", "modified", "unpublished"}
+    return all(is_placeholder_version(v) for v in listed | set(gone.get("versions") or [] if isinstance(gone, dict) else []))
 
 
 @dataclass
@@ -164,7 +181,7 @@ def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], sta
                 o.status = "before_monitor" if max(pubs) < start else "not_seen"
                 o.published_at = max(pubs).isoformat()
                 o.detail = f"npm published {o.published_at[:16]}"
-            elif placeholder and npm_times.get(name):  # watched from its first publish; npm lists nothing but the placeholder
+            elif placeholder and npm_times.get(name) and _only_placeholders(versions, npm_times[name]):
                 o.status = "no_code"
                 o.published_at = placeholder
                 o.detail = "only a placeholder version was ever public"

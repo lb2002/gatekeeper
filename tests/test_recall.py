@@ -135,21 +135,36 @@ def test_a_package_that_only_ever_showed_a_placeholder_had_no_code_to_read():
 
     from gatekeeper.confirm.recall import classify, summarize
 
+    empty = 'files (largest first): README.md (190B), package.json (154B)\n\n[E1] package.json (selected fields) (lines 1-4)\n   2|   "name": "vas-x"'
     vuln = {"id": "MAL-3", "published": "2026-10-30T18:06:14Z", "affected": [{"package": {"ecosystem": "npm", "name": "vas-x"}}]}
-    seen = {"vas-x": [{"version": "0.0.0-stage", "published_at": "2026-10-29T22:32:05+00:00", "scanned": True, "meta_score": 2, "content_score": 0}]}
-    times = {"vas-x": {"created": "2026-10-29T22:32:05Z", "0.0.0-stage": "2026-10-29T22:32:05Z"}}
+    row = {"version": "0.0.0-stage", "published_at": "2026-10-29T22:32:05+00:00", "scanned": True, "meta_score": 2, "content_score": 0, "bundle": empty}
+    seen = {"vas-x": [row]}
+    times = {"vas-x": {"created": "2026-10-29T22:32:05Z", "0.0.0-stage": "2026-10-29T22:32:05Z",
+                       "unpublished": {"time": "2026-10-30T18:04:36Z", "versions": ["0.0.0-stage"]}}}
     start = datetime(2026, 10, 27, tzinfo=timezone.utc)
-    [o] = classify(vuln, seen, {}, start, npm_times=times)
+
+    def status(**changes):
+        seen["vas-x"] = [row | changes]
+        return classify(vuln, seen, {}, start, npm_times=times)[0]
+
+    o = status()
     assert o.status == "no_code" and o.published_at.startswith("2026-10-29T22:32")
     assert summarize([o])["no_code"] == 1 and summarize([o])["in_scope"] == 0
     # npm writes the same version when it removes a package, minutes before the report: that proves nothing
-    seen["vas-x"][0]["published_at"] = "2026-10-30T18:05:00+00:00"
-    [o] = classify(vuln, seen, {}, start, npm_times=times)
-    assert o.status == "not_seen"
+    assert status(published_at="2026-10-30T18:05:00+00:00").status == "not_seen"
+    # the version string is not evidence: an attacker can publish it with code in it
+    assert status(bundle=empty.replace("README.md", "index.js")).status == "not_seen"
+    assert status(bundle=empty + '\n   3|   "scripts": {"postinstall": "node x"}').status == "not_seen"
+    assert status(bundle="").status == "not_seen"
     # no answer from npm: a real version may exist
-    seen["vas-x"][0]["published_at"] = "2026-10-29T22:32:05+00:00"
-    [o] = classify(vuln, seen, {}, start)
-    assert o.status == "not_seen"
+    seen["vas-x"] = [row]
+    assert classify(vuln, seen, {}, start)[0].status == "not_seen"
+    # npm has since unpublished a real version
+    gone = {"vas-x": {**times["vas-x"], "unpublished": {"versions": ["1.0.0", "0.0.0-stage"]}}}
+    assert classify(vuln, seen, {}, start, npm_times=gone)[0].status == "not_seen"
+    # OSV names a real version npm no longer lists
+    named = {**vuln, "affected": [{"package": {"ecosystem": "npm", "name": "vas-x"}, "versions": ["2.0.0"]}]}
+    assert classify(named, {"vas-x": [row]}, {}, start, npm_times=times)[0].status == "not_seen"
 
 
 def test_npm_placeholders_are_never_scanned():
