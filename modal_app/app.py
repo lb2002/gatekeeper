@@ -630,13 +630,24 @@ FIRST_OPINION_BACKENDS = ("glimmer-local", *SPARK_OPEN_BACKENDS)
 CLOUD_CALL_TIMEOUT_S = 75
 
 
+OWN_SIGNALS = {"known_campaign_endpoint", "known_bad_file", "fresh_dependency", "url_dependency", "private_dependency", "hardcoded_channel"}
+
+
+def _wrongly_flagged(it: dict) -> bool:
+    """Flagged on Oct 31 only because a report had put GitHub Actions on the publisher list. These stay in the
+    queue until they expire, but cost no more model time."""
+    return (any("published by GitHub Actions" in r for r in it.get("meta_reasons") or [])
+            and not OWN_SIGNALS & set(it.get("rules") or []) and (it.get("priority") or 0) - 10 < 9
+            and not any((v or {}).get("verdict") == "malicious" for b, v in (it.get("verdicts") or {}).items() if b != "llamaguard-1b"))
+
+
 def _spark_candidates(items: dict, now: datetime) -> list[str]:
     """Second opinions on first-opinion malicious/suspicious verdicts first, then high-priority
     items no model has judged for 30 minutes."""
     first, second = [], []
     for key, it in items.items():
         verdicts = it.get("verdicts", {})
-        if "spark" in verdicts or not it.get("bundle"):
+        if "spark" in verdicts or not it.get("bundle") or _wrongly_flagged(it):
             continue
         if any((verdicts.get(b) or {}).get("verdict") in ("malicious", "suspicious") for b in FIRST_OPINION_BACKENDS):
             first.append((it["priority"], key))
@@ -650,7 +661,7 @@ def _fireworks_candidates(items: dict) -> list[str]:
     Spark Open answer was unusable, once more."""
     todo = []
     for key, it in items.items():
-        if not it.get("bundle"):
+        if not it.get("bundle") or _wrongly_flagged(it):
             continue
         tried = [it.get("verdicts", {})[b] for b in SPARK_OPEN_BACKENDS if b in it.get("verdicts", {})]
         if not tried:
@@ -1071,7 +1082,7 @@ def _investigator_candidates(items: dict, now: datetime, urgent_only: bool = Fal
     todo = []
     for key, it in items.items():
         verdicts = it.get("verdicts") or {}
-        if "investigator" in verdicts or it.get("investigated") or it.get("investigator_failures", 0) >= INVESTIGATOR_MAX_TRIES:
+        if "investigator" in verdicts or it.get("investigated") or it.get("investigator_failures", 0) >= INVESTIGATOR_MAX_TRIES or _wrongly_flagged(it):
             continue
         if not any((verdicts.get(b) or {}).get("verdict") for b in SPARK_OPEN_BACKENDS):
             continue
@@ -2215,7 +2226,7 @@ def api():
         items = dict(queue.items())
         judged = {it.get("bundle_sha256"): it["verdicts"][backend] for it in items.values() if backend in it.get("verdicts", {})}
         for key, item in items.items():
-            if backend in item.get("verdicts", {}) or not item.get("bundle"):
+            if backend in item.get("verdicts", {}) or not item.get("bundle") or _wrongly_flagged(item):
                 continue
             same = judged.get(item.get("bundle_sha256"))
             if same is not None:  # identical evidence already judged: reuse instead of recomputing

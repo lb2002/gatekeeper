@@ -75,6 +75,17 @@ def test_catches_need_a_muse_verdict_and_skip_npm_placeholders(app):
     assert set(app.state["catches"]) == {"a@1.0.0"}
 
 
+def test_flags_from_the_github_actions_entry_cost_no_model_time(app):
+    now = datetime(2026, 10, 31, 22, 0, tzinfo=timezone.utc)
+    base = {"bundle": "x", "priority": 12, "seen_at": "2026-10-31T12:00:00+00:00", "meta_reasons": ["+10 published by GitHub Actions, who also published p"]}
+    items = {"wrong@1.0.0": base, "own@1.0.0": {**base, "rules": ["fresh_dependency"]}, "strong@1.0.0": {**base, "priority": 25},
+             "judged@1.0.0": {**base, "verdicts": {"spark": {"verdict": "malicious"}}}, "other@1.0.0": {**base, "meta_reasons": []}}
+    assert "wrong@1.0.0" not in app._fireworks_candidates(items)
+    assert set(app._fireworks_candidates(items)) == {"own@1.0.0", "strong@1.0.0", "judged@1.0.0", "other@1.0.0"}
+    items["wrong@1.0.0"] = {**base, "verdicts": {"spark-open-baseten": {"verdict": "suspicious"}}}
+    assert "wrong@1.0.0" not in app._spark_candidates(items, now) and "wrong@1.0.0" not in app._investigator_candidates(items, now)
+
+
 def test_demo_accepts_only_package_specs(app):
     assert app._demo_spec("lodash") == ("lodash", None)
     assert app._demo_spec("lodash@4.17.21") == ("lodash", "4.17.21")
