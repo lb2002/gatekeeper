@@ -20,6 +20,7 @@ from gatekeeper.npm.tarball import MAX_COMPRESSED_BYTES, ArchiveTooLarge, read_t
 from gatekeeper.triage.content import Hit, score_content
 from gatekeeper.triage.campaign import shared_files
 from gatekeeper.triage.meta import score_metadata
+from gatekeeper.triage.campaign import is_person
 from gatekeeper.triage.phantom import public_peer, unreadable_imports, url_dependencies, young_additions
 
 RECENT_WINDOW = timedelta(hours=6)  # versions considered "new" for a changed package
@@ -138,7 +139,7 @@ def process_version(
         publisher=info.publisher,
     )
     # an npm account that already published a package the models agree is malicious: always look closely
-    known_account = (publishers or {}).get(info.publisher or "")
+    known_account = (publishers or {}).get(info.publisher or "") if is_person(info.publisher or "") else None
     if known_account:
         meta.reasons.append(f"+10 published by {info.publisher}, who also published {known_account}")
     # an update that pulls in a brand-new package: the shape of a hijacked release

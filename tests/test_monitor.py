@@ -94,6 +94,9 @@ def test_any_new_version_from_a_known_bad_account_reaches_a_model(monkeypatch):
     rec = monitor.process_version(None, info, set(), now, publishers={"sleeper": "random-transactions-sdk@1.0.1"})
     assert rec.scanned and rec.flagged and "known_bad_publisher" in rec.rules and rec.publisher == "sleeper"
     assert any("random-transactions-sdk@1.0.1" in r for r in rec.meta_reasons)
+    # trusted publishing: `_npmUser` says "GitHub Actions" for every project, so a stale list entry must not count
+    info.publisher = "GitHub Actions"
+    assert not monitor.process_version(None, info, set(), now, publishers={"GitHub Actions": "bad@1.0.0"}).scanned
 
 
 class _Stream:

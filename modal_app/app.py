@@ -1549,6 +1549,7 @@ def live_recall() -> dict:
     (any stage), how fast, and what the misses looked like. Spawned by `confirm` every hour."""
     from gatekeeper.confirm import recall
     from gatekeeper.npm import feed
+    from gatekeeper.triage.campaign import is_person
 
     volume.reload()
     # the first poll run's log (events/<day>/<HHMMSS>-<id>.jsonl), not midnight of the first day
@@ -1570,7 +1571,7 @@ def live_recall() -> dict:
                     if recall.is_placeholder_version(r["version"]):
                         row["bundle"] = _logged_bundle(path, r["name"], r["version"])
                     seen.setdefault(r["name"], []).append(row)
-    state["reported_publishers"] = {n: p for n, rows in seen.items() for p in {r.get("publisher") for r in rows} if p}
+    state["reported_publishers"] = {n: p for n, rows in seen.items() for p in {r.get("publisher") for r in rows} if p and is_person(p)}
     flags: dict[str, str] = {}
     salts = DATA / "ledger" / "salts.jsonl"
     if salts.exists():
@@ -1619,7 +1620,7 @@ def sweep(days: int = 2) -> dict:
     from gatekeeper.npm import feed, packument
     from gatekeeper.npm.tarball import read_tarball
     from gatekeeper.popular import load_popular
-    from gatekeeper.triage.campaign import account_names, code_fingerprints, packages_of, report_iocs
+    from gatekeeper.triage.campaign import account_names, code_fingerprints, is_person, packages_of, report_iocs
 
     volume.reload()
     now = datetime.now(timezone.utc)
@@ -1647,7 +1648,7 @@ def sweep(days: int = 2) -> dict:
                     print(f"sweep: {name}: {type(exc).__name__}"[:200])
                     continue
                 for account in account_names(doc) | ({reported[name]} if name in reported else set()):
-                    if account not in accounts:
+                    if is_person(account) and account not in accounts:
                         accounts[account] = f"{name} ({vuln['id']})"
                         stats["new_accounts"] += 1
                 # the reported archive, while npm still serves it: its files mark later copies
