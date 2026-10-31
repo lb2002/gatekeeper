@@ -13,7 +13,7 @@ Open-source malware detection for npm, built on Meta's models. It never runs pac
 
 It never runs package code.
 
-**So far (Oct 27-30):** 12 malicious packages flagged that were later confirmed by OSV / GitHub / npm, **every one before the public report, by a median of 21 hours**, about a minute after publication. Of the malware published while the monitor was running, it flagged 58% ([what it missed](#live-results-oct-27-30-2026)). Every flag time is in a public, timestamped ledger.
+**So far (Oct 27-31):** 16 malicious packages flagged that were later confirmed by OSV / GitHub / npm, **every one before the public report, by a median of 20 hours**, about a minute after publication. Of the malware published while the monitor was running, it flagged 60% ([what it missed](#live-results)). Every flag time is in a public, timestamped ledger.
 
 **The find we are proudest of:** [a campaign that ships no malware at all](#a-package-with-no-malware-in-it). Every scanner passes its packages, because the payload sits in a private dependency nobody can read. Gatekeeper now flags that gap, and following it turned up [8 unreported packages and 5 new private scopes](https://github.com/ossf/malicious-packages/pull/1694), 4 of them published the same day.
 
@@ -21,7 +21,7 @@ The live page updates every 2 minutes and names a detection only once it is inde
 
 Built for the Meta Global AI Developer Hackathon (Oct 26 - Nov 4, 2026). See [PRIOR_WORK.md](PRIOR_WORK.md) for what we reuse.
 
-**Contents:** [How it works](#how-it-works) · [Investigator](#the-investigator) · [Check your project](#check-your-project) · [Install guard](#install-guard-decisions) · [Proving when we saw something](#proving-when-we-saw-something) · [Live results](#live-results-oct-27-30-2026) · [Evaluation](#evaluation) · [Try the guard](#try-the-install-guard) · [Run it](#run-it)
+**Contents:** [How it works](#how-it-works) · [Investigator](#the-investigator) · [Check your project](#check-your-project) · [Install guard](#install-guard-decisions) · [Proving when we saw something](#proving-when-we-saw-something) · [Live results](#live-results) · [Evaluation](#evaluation) · [Try the guard](#try-the-install-guard) · [Run it](#run-it)
 
 ## How it works
 
@@ -120,9 +120,9 @@ A flag is never named before it is confirmed. Instead, within two minutes, the m
 
 Worked example: `spectral-core@3.0.7` was flagged at 20:30:20 UTC on Oct 28. Its revealed line and salt (in `revealed/2026-10.jsonl`) hash to a digest in `commitments/2026-10-28/203107-67c23a.txt`; `ots upgrade` + `ots verify` on that batch's proof point to Bitcoin block 973597, mined at 20:42:17 UTC that evening (its merkle root `db5b3791…` matches any block explorer). The first public report (OSV import of MAL-2026-18377) came 18.5 hours later.
 
-## Live results (Oct 27-30, 2026)
+## Live results
 
-In its first three days the monitor read 238,117 new npm versions, scanned 38,178 archives and queued 1,717 for the models. **12 packages (29 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 21 hours.** Median time from npm publication to our flag: about 1 minute; to the first Muse verdict with cited lines: about 9 minutes more.
+By Oct 31 the monitor had read about 338,000 new npm versions, scanned about 69,000 archives and queued about 7,000 for the models, counting the backfill described below. **16 packages (39 versions) it flagged have since been independently confirmed as malware** by OSV / OpenSSF malicious-packages, GitHub or npm, **every one of them before any public report: by a median of 20 hours.** Median time from npm publication to our flag: about 1 minute; to the first Muse verdict with cited lines: about 9 minutes more.
 
 ![Flagged by Gatekeeper vs. first public report](docs/lead-times.svg)
 
@@ -136,6 +136,8 @@ In its first three days the monitor read 238,117 new npm versions, scanned 38,17
 | `black-spindle`, `black-spindle-2` (4) | postinstall runs `curl` against a throwaway host | 0-1.8 min | 1-22 h ([MAL-2026-18359](https://osv.dev/vulnerability/MAL-2026-18359), [-18376](https://osv.dev/vulnerability/MAL-2026-18376)) |
 | `spectral-core` (10) | no install script at all: a `binding.gyp` action (run by node-gyp on install) reads process environments and AWS instance metadata and POSTs them to webhook.site; a new version every ~15 min | 0.2-3.3 min | 18-20 h ([MAL-2026-18377](https://osv.dev/vulnerability/MAL-2026-18377)) |
 | `@dmangal/curse-dependent-ecto` (3) | the same `binding.gyp` trick: greps the machine for secrets and POSTs every env var | 0.3-1.5 min | 17 h ([MAL-2026-18375](https://osv.dev/vulnerability/MAL-2026-18375)) |
+| `dependencykfeg` (6) | preinstall hook sends the working directory out through DNS lookups; later versions pull code from a URL dependency | 1.7-8.4 min, three older versions 13-15 h later by following the account | 7-20 h ([GHSA-7p3p-8gfg-8grq](https://github.com/advisories/GHSA-7p3p-8gfg-8grq)) |
+| `@pcb-dp/qa-commons` (2), `@sxm-content-creators/tools-ds`, `ssite-mock-server` | dependency confusion: postinstall POSTs hostname, home directory, platform and CI provider to a raw IP | 0.4-29 min | 18-26 h ([GHSA-w4v4-fj9q-cfj5](https://github.com/advisories/GHSA-w4v4-fj9q-cfj5), [GHSA-x4jx-pc3h-93v6](https://github.com/advisories/GHSA-x4jx-pc3h-93v6), [GHSA-h5wr-6cx4-x5v4](https://github.com/advisories/GHSA-h5wr-6cx4-x5v4)) |
 | `claims-acct-unlock` | contacts a domain tied to malicious activity and runs commands (OpenSSF Package Analysis) | 0.8 min | 41 min ([MAL-2026-18404](https://osv.dev/vulnerability/MAL-2026-18404)) |
 | `tailwindcss-visual-kit` 1.3.7 | a new version of a reported package, with a new private dependency: found by following the campaign, not on publication | 14.7 h | 1.5 h ([GHSA-f37w-2g4f-58r3](https://github.com/advisories/GHSA-f37w-2g4f-58r3); npm removed it the same minute) |
 
@@ -143,9 +145,9 @@ In its first three days the monitor read 238,117 new npm versions, scanned 38,17
 
 **From flags to verdicts.** Of the 1,813 versions the cheap stages sent to the models in the week up to Oct 30, at least one Muse model called 44 malicious and at least two called 33 malicious. 21 of those 33 have since been independently confirmed; most of the other 12 are still on npm and under manual review (on reading the code, some are not malware: a self-run "stealth assistant", and an old package whose build commands post to the author's own Telegram chats, which the models attributed to its install hook; this is why reports go through a human or a strict static check).
 
-**Live recall.** Every hour the monitor takes each new OSV npm malware report and checks it against its own logs. Since it started (Oct 27, 14:02 UTC), OSV reported 20 malicious npm packages whose malware was published while it was watching: **it flagged 11 (55%), all before the report.** One it never saw: on Oct 29 from about 16:30 to 21:40 UTC the monitor hung, and what was published in those hours was past its window when it recovered. A backfill read those stretches later, about 28,000 versions; anything found that way counts as neither a catch nor recall. Of the 8 misses, OSV's own write-ups for 5 say no harmful behaviour was found (keyword matches in pentest tools and agent CLIs); the other 3 were brand-new packages with a `postinstall` hook whose code did not trip the rules (scores 4-7 of the 9 needed). Since Oct 30, every package younger than 72 hours that runs code at install time goes to a model regardless of its score: about 100-150 versions a day, under $1 a day with Muse Spark Open.
+**Live recall.** Every hour the monitor takes each new OSV npm malware report and checks it against its own logs. Since it started (Oct 27, 14:02 UTC), OSV reported 25 malicious npm packages whose malware was published while it was watching: **it flagged 15 (60%), all before the report.** Two it never saw. One came out on Oct 29 between about 16:30 and 21:40 UTC, while the monitor hung, and was past its window when it recovered; the other shows no real version on npm. A backfill read the outage later, about 28,000 versions; anything found that way counts as neither a catch nor recall. Seven more reports name packages whose only public version was a placeholder with no code in it, so there was nothing to read. The monitor watched those appear hours before the report, and they are left out of the recall above; counted as misses, it would be 15 of 32 (47%). Of the 8 misses, OSV's own write-ups for 5 say no harmful behaviour was found (keyword matches in pentest tools and agent CLIs); the other 3 were brand-new packages with a `postinstall` hook whose code did not trip the rules (scores 4-7 of the 9 needed). Since Oct 30, every package younger than 72 hours that runs code at install time goes to a model regardless of its score: about 100-150 versions a day, under $1 a day with Muse Spark Open.
 
-Two traps in measuring this: OSV's `published` date is often backdated (see above), and most of the 81 reports about older malware list npm's own placeholder versions (`0.0.0-stage`, `0.0.1-security`, published by npm when it removes a package). Seeing only those means the malware came out before the monitor started, so they are excluded rather than counted as misses, and the monitor no longer scans them. The monitor was down from about 15:00 to 22:00 UTC on Oct 29 (it stalled on packages with hundreds of new versions; fixed, with alerts since).
+Two traps in measuring this: OSV's `published` date is often backdated (see above), and most of the 86 reports about older malware list npm's own placeholder versions (`0.0.0-stage`, `0.0.1-security`, published by npm when it removes a package). Seeing only those means the malware came out before the monitor started, so they are excluded rather than counted as misses, and the monitor no longer scans them. The outage on Oct 29 happened when it stalled on packages with hundreds of new versions (fixed, with alerts since).
 
 ### Evaluation
 
