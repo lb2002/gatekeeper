@@ -20,7 +20,7 @@ MAX_LINE_CHARS = 240
 MINIFIED_LINE_CHARS = 1000
 FILL_CHUNK_CHARS = 2500  # per file in the fill phase, so several files get a look
 TYPE_DECLARATION_EXT = (".d.ts", ".d.mts", ".d.cts")
-MANIFEST_KEYS = ("name", "version", "main", "bin", "scripts", "gypfile", "dependencies", "optionalDependencies", "repository", "files")
+MANIFEST_KEYS = ("name", "version", "main", "bin", "scripts", "gypfile", "dependencies", "optionalDependencies", "peerDependencies", "repository", "files")
 
 
 @dataclass

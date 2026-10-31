@@ -17,6 +17,7 @@ from gatekeeper.npm.packument import is_placeholder_version, packument_url
 MODIFIED_CSV = "https://osv-vulnerabilities.storage.googleapis.com/npm/modified_id.csv"
 ENTRY_URL = "https://osv-vulnerabilities.storage.googleapis.com/npm/{id}.json"
 TAKEDOWN_WINDOW = timedelta(hours=1)  # npm's own placeholder lands minutes before the report
+EMPTY_PLACEHOLDER = re.compile(r"^files \(largest first\): README\.md \(190B\), package\.json \(\d{3}B\)\n\n\[E1\] package\.json \(selected fields\)", re.M)
 
 
 def recent_mal_ids(csv_text: str, since: datetime) -> list[str]:
@@ -79,10 +80,9 @@ def _real_publish_times(versions: list[str], times: dict) -> list[datetime]:
 
 
 def holds_no_code(bundle: str) -> bool:
-    """True when an evidence bundle shows a README and a bare package.json, and nothing else."""
-    files = re.search(r"^files \(largest first\): (.+)$", bundle, re.M)
-    return bool(files) and {f.rsplit(" (", 1)[0] for f in files[1].split(", ")} <= {"README.md", "package.json"} \
-        and not any(field in bundle for field in ('"scripts"', 'ependencies"', '"bin"'))
+    """True when an evidence bundle shows npm's placeholder template: its 190-byte README, a small package.json read
+    in full, and nothing else. File names are the attacker's, so the whole listing has to match, not its parts."""
+    return bool(EMPTY_PLACEHOLDER.search(bundle)) and not any(field in bundle for field in ('"scripts"', 'ependencies"', '"bin"', '"gypfile"'))
 
 
 def _author_placeholder(rows: list[dict], public: str | None) -> str | None:
@@ -90,8 +90,10 @@ def _author_placeholder(rows: list[dict], public: str | None) -> str | None:
     author's first publish; npm writes the same version when it removes a package, but then the report follows
     within minutes. The version string proves nothing by itself: anyone can publish it, so the archive has to agree."""
     report = parse_ts(public)
-    stamps = [r["published_at"] for r in rows if is_placeholder_version(r["version"]) and r.get("published_at")
-              and holds_no_code(r.get("bundle") or "")]
+    placeholders = [r for r in rows if is_placeholder_version(r["version"]) and r.get("publisher") != "npm"]
+    if not all(holds_no_code(r.get("bundle") or "") for r in placeholders):
+        return None
+    stamps = [r["published_at"] for r in placeholders if r.get("published_at")]
     return min((s for s in stamps if report and (ts := parse_ts(s)) and ts < report - TAKEDOWN_WINDOW), default=None)
 
 

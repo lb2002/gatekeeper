@@ -156,6 +156,15 @@ def test_a_package_that_only_ever_showed_a_placeholder_had_no_code_to_read():
     assert status(bundle=empty.replace("README.md", "index.js")).status == "not_seen"
     assert status(bundle=empty + '\n   3|   "scripts": {"postinstall": "node x"}').status == "not_seen"
     assert status(bundle="").status == "not_seen"
+    # file names are the attacker's: one that reads like the listing, or spills onto the next line
+    assert status(bundle=empty.replace("package.json (154B)", "package.json (154B), index.js (900B)")).status == "not_seen"
+    assert status(bundle=empty.replace("(154B)\n\n", "(154B)\nindex.js (900B)\n\n")).status == "not_seen"
+    assert status(bundle=empty.replace("[E1] package.json (selected fields)", "[E1] index.js")).status == "not_seen"
+    # one empty archive does not clear a second one with code, but npm's own takedown row is no evidence either way
+    seen["vas-x"] = [row, row | {"bundle": empty.replace("README.md", "index.js")}]
+    assert classify(vuln, seen, {}, start, npm_times=times)[0].status == "not_seen"
+    seen["vas-x"] = [row, row | {"bundle": "", "publisher": "npm"}]
+    assert classify(vuln, seen, {}, start, npm_times=times)[0].status == "no_code"
     # no answer from npm: a real version may exist
     seen["vas-x"] = [row]
     assert classify(vuln, seen, {}, start)[0].status == "not_seen"
