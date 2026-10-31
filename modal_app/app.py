@@ -637,8 +637,6 @@ def _wrongly_flagged(it: dict) -> bool:
     """Flagged on Oct 31 only because a report had put GitHub Actions on the publisher list, and nothing else would
     have queued it. These stay in the queue until they expire, but cost no more model time. Bounded by date: the
     monitor can no longer write this reason."""
-    from gatekeeper.monitor import FAST_GATE
-
     reasons = it.get("meta_reasons") or []
     return (it.get("seen_at", "") < "2026-11-01" and any("published by GitHub Actions" in r for r in reasons)
             and not OWN_SIGNALS & set(it.get("rules") or []) and (it.get("priority") or 0) - 10 < 9
