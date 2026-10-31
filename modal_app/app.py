@@ -634,11 +634,16 @@ OWN_SIGNALS = {"known_campaign_endpoint", "known_bad_file", "fresh_dependency", 
 
 
 def _wrongly_flagged(it: dict) -> bool:
-    """Flagged on Oct 31 only because a report had put GitHub Actions on the publisher list. These stay in the
-    queue until they expire, but cost no more model time."""
-    return (any("published by GitHub Actions" in r for r in it.get("meta_reasons") or [])
+    """Flagged on Oct 31 only because a report had put GitHub Actions on the publisher list, and nothing else would
+    have queued it. These stay in the queue until they expire, but cost no more model time. Bounded by date: the
+    monitor can no longer write this reason."""
+    from gatekeeper.monitor import FAST_GATE
+
+    reasons = it.get("meta_reasons") or []
+    return (it.get("seen_at", "") < "2026-11-01" and any("published by GitHub Actions" in r for r in reasons)
             and not OWN_SIGNALS & set(it.get("rules") or []) and (it.get("priority") or 0) - 10 < 9
-            and not any((v or {}).get("verdict") == "malicious" for b, v in (it.get("verdicts") or {}).items() if b != "llamaguard-1b"))
+            and (it.get("fast_risk") or 0) < FAST_GATE and not any("install hook" in r for r in reasons)
+            and not any((v or {}).get("verdict") == "malicious" for v in (it.get("verdicts") or {}).values()))
 
 
 def _spark_candidates(items: dict, now: datetime) -> list[str]:

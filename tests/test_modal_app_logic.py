@@ -79,9 +79,11 @@ def test_flags_from_the_github_actions_entry_cost_no_model_time(app):
     now = datetime(2026, 10, 31, 22, 0, tzinfo=timezone.utc)
     base = {"bundle": "x", "priority": 12, "seen_at": "2026-10-31T12:00:00+00:00", "meta_reasons": ["+10 published by GitHub Actions, who also published p"]}
     items = {"wrong@1.0.0": base, "own@1.0.0": {**base, "rules": ["fresh_dependency"]}, "strong@1.0.0": {**base, "priority": 25},
-             "judged@1.0.0": {**base, "verdicts": {"spark": {"verdict": "malicious"}}}, "other@1.0.0": {**base, "meta_reasons": []}}
+             "judged@1.0.0": {**base, "verdicts": {"llamaguard-1b": {"verdict": "malicious"}}}, "other@1.0.0": {**base, "meta_reasons": []},
+             "hook@1.0.0": {**base, "meta_reasons": [*base["meta_reasons"], "+3 install hook: postinstall"]}, "risky@1.0.0": {**base, "fast_risk": 0.5},
+             "later@1.0.0": {**base, "seen_at": "2026-11-01T01:00:00+00:00"}}
     assert "wrong@1.0.0" not in app._fireworks_candidates(items)
-    assert set(app._fireworks_candidates(items)) == {"own@1.0.0", "strong@1.0.0", "judged@1.0.0", "other@1.0.0"}
+    assert set(app._fireworks_candidates(items)) == set(items) - {"wrong@1.0.0"}
     items["wrong@1.0.0"] = {**base, "verdicts": {"spark-open-baseten": {"verdict": "suspicious"}}}
     assert "wrong@1.0.0" not in app._spark_candidates(items, now) and "wrong@1.0.0" not in app._investigator_candidates(items, now)
 
