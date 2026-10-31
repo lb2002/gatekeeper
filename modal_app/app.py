@@ -1916,12 +1916,14 @@ def _public_html(st: dict) -> str:
     current_html = "" if not now_rc.get("in_scope") else (
         f" Since the current pipeline went live ({escape(now_rc['since'][:16].replace('T', ' '))} UTC): {now_rc['flagged']} of "
         f"{now_rc['in_scope']}. Reports arrive with a delay, so this number is small and still moving.")
+    no_code_html = "" if not rc.get("no_code") else (
+        f" Nor are {rc['no_code']} reported packages whose only public version was a placeholder with no code in it: there was nothing to read.")
     recall_html = "" if not rc.get("in_scope") else (
         f"<h2>What it missed</h2><p class=sub>Every hour, each new OSV report of npm malware is checked against the monitor's "
         f"own logs. Of the {rc['in_scope']} malicious packages published while it was running (since "
         f"{escape(rc.get('since', '')[:16].replace('T', ' '))} UTC), it flagged <b>{rc['flagged']}</b> "
         f"({round(100 * (rc.get('recall') or 0))}%), {rc.get('flagged_before_osv', 0)} of them before the report. Reports about "
-        f"malware published before the monitor started ({rc.get('before_monitor', 0)}) are left out.{current_html}</p>"
+        f"malware published before the monitor started ({rc.get('before_monitor', 0)}) are left out.{no_code_html}{current_html}</p>"
         f"<div class=wrap><table><tr><th>missed package</th><th>published (UTC)</th><th>what the monitor saw</th><th>report</th></tr>"
         f"{misses}</table></div>")
     days = "".join(

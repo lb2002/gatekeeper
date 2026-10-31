@@ -130,6 +130,28 @@ def test_seeing_only_npms_takedown_placeholders_means_before_monitor():
     assert o.status == "not_seen"
 
 
+def test_a_package_that_only_ever_showed_a_placeholder_had_no_code_to_read():
+    from datetime import datetime, timezone
+
+    from gatekeeper.confirm.recall import classify, summarize
+
+    vuln = {"id": "MAL-3", "published": "2026-10-30T18:06:14Z", "affected": [{"package": {"ecosystem": "npm", "name": "vas-x"}}]}
+    seen = {"vas-x": [{"version": "0.0.0-stage", "published_at": "2026-10-29T22:32:05+00:00", "scanned": True, "meta_score": 2, "content_score": 0}]}
+    times = {"vas-x": {"created": "2026-10-29T22:32:05Z", "0.0.0-stage": "2026-10-29T22:32:05Z"}}
+    start = datetime(2026, 10, 27, tzinfo=timezone.utc)
+    [o] = classify(vuln, seen, {}, start, npm_times=times)
+    assert o.status == "no_code" and o.published_at.startswith("2026-10-29T22:32")
+    assert summarize([o])["no_code"] == 1 and summarize([o])["in_scope"] == 0
+    # npm writes the same version when it removes a package, minutes before the report: that proves nothing
+    seen["vas-x"][0]["published_at"] = "2026-10-30T18:05:00+00:00"
+    [o] = classify(vuln, seen, {}, start, npm_times=times)
+    assert o.status == "not_seen"
+    # no answer from npm: a real version may exist
+    seen["vas-x"][0]["published_at"] = "2026-10-29T22:32:05+00:00"
+    [o] = classify(vuln, seen, {}, start)
+    assert o.status == "not_seen"
+
+
 def test_npm_placeholders_are_never_scanned():
     from gatekeeper.npm.packument import VersionInfo
 

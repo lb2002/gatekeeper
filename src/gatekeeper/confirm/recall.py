@@ -4,7 +4,7 @@ how many did we flag, how fast, and why did we miss the others."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -15,6 +15,7 @@ from gatekeeper.npm.packument import is_placeholder_version, packument_url
 
 MODIFIED_CSV = "https://osv-vulnerabilities.storage.googleapis.com/npm/modified_id.csv"
 ENTRY_URL = "https://osv-vulnerabilities.storage.googleapis.com/npm/{id}.json"
+TAKEDOWN_WINDOW = timedelta(hours=1)  # npm's own placeholder lands minutes before the report
 
 
 def recent_mal_ids(csv_text: str, since: datetime) -> list[str]:
@@ -76,11 +77,19 @@ def _real_publish_times(versions: list[str], times: dict) -> list[datetime]:
     return [t for t in (parse_ts(times.get(v)) if isinstance(times.get(v), str) else None for v in real) if t]
 
 
+def _author_placeholder(rows: list[dict], public: str | None) -> str | None:
+    """When the monitor saw a package's `0.0.0-stage` come out well before its report. That is the author's first
+    publish; npm writes the same version when it removes a package, but then the report follows within minutes."""
+    report = parse_ts(public)
+    stamps = [r["published_at"] for r in rows if is_placeholder_version(r["version"]) and r.get("published_at")]
+    return min((s for s in stamps if report and (ts := parse_ts(s)) and ts < report - TAKEDOWN_WINDOW), default=None)
+
+
 @dataclass
 class Outcome:
     id: str
     name: str
-    status: str  # flagged | missed | not_seen | before_monitor
+    status: str  # flagged | missed | not_seen | no_code | before_monitor
     versions: list[str]
     first_public: str | None
     published_at: str | None = None
@@ -150,10 +159,15 @@ def classify(vuln: dict, seen: dict[str, list[dict]], flags: dict[str, str], sta
         else:
             # never in our feed window: published before the monitor started, or a coverage gap
             pubs = _real_publish_times(versions, npm_times.get(name) or {})
+            placeholder = _author_placeholder(seen.get(name, []), public)
             if pubs:
                 o.status = "before_monitor" if max(pubs) < start else "not_seen"
                 o.published_at = max(pubs).isoformat()
                 o.detail = f"npm published {o.published_at[:16]}"
+            elif placeholder and npm_times.get(name):  # watched from its first publish; npm lists nothing but the placeholder
+                o.status = "no_code"
+                o.published_at = placeholder
+                o.detail = "only a placeholder version was ever public"
             else:  # removed without a trace on npm: OSV's own (often backdated) date is all there is
                 pub = parse_ts(vuln.get("published"))
                 o.status = "before_monitor" if pub is not None and pub < start else "not_seen"
@@ -168,7 +182,7 @@ def published_since(outcomes: list[Outcome], when: datetime) -> list[Outcome]:
 
 
 def summarize(outcomes: list[Outcome]) -> dict:
-    by = {s: [o for o in outcomes if o.status == s] for s in ("flagged", "missed", "not_seen", "before_monitor")}
+    by = {s: [o for o in outcomes if o.status == s] for s in ("flagged", "missed", "not_seen", "no_code", "before_monitor")}
     in_scope = len(by["flagged"]) + len(by["missed"]) + len(by["not_seen"])
     leads = sorted(o.lead_over_osv_min for o in by["flagged"] if o.lead_over_osv_min is not None)
     p2f = sorted(o.publish_to_flag_min for o in by["flagged"] if o.publish_to_flag_min is not None)
@@ -181,6 +195,7 @@ def summarize(outcomes: list[Outcome]) -> dict:
         "flagged": len(by["flagged"]),
         "missed": len(by["missed"]),
         "not_seen": len(by["not_seen"]),
+        "no_code": len(by["no_code"]),
         "before_monitor": len(by["before_monitor"]),
         "recall": round(len(by["flagged"]) / in_scope, 3) if in_scope else None,
         "flagged_before_osv": sum(1 for x in leads if x > 0),
