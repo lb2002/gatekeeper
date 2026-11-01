@@ -232,6 +232,18 @@ npm install <package>         # checked before anything is installed
 
 Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. **No GPU needed:** an archive the static rules flag goes to the hosted investigator (about 30 seconds; it sends the package name and version, nothing about your machine, and `GK_NO_CLOUD=1` turns it off). For full privacy and offline use, run Muse Glimmer on your own machine instead: such archives then go to a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja -fa on -c 8192 --port 8080 --reasoning-format deepseek --reasoning-budget 48 --alias muse-glimmer`, the [official GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF); `GK_LOCAL_URL` points elsewhere). With neither available, those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
 
+## Meta models and where each runs
+
+| Model | Job | Where it runs |
+|---|---|---|
+| **Muse Spark Open** (`meta-models/muse-spark-open-1026`) | A verdict with cited lines on every flag, the investigator agent, the public demo | Baseten, with Fireworks as a second host |
+| **Muse Spark** (`muse-spark-1.3`) | Second opinion on what the first models accuse | Meta Model API, standard mode |
+| **Muse Glimmer 30B** | Offline verdicts in the install guard, and the laptop worker | Your machine, through llama.cpp |
+| **Llama Guard 3 1B**, fine-tuned ([adapter](https://huggingface.co/lbaumberger/Llama-Guard-3-1B-Gatekeeper-npm)) | Narrows the stream before the Muse models | Modal GPU |
+| **Muse Code** | Demo agent, with the guard's npm first on PATH | Your terminal, on `muse-spark-1.3` |
+
+Nothing here needs a key to try: the hosted demo, the install guard's rules and `gk audit` run without one. To call the models yourself, copy `.env.example` to `.env`, add a Meta Model API key or a partner key, and run `uv run --env-file .env gk check <package>@<version> --backend spark`. Never commit `.env`.
+
 ## Run it
 
 ```bash
