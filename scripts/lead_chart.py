@@ -1,5 +1,5 @@
 """Draw docs/lead-times.svg from the live stats: for each confirmed package, when the monitor flagged it
-and when the first public report appeared. The live page serves the same chart at /lead-times.svg.
+and when OSV, GitHub or npm first listed it. The live page serves the same chart at /lead-times.svg.
 
     uv run python scripts/lead_chart.py
 """

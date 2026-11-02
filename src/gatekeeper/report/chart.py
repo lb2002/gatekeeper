@@ -1,4 +1,4 @@
-"""Lead-time chart: when Gatekeeper flagged each confirmed package vs. its first public report."""
+"""Lead-time chart: when Gatekeeper flagged each confirmed package vs. its first listing in OSV, GitHub or npm."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def ts(s: str) -> datetime:
 
 
 def render(stats: dict, source: str = "") -> str:
-    """SVG: one row per confirmed package, a dot at our flag and a bar to the first public report."""
+    """SVG: one row per confirmed package, a dot at our flag and a bar to the first public listing."""
     first: dict[str, dict] = {}
     for c in stats["catches"]:
         if c.get("earliest_public") and (c["name"] not in first or c["flagged_at"] < first[c["name"]]["flagged_at"]):
@@ -35,9 +35,9 @@ def render(stats: dict, source: str = "") -> str:
            'font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">',
            "<title>Gatekeeper flags vs. public reports</title>",
            f'<rect width="{width}" height="{height}" fill="#fbfbf9"/>',
-           '<text x="24" y="34" font-size="20" font-weight="700" fill="#1d1d1b">Flagged by Gatekeeper vs. first public report</text>',
+           '<text x="24" y="34" font-size="20" font-weight="700" fill="#1d1d1b">Flagged by Gatekeeper vs. first public listing</text>',
            f'<text x="24" y="56" font-size="14" fill="#6b6b66">Confirmed malicious npm packages, {t0:%b %d}-{t1:%b %d} (UTC). '
-           'Dot: our flag, in the public ledger. Bar end: first public report (OSV, GitHub or npm).</text>']
+           'Dot: our flag, in the public ledger. Bar end: first listing in OSV, GitHub or npm.</text>']
     day = t0.replace(hour=0) + timedelta(days=1)
     while day < t1:
         out.append(f'<line x1="{x(day):.1f}" y1="{top - 8}" x2="{x(day):.1f}" y2="{height - 50}" stroke="#e3e3dd"/>')
@@ -59,7 +59,7 @@ def render(stats: dict, source: str = "") -> str:
     med = (leads[len(leads) // 2] + leads[(len(leads) - 1) // 2]) / 2
     ahead = sum(lead > 0 for lead in leads)
     who = "all" if ahead == len(rows) else f"{ahead}"
-    out.append(f'<text x="24" y="{height - 12}" font-size="13" fill="#6b6b66">{len(rows)} packages, {who} flagged before the public '
-               f'report; median lead {med:.0f} h.' + (f' Source: {escape(source)}' if source else '') + '</text>')
+    out.append(f'<text x="24" y="{height - 12}" font-size="13" fill="#6b6b66">{len(rows)} packages, {who} flagged before the first '
+               f'listing; median lead {med:.0f} h.' + (f' Source: {escape(source)}' if source else '') + '</text>')
     out.append("</svg>")
     return "\n".join(out) + "\n"
