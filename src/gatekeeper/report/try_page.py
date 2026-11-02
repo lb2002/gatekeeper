@@ -29,7 +29,7 @@ textarea{display:block;width:100%;box-sizing:border-box;font:13px ui-monospace,M
 footer{color:var(--muted);font-size:13px;margin-top:28px}
 </style></head><body>
 <h1>Watch a Muse agent read an npm package</h1>
-<p class=sub>Muse Spark Open opens the published archive, decides where to look, and has to cite every line it relies on.
+<p class=sub>Muse Spark opens the published archive, decides where to look, and has to cite every line it relies on.
 The package is read in memory on our server and never executed.</p>
 <form id=form><label for=pkg hidden>npm package</label>
 <input id=pkg placeholder="name or name@version" autocomplete=off spellcheck=false maxlength=214 required>

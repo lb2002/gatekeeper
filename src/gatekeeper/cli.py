@@ -540,7 +540,7 @@ def plain(text: object) -> str:
 @app.command()
 def investigate(
     key: str = typer.Argument(..., help="name@version of a package on npm"),
-    backend: str = typer.Option("spark-open-baseten", help="spark-open-baseten, spark-open-fireworks or spark"),
+    backend: str = typer.Option("spark", help="spark, spark-open-fireworks or spark-open-baseten"),
 ) -> None:
     """Let a Muse model investigate one package and print what it looked at. Runs in the Modal container: the
     archive stays in memory there, nothing is executed and nothing reaches this machine but text."""

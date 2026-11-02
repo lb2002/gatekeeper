@@ -359,7 +359,7 @@ def _daily_report(now: datetime) -> None:
     if rc.get("in_scope"):
         lines.append(f"live recall: {rc['flagged']}/{rc['in_scope']} ({round(100 * rc['recall'])}%)")
     for label, key, cap in (("Muse Spark", "spark_spend", SPARK_TOTAL_CAP_USD), ("Spark Open/Fireworks", "fireworks_spend", FIREWORKS_TOTAL_CAP_USD),
-                            ("Spark Open/Baseten", "baseten_spend", BASETEN_TOTAL_CAP_USD), ("Investigator", "investigator_spend", INVESTIGATOR_TOTAL_CAP_USD),
+                            ("Spark Open/Baseten", "baseten_spend", BASETEN_TOTAL_CAP_USD), ("Investigator", INVESTIGATOR_SPEND, INVESTIGATOR_TOTAL_CAP_USD),
                             ("Public demo", "demo_spend", DEMO_TOTAL_CAP_USD)):
         s = state.get(key) or {}
         lines.append(f"{label}: ${(s.get('days') or {}).get(yday, 0):.2f} yesterday, ${s.get('total', 0):.2f} of ${cap:.0f} cap")
@@ -606,17 +606,18 @@ def confirm() -> dict:
     return stats
 
 
-SPARK_DAILY_CAP_USD = 10.0
-SPARK_TOTAL_CAP_USD = 130.0
+SPARK_DAILY_CAP_USD = 25.0
+SPARK_TOTAL_CAP_USD = 130.0  # shared with the investigator, see _meta_credits_used
 SPARK_PER_RUN = 20
 SPARK_SECRET = modal.Secret.from_name("meta-api", required_keys=["MODEL_API_KEY"])
 # Muse Spark Open on Fireworks serverless (paid from Fireworks credits): judges every flag, ~$0.007 per package
-FIREWORKS_DAILY_CAP_USD = 8.0
+FIREWORKS_DAILY_CAP_USD = 15.0
 FIREWORKS_TOTAL_CAP_USD = 80.0  # of $100 promo credits; the rest stays for fine-tuning tests
 FIREWORKS_PER_RUN = 60
 FIREWORKS_SECRET = modal.Secret.from_name("fireworks-api", required_keys=["FIREWORKS_API_KEY"])
 # Baseten serves the same Spark Open weights from the hackathon credits ($100): it takes over when
-# Fireworks reached its daily cap, so every flag still gets a Spark Open verdict
+# Fireworks reached its daily cap, so every flag still gets a Spark Open verdict. It answers 402 since
+# Nov 1, the credits are used up, so state['baseten_enabled'] is off.
 BASETEN_DAILY_CAP_USD = 14.0
 BASETEN_TOTAL_CAP_USD = 80.0  # of $100: the time-split evaluations (~$16 so far) are not counted in these totals
 BASETEN_SECRET = modal.Secret.from_name("baseten-api", required_keys=["BASETEN_API_KEY"])
@@ -777,7 +778,7 @@ def _run_cloud(
 
     def one(key: str) -> None:
         with lock:
-            used = _baseten_credits_used() if backend == "spark-open-baseten" else spend["total"]
+            used = _credits_used(backend, spend)
             stop = (
                 used >= total_cap or spend["days"].get(day, 0.0) >= daily_cap
                 or counts["consecutive_errors"] >= 3 or time.monotonic() - started > budget_s
@@ -817,6 +818,7 @@ def spark() -> dict:
     _watchdog()
     _confirm_watchdog()
     items = dict(queue.items())
+    _refresh_work_pool(items)
     reported = _autoreport(items, budget_s=50)
     if not state.get("spark_enabled", False):
         return {"enabled": False, **reported}
@@ -1053,24 +1055,27 @@ def _autoreport_package(name: str, entries: list, live: bool) -> dict:
 @app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET, BASETEN_SECRET, NTFY_SECRET], schedule=modal.Period(minutes=5), timeout=280, cpu=0.25, memory=512)
 def spark_open() -> dict:
     """Muse Spark Open judges every flag under hard spending caps: on Fireworks while it is under its
-    caps, otherwise on Baseten. Each host is off until state['fireworks_enabled'] / ['baseten_enabled']."""
+    caps, otherwise on Baseten. Each host is off until state['fireworks_enabled'] / ['baseten_enabled'].
+    The investigator has its own caps, so it runs whether or not a host is free."""
     _watchdog()
+    investigate_batch.spawn()
     host = _spark_open_host()
     if host is None:
         return {"enabled": False}
     backend, spend_key, daily_cap, total_cap = host
     keys = _fireworks_candidates(dict(queue.items()))[:FIREWORKS_PER_RUN]
-    investigate_batch.spawn()
     return _run_cloud(backend, keys, spend_key, daily_cap, total_cap, workers=8, budget_s=140)
 
 
 # The investigator reads the archive itself (see gatekeeper/investigate.py): ~$0.012 a package. On the
-# time-split test it found 9 of the 83 samples all one-shot models passed, with no false positive in 131
-# benign packages, and it reports what it looked at, so its finding is a reviewable trace.
-INVESTIGATOR_BACKEND = "spark-open-baseten"  # measured here; on Fireworks the step schema comes back unparseable
-INVESTIGATOR_DAILY_CAP_USD = 12.0
-INVESTIGATOR_URGENT_CAP_USD = 15.0  # past the daily cap, only what a model accused or what nothing else can read
-INVESTIGATOR_TOTAL_CAP_USD = 55.0
+# time-split test, on Spark Open, it found 9 of the 83 samples all one-shot models passed, with no false
+# positive in 131 benign packages, and it reports what it looked at, so its finding is a reviewable trace.
+# Moved to Muse Spark when the Baseten credits ran out; on Fireworks the step schema comes back unparseable.
+INVESTIGATOR_BACKEND = "spark"
+INVESTIGATOR_SPEND = "investigator_spark_spend"
+INVESTIGATOR_DAILY_CAP_USD = 4.0
+INVESTIGATOR_URGENT_CAP_USD = 8.0  # past the daily cap, only what a model accused or what nothing else can read
+INVESTIGATOR_TOTAL_CAP_USD = 30.0
 INVESTIGATOR_PER_RUN = 24
 INVESTIGATOR_WORKERS = 3
 INVESTIGATOR_BUDGET_S = 200
@@ -1099,7 +1104,7 @@ def _investigator_candidates(items: dict, now: datetime, urgent_only: bool = Fal
     return [t[-1] for t in sorted(todo, reverse=True)]
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[FIREWORKS_SECRET, BASETEN_SECRET, NTFY_SECRET], timeout=280, cpu=0.25, memory=1024)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, NTFY_SECRET], timeout=280, cpu=0.25, memory=1024)
 def investigate_batch() -> dict:
     """Spawned by `spark_open` every 5 minutes; a run that finds another still active leaves at once."""
     import threading
@@ -1109,14 +1114,14 @@ def investigate_batch() -> dict:
     busy = state.get("investigator_busy_until")
     if busy and datetime.fromisoformat(busy) > now:
         return {"busy": True}
-    spend = state.get("investigator_spend", {"total": 0.0, "days": {}})
+    spend = state.get(INVESTIGATOR_SPEND, {"total": 0.0, "days": {}})
     day = f"{now:%Y-%m-%d}"
-    # the same Baseten switch and credits as the one-shot verdicts: both count against the host's total cap
-    if not state.get("baseten_enabled", False):
+    # the same switch and credits as the Spark verdicts: both count against SPARK_TOTAL_CAP_USD
+    if not state.get("spark_enabled", False):
         return {"enabled": False}
     urgent_only = spend["days"].get(day, 0.0) >= INVESTIGATOR_DAILY_CAP_USD
     day_cap = INVESTIGATOR_URGENT_CAP_USD if urgent_only else INVESTIGATOR_DAILY_CAP_USD
-    if (_baseten_credits_used() >= BASETEN_TOTAL_CAP_USD or spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD
+    if (_meta_credits_used() >= SPARK_TOTAL_CAP_USD or spend["total"] >= INVESTIGATOR_TOTAL_CAP_USD
             or spend["days"].get(day, 0.0) >= day_cap):
         return {"capped": True}
     backend = INVESTIGATOR_BACKEND
@@ -1132,7 +1137,7 @@ def investigate_batch() -> dict:
     def one(key: str) -> None:
         with lock:
             if (time.monotonic() - started > INVESTIGATOR_BUDGET_S or spend["days"].get(day, 0.0) >= day_cap
-                    or _baseten_credits_used() >= BASETEN_TOTAL_CAP_USD):
+                    or _meta_credits_used() >= SPARK_TOTAL_CAP_USD):
                 return
         item = queue.get(key, None)
         if item is None:
@@ -1167,7 +1172,7 @@ def investigate_batch() -> dict:
             counts["done"] += 1
             spend["total"] += res.cost_usd
             spend["days"][day] = spend["days"].get(day, 0.0) + res.cost_usd
-            state["investigator_spend"] = spend
+            state[INVESTIGATOR_SPEND] = spend
             if v:
                 tally[v.verdict.value] = tally.get(v.verdict.value, 0) + 1
                 state["investigator_tally"] = tally
@@ -1190,8 +1195,19 @@ def investigate_batch() -> dict:
 
 
 def _baseten_credits_used() -> float:
-    """One-shot verdicts and the investigator draw on the same Baseten credits."""
+    """One-shot verdicts and, until Nov 1, the investigator and the demo drew on the same Baseten credits."""
     return sum((state.get(key) or {}).get("total", 0.0) for key in ("baseten_spend", "investigator_spend", "demo_spend"))
+
+
+def _meta_credits_used() -> float:
+    """Spark verdicts and the investigator draw on the same Meta credits. The demo has its own $8 on top."""
+    return sum((state.get(key) or {}).get("total", 0.0) for key in ("spark_spend", INVESTIGATOR_SPEND))
+
+
+def _credits_used(backend: str, spend: dict) -> float:
+    if backend == "spark":
+        return _meta_credits_used()
+    return _baseten_credits_used() if backend == "spark-open-baseten" else spend["total"]
 
 
 def _spark_open_host() -> tuple[str, str, float, float] | None:
@@ -1200,8 +1216,7 @@ def _spark_open_host() -> tuple[str, str, float, float] | None:
              ("baseten_enabled", "spark-open-baseten", "baseten_spend", BASETEN_DAILY_CAP_USD, BASETEN_TOTAL_CAP_USD)]
     for flag, backend, spend_key, daily_cap, total_cap in hosts:
         spend = state.get(spend_key, {"total": 0.0, "days": {}})
-        used = _baseten_credits_used() if backend == "spark-open-baseten" else spend["total"]
-        if state.get(flag, False) and used < total_cap and spend["days"].get(day, 0.0) < daily_cap:
+        if state.get(flag, False) and _credits_used(backend, spend) < total_cap and spend["days"].get(day, 0.0) < daily_cap:
             return backend, spend_key, daily_cap, total_cap
     return None
 
@@ -1419,8 +1434,8 @@ def _investigate_package(name: str, version: str, meta_reasons: list[str] | None
                        backend=backend, deep=deep, references=references, on_step=on_step)
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[BASETEN_SECRET, FIREWORKS_SECRET], timeout=280, cpu=0.25, memory=1024)
-def investigate_package(name: str, version: str, deep: bool = False, backend: str = "spark-open-baseten") -> dict:
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET, BASETEN_SECRET, FIREWORKS_SECRET], timeout=280, cpu=0.25, memory=1024)
+def investigate_package(name: str, version: str, deep: bool = False, backend: str = INVESTIGATOR_BACKEND) -> dict:
     """Run the investigator on one version and return its steps, excerpts and verdict (for review)."""
     res = _investigate_package(name, version, None, deep, backend)
     if res is None:
@@ -1446,8 +1461,8 @@ _DEMO_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,60}\Z")
 def _demo_open() -> bool:
     day = f"{datetime.now(timezone.utc):%Y-%m-%d}"
     spend = state.get("demo_spend", {"total": 0.0, "days": {}})
-    return (bool(state.get("baseten_enabled", False)) and _baseten_credits_used() < BASETEN_TOTAL_CAP_USD
-            and spend["total"] < DEMO_TOTAL_CAP_USD and spend["days"].get(day, 0.0) < DEMO_DAILY_CAP_USD)
+    # no model switch here: the crons stop after the deadline, the demo has to stay up through judging
+    return spend["total"] < DEMO_TOTAL_CAP_USD and spend["days"].get(day, 0.0) < DEMO_DAILY_CAP_USD
 
 
 def _demo_spec(text: str) -> tuple[str, str | None] | None:
@@ -1459,7 +1474,7 @@ def _demo_spec(text: str) -> tuple[str, str | None] | None:
     return name, version
 
 
-@app.function(image=image, volumes={str(DATA): volume}, secrets=[BASETEN_SECRET], timeout=200, cpu=0.25, memory=1024)
+@app.function(image=image, volumes={str(DATA): volume}, secrets=[SPARK_SECRET], timeout=200, cpu=0.25, memory=1024)
 def demo_investigate(key: str, name: str, version: str) -> None:
     """One public run: the steps appear on the page as the model takes them."""
     from gatekeeper.investigate import BACKENDS
@@ -1996,6 +2011,48 @@ th{{color:var(--muted);font-weight:500}} .wrap{{overflow-x:auto}} a{{color:var(-
 
 
 LEASE_S = 15 * 60
+WORK_POOL = 200
+WORK_REUSE_PER_RUN = 100
+
+
+def _refresh_work_pool(items: dict, backend: str = "glimmer-local") -> None:
+    """Reading the whole queue takes over a minute, longer than a worker waits, so the Spark cron, which
+    reads it anyway, leaves the next keys for /work."""
+    now = time.time()
+    judged = {it.get("bundle_sha256"): it["verdicts"][backend] for it in items.values() if backend in it.get("verdicts", {})}
+    todo, reused = [], 0
+    for key, item in items.items():
+        if backend in item.get("verdicts", {}) or not item.get("bundle") or _wrongly_flagged(item):
+            continue
+        same = judged.get(item.get("bundle_sha256"))
+        if same is not None:  # identical evidence already judged: reuse instead of recomputing
+            fresh = queue.get(key, None) if reused < WORK_REUSE_PER_RUN else None
+            if fresh is not None:
+                fresh.setdefault("verdicts", {})[backend] = {**same, "reused": True}
+                fresh["status"] = "done"
+                queue[key] = fresh
+                reused += 1
+            continue
+        if item["status"] == "leased" and item.get("leased_until", 0) > now:
+            continue
+        todo.append((item["priority"], key))
+    state["work_pool"] = [k for _, k in sorted(todo, reverse=True)[:WORK_POOL]]
+
+
+def _lease_next(backend: str, now: float) -> dict:
+    pool = state.get("work_pool", None) or []
+    lease = {"key": None}
+    while pool and lease["key"] is None:
+        key = pool.pop(0)
+        item = queue.get(key, None)
+        if item is None or backend in item.get("verdicts", {}) or (item["status"] == "leased" and item.get("leased_until", 0) > now):
+            continue
+        item["status"] = "leased"
+        item["leased_until"] = now + LEASE_S
+        queue[key] = item
+        lease = {"key": key, **{k: item.get(k) for k in QUEUE_FIELDS}}  # older items lack newer fields
+    state["work_pool"] = pool
+    return lease
 
 from pydantic import BaseModel  # noqa: E402  (request models must live at module level for FastAPI)
 
@@ -2224,29 +2281,7 @@ def api():
 
     @web.get("/work", dependencies=[Depends(auth)])
     def work(backend: str = "glimmer-local") -> dict:
-        now = time.time()
-        best_key, best = None, None
-        items = dict(queue.items())
-        judged = {it.get("bundle_sha256"): it["verdicts"][backend] for it in items.values() if backend in it.get("verdicts", {})}
-        for key, item in items.items():
-            if backend in item.get("verdicts", {}) or not item.get("bundle") or _wrongly_flagged(item):
-                continue
-            same = judged.get(item.get("bundle_sha256"))
-            if same is not None:  # identical evidence already judged: reuse instead of recomputing
-                item.setdefault("verdicts", {})[backend] = {**same, "reused": True}
-                item["status"] = "done"
-                queue[key] = item
-                continue
-            if item["status"] == "leased" and item.get("leased_until", 0) > now:
-                continue
-            if best is None or item["priority"] > best["priority"]:
-                best_key, best = key, item
-        if best is None:
-            return {"key": None}
-        best["status"] = "leased"
-        best["leased_until"] = now + LEASE_S
-        queue[best_key] = best
-        return {"key": best_key, **{k: best.get(k) for k in QUEUE_FIELDS}}  # older items lack newer fields
+        return _lease_next(backend, time.time())
 
     @web.get("/items", dependencies=[Depends(auth)])
     def items(limit: int = 50) -> list[dict]:

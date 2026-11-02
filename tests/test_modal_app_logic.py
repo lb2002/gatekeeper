@@ -22,6 +22,51 @@ def app(monkeypatch):
     return mod
 
 
+def _queued(priority=1, **extra):
+    return {"priority": priority, "status": "queued", "bundle": "b", "bundle_sha256": f"sha{priority}", "seen_at": "2026-11-02T10:00:00+00:00", **extra}
+
+
+def test_work_pool_offers_the_highest_priority_first(app):
+    app.queue.update(low=_queued(1), high=_queued(9), judged=_queued(5, verdicts={"glimmer-local": {"verdict": "benign"}}),
+                     empty=_queued(8, bundle=""), leased=_queued(7, status="leased", leased_until=9e12))
+    app._refresh_work_pool(dict(app.queue))
+    assert app.state["work_pool"] == ["high", "low"]
+    assert app._lease_next("glimmer-local", 1000.0)["key"] == "high"
+    assert app.queue["high"]["status"] == "leased" and app.queue["high"]["leased_until"] == 1000.0 + app.LEASE_S
+    assert app.state["work_pool"] == ["low"]
+
+
+def test_lease_skips_what_was_judged_or_removed_since_the_pool_was_built(app):
+    app.queue.update(done=_queued(3, verdicts={"glimmer-local": {"verdict": "benign"}}), free=_queued(1))
+    app.state["work_pool"] = ["gone", "done", "free"]
+    assert app._lease_next("glimmer-local", 1000.0)["key"] == "free"
+    assert app._lease_next("glimmer-local", 1000.0) == {"key": None}
+    assert app.state["work_pool"] == []
+
+
+def test_same_bundle_reuses_the_verdict_from_a_fresh_read(app):
+    verdict = {"verdict": "benign"}
+    app.queue.update(a=_queued(2, bundle_sha256="same", verdicts={"glimmer-local": verdict}), b=_queued(1, bundle_sha256="same"))
+    snapshot = {k: dict(v) for k, v in app.queue.items()}
+    app.queue["b"]["verdicts"] = {"spark": {"verdict": "malicious"}}  # written after the cron read the queue
+    app._refresh_work_pool(snapshot)
+    assert app.queue["b"]["verdicts"]["glimmer-local"] == {**verdict, "reused": True}
+    assert app.queue["b"]["verdicts"]["spark"] == {"verdict": "malicious"} and app.state["work_pool"] == []
+
+
+def test_spark_and_the_investigator_share_the_meta_cap(app):
+    app.state.update(spark_spend={"total": 100.0, "days": {}}, investigator_spark_spend={"total": 30.0, "days": {}})
+    assert app._credits_used("spark", app.state["spark_spend"]) == 130.0
+    assert app._credits_used("spark-open-fireworks", {"total": 7.0}) == 7.0
+
+
+def test_demo_stays_open_when_the_crons_are_off_until_its_own_caps(app):
+    app.state.update(spark_enabled=False, baseten_enabled=False)
+    assert app._demo_open()
+    app.state["demo_spend"] = {"total": app.DEMO_TOTAL_CAP_USD, "days": {}}
+    assert not app._demo_open()
+
+
 def test_daily_report_once_per_day_after_six(app):
     app.state.update(daily={"2026-10-29": {"versions": 84214, "scanned": 15164, "flagged": 697}},
                      catches={"a@1": {"name": "a", "flagged_at": "2026-10-29T10:00:00+00:00"}},

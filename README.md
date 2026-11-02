@@ -38,10 +38,10 @@ npm replication feed (every 2 min, on Modal)
   -> in batches: fine-tuned Llama Guard 3 1B (v2) over everything the cheap stages let through
      (both learned stages only route, so they run wide: ~5% of live npm each)
   -> evidence bundle: numbered excerpts of the code that matters (max 8000 chars)
-  -> Muse Spark Open (Fireworks, Baseten) judges every flag; Muse Spark (Meta API) gives second opinions;
+  -> Muse Spark Open (Fireworks) judges every flag; Muse Spark (Meta API) gives second opinions;
      Muse Glimmer 30B runs locally (laptop worker, install guard)
   -> verdict JSON with cited lines, validated against the bundle
-  -> investigator: Muse Spark Open works through the archive itself, step by step
+  -> investigator: a Muse agent works through the archive itself, step by step
   -> reports to OpenSSF malicious-packages: human review, or automatic when the static proof is unambiguous
   -> hourly confirmation against OSV, GitHub advisories and npm takedowns
   -> hourly sweep: every public report leads to the account behind it, its other packages and its endpoints
@@ -196,7 +196,7 @@ Gatekeeper never executes package code. Package archives are read in memory; mal
 
 Open [the demo](https://lb2002--gatekeeper-api.us-east.modal.run/try), type any npm package, and watch the steps come in. No account. With a Modal login, `uv run gk investigate name@version` does the same in a terminal.
 
-Open weights: the investigator and every-flag verdicts run on **Muse Spark Open** through partner inference (Baseten, Fireworks); **Muse Glimmer 30B** runs on a laptop GPU through llama.cpp; the fine-tuned **Llama Guard 3 1B** runs on a Modal GPU. Muse Spark (Meta Model API) gives second opinions.
+Open weights: every-flag verdicts run on **Muse Spark Open** through partner inference (Fireworks, and Baseten until those credits ran out on Nov 1). The investigator ran there too and every number above was measured on Spark Open; since Nov 2 the live investigator and the demo run on Muse Spark instead. That is not an equal swap: side by side on 11 recent packages the two agreed on 6, and Muse Spark cleared one package Spark Open had called malicious, at about three times the cost. **Muse Glimmer 30B** runs on a laptop GPU through llama.cpp; the fine-tuned **Llama Guard 3 1B** runs on a Modal GPU. Muse Spark (Meta Model API) gives second opinions.
 
 ## Check your project
 
@@ -240,8 +240,8 @@ Known-malicious packages and dependencies are blocked and brand-new versions are
 
 | Model | Job | Where it runs |
 |---|---|---|
-| **Muse Spark Open** (`meta-models/muse-spark-open-1026`) | A verdict with cited lines on every flag, the investigator agent, the public demo | Baseten, with Fireworks as a second host |
-| **Muse Spark** (`muse-spark-1.3`) | Second opinion on what the first models accuse | Meta Model API, standard mode |
+| **Muse Spark Open** (`meta-models/muse-spark-open-1026`) | A verdict with cited lines on every flag; the evaluation, and the investigator until Nov 1 | Fireworks; Baseten until its credits ran out |
+| **Muse Spark** (`muse-spark-1.3`) | Second opinion on what the first models accuse; since Nov 2 the investigator agent and the public demo | Meta Model API, standard mode |
 | **Muse Glimmer 30B** | Offline verdicts in the install guard, and the laptop worker | Your machine, through llama.cpp |
 | **Llama Guard 3 1B**, fine-tuned ([adapter](https://huggingface.co/lbaumberger/Llama-Guard-3-1B-Gatekeeper-npm)) | Narrows the stream before the Muse models | Modal GPU |
 | **Muse Code** | Demo agent, with the guard's npm first on PATH | Your terminal, on `muse-spark-1.3` |
