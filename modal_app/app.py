@@ -1013,7 +1013,7 @@ def _autoreport_package(name: str, entries: list, live: bool) -> dict:
     judge_ids = sorted({j for _, it, _ in evidence for j in auto.judge_verdicts(it.get("verdicts"))})
     judges = ", ".join(JUDGE_NAMES.get(j, j) for j in judge_ids)
     published = {it["version"]: it.get("published_at") or "" for _, it, _ in evidence}
-    osv_doc = auto.build_osv(name, [ev for _, _, ev in evidence], published, judges, now)
+    osv_doc = auto.build_osv(name, [ev for _, _, ev in evidence], published, now)
     if not live:
         _append_jsonl(DATA / "autoreport" / "dry" / f"{day}.jsonl", [{"name": name, "versions": list(published), "osv": osv_doc}])
         return marks | {k: {"result": "dry-run", "reason": judges} for k in ev_keys}

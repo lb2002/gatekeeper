@@ -346,7 +346,7 @@ def _join(parts: list[str]) -> str:
     return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
-def build_osv(name: str, evidence: list[Evidence], published: dict[str, str], judges: str, now: datetime) -> dict:
+def build_osv(name: str, evidence: list[Evidence], published: dict[str, str], now: datetime) -> dict:
     """OSV report from static facts. `published` maps version -> publish time (ISO)."""
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     bullets = []
@@ -360,16 +360,15 @@ def build_osv(name: str, evidence: list[Evidence], published: dict[str, str], ju
     details = (
         f"{name} runs code during `npm install` that reads the process environment, credential files or the machine's identity and contains "
         f"a request to an external collection endpoint:\n\n" + "\n".join(bullets) + "\n\n"
-        f"The code is quoted from the published archive. Gatekeeper (https://github.com/lb2002/gatekeeper) flagged it "
-        f"statically, and the Meta models {judges} classified it as malicious. Submitted automatically by Gatekeeper on "
-        f"behalf of Linus Baumberger (https://github.com/lb2002)."
+        "The code is quoted from the published archive."
     )
     files = {}
     for e in evidence:
         files.setdefault(e.sha256, {"source": "PACKAGE_ARCHIVE", "paths": [e.file], "digests": {"sha256": e.sha256},
                                     "note": f"Run during npm install ({e.unit})."})
-    hosts = {h for e in evidence for h in e.hosts}
-    ips = {h for h in hosts if _is_ip(h)}
+    # a shared service says nothing on its own: its URLs stay, its bare domain goes
+    hosts = {h for e in evidence for h in e.hosts} - set(COLLECTION_HOSTS)
+    ips ={h for h in hosts if _is_ip(h)}
     return {
         "schema_version": "1.7.4",
         "modified": stamp,
@@ -381,7 +380,6 @@ def build_osv(name: str, evidence: list[Evidence], published: dict[str, str], ju
             "database_specific": {"cwes": [{"cweId": "CWE-506", "name": "Embedded Malicious Code",
                                             "description": "The product contains code that appears to be malicious in nature."}]},
         }],
-        "references": [{"type": "PACKAGE", "url": f"https://www.npmjs.com/package/{name}"}],
         "credits": [{"name": "Linus Baumberger (Gatekeeper)", "contact": ["https://github.com/lb2002"], "type": "FINDER"}],
         "database_specific": {"iocs": {
             "domains": sorted(hosts - ips),
