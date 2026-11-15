@@ -4,12 +4,14 @@
 
 Open-source malware detection for npm, built on Meta's models. It never runs package code.
 
+**2nd place, Indie track, Meta Global AI Developer Hackathon (Nov 2026).** The hosted demo and the live monitor ran during the hackathon and are offline now. [Watch the 3-minute demo](https://youtu.be/gM_wsjJBctM); the CLI, the audit and the install guard still run on your machine.
+
 | Use it | What it does | Try it |
 |---|---|---|
-| **Investigator** | A Muse agent reads a package like an analyst: picks files, searches, has strings decoded, compares with the previous version or the original of a fork. Code checks its claims. | [**Watch it work on any npm package**](https://lb2002--gatekeeper-api.us-east.modal.run/try), no account |
-| **Audit** | Am I already affected? Checks every version in your lockfile, and finds poisoned lockfiles. | [Paste a lockfile](https://lb2002--gatekeeper-api.us-east.modal.run/try), or `gk audit`, or the [GitHub Action](#check-your-project) |
+| **Investigator** | A Muse agent reads a package like an analyst: picks files, searches, has strings decoded, compares with the previous version or the original of a fork. Code checks its claims. | [**Watch it in the demo video**](https://youtu.be/gM_wsjJBctM), or `gk investigate` ([how](#try-the-investigator)) |
+| **Audit** | Am I already affected? Checks every version in your lockfile, and finds poisoned lockfiles. | `gk audit`, or the [GitHub Action](#check-your-project) |
 | **Install guard** | Sits in front of `npm install` and `npx`, for you or your AI coding agent, and stops malware before any install script runs. No GPU needed. | [Three commands](#try-the-install-guard), under a minute |
-| **Live monitor** | Reads every new npm release (~250 changes a minute), has Meta models judge the suspicious ones with cited lines, and reports to OpenSSF. | [Live numbers](https://lb2002--gatekeeper-api.us-east.modal.run/) |
+| **Live monitor** | Reads every new npm release (~250 changes a minute), has Meta models judge the suspicious ones with cited lines, and reports to OpenSSF. | [Results from the live run](#live-results) |
 
 It never runs package code.
 
@@ -67,7 +69,7 @@ Three things keep it honest:
 
 - **Every claim is checked by code, not by another model.** A verdict may cite only rows the model was really shown. If it says code runs at install, [`reach.py`](src/gatekeeper/evidence/reach.py) follows the require graph from the install hook; if the cited file is not reachable, the claim counts as unproven. That catches the mistake models keep making: blaming the install hook for code in a build command.
 - **It can clear a flag.** When it reads further and finds nothing, the automatic reporter stands down and no alert goes out.
-- **Its work is reviewable.** Each run keeps the steps and excerpts. `gk investigate name@version` prints them, and [the demo page](https://lb2002--gatekeeper-api.us-east.modal.run/try) shows them live.
+- **Its work is reviewable.** Each run keeps the steps and excerpts. `gk investigate name@version` prints them, and [the demo video](https://youtu.be/gM_wsjJBctM) shows a run.
 
 Why this matters: on the time-split test it found 10 of the 83 samples all three one-shot models passed, for about 1.3 cents a package, with no `malicious` verdict on 131 benign packages (71 of them hard negatives with install scripts). Comparing with the original is what cracked the Baileys family, 100+ forks that hide one covert call in 100 KB of WhatsApp socket code: 6 of the 8 in the test set are now found, up from 2 by the one-shot models, and the model names the hidden channel subscription.
 
@@ -128,7 +130,7 @@ By Nov 3 the monitor had read about 633,000 new npm versions, scanned about 175,
 
 ![Flagged by Gatekeeper vs. first listing in OSV, GitHub or npm](docs/lead-times.svg)
 
-The first 16 are below; the [live page](https://lb2002--gatekeeper-api.us-east.modal.run/) lists all of them.
+The first 16 are below.
 
 | Package (versions) | What it does | Flagged after publish | Ahead of OSV / GitHub / npm |
 |---|---|---|---|
@@ -194,7 +196,7 @@ Gatekeeper never executes package code. Package archives are read in memory; mal
 
 ## Try the investigator
 
-Open [the demo](https://lb2002--gatekeeper-api.us-east.modal.run/try), type any npm package, and watch the steps come in. No account. With a Modal login, `uv run gk investigate name@version` does the same in a terminal.
+The hosted demo page is offline since the hackathon ended; [the demo video](https://youtu.be/gM_wsjJBctM) shows it running. With a Modal login, `uv run gk investigate name@version` runs the same investigation in a terminal.
 
 Open weights: every-flag verdicts run on **Muse Spark Open** through partner inference (Fireworks, and Baseten until those credits ran out on Nov 1). The investigator ran there too and every number above was measured on Spark Open; since Nov 2 the live investigator and the demo run on Muse Spark instead. That is not an equal swap: side by side on 11 recent packages the two agreed on 6, and Muse Spark cleared one package Spark Open had called malicious, at about three times the cost. **Muse Glimmer 30B** runs on a laptop GPU through llama.cpp; the fine-tuned **Llama Guard 3 1B** runs on a Modal GPU. Muse Spark (Meta Model API) gives second opinions.
 
@@ -216,7 +218,7 @@ gk audit            # in your project; --offline sends nothing, --json for scrip
 
 [This draft pull request](https://github.com/lb2002/gatekeeper/pull/1) shows it stopping a reported package on GitHub.
 
-The same check runs [on the demo page](https://lb2002--gatekeeper-api.us-east.modal.run/try) without installing anything. It flags an entry that points to another package's file on the registry, the usual way to poison a lockfile. It flags versions OSV lists as malware, npm's placeholders for removed packages, and locked packages that come from a server other than the registry (a poisoned lockfile); code hosts like GitHub are shown as a note. Tested on the lockfiles of Next.js, VS Code, React and Babel (9,000 packages): no false alarms. Exit code 1 means something needs a look, so it also works in CI:
+It flags an entry that points to another package's file on the registry, the usual way to poison a lockfile. It flags versions OSV lists as malware, npm's placeholders for removed packages, and locked packages that come from a server other than the registry (a poisoned lockfile); code hosts like GitHub are shown as a note. Tested on the lockfiles of Next.js, VS Code, React and Babel (9,000 packages): no false alarms. Exit code 1 means something needs a look, so it also works in CI:
 
 ```yaml
 - uses: lb2002/gatekeeper@v2.3
@@ -234,7 +236,7 @@ gk guard shell                # Windows: a PowerShell with the shims first on PA
 npm install <package>         # checked before anything is installed
 ```
 
-Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. **No GPU needed:** an archive the static rules flag goes to the hosted investigator (about 30 seconds; it sends the package name and version, nothing about your machine, and `GK_NO_CLOUD=1` turns it off). For full privacy and offline use, run Muse Glimmer on your own machine instead: such archives then go to a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja -fa on -c 8192 --port 8080 --reasoning-format deepseek --reasoning-budget 48 --alias muse-glimmer`, the [official GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF); `GK_LOCAL_URL` points elsewhere). With neither available, those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
+Known-malicious packages and dependencies are blocked and brand-new versions are held without any model. **No GPU needed:** an archive the static rules flag went to the hosted investigator (about 30 seconds; it sends the package name and version, nothing about your machine, and `GK_NO_CLOUD=1` turns it off). That service is offline since the hackathon ended, so without a local model such archives are blocked (see below). For full privacy and offline use, run Muse Glimmer on your own machine instead: such archives then go to a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server (`llama-server -m Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf --jinja -fa on -c 8192 --port 8080 --reasoning-format deepseek --reasoning-budget 48 --alias muse-glimmer`, the [official GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF); `GK_LOCAL_URL` points elsewhere). With neither available, those installs fail closed (blocked, `--gk-allow` to override). `demo/` has a harmless typosquat and a local registry to see a block end to end.
 
 ## Meta models and where each runs
 
