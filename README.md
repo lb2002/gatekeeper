@@ -261,3 +261,15 @@ uv run gk guard enable                                   # npm/npx shims
 uv run gk guard update-osv                               # offline list of 222k malicious npm names
 uv run modal deploy modal_app/app.py                     # the live monitor
 ```
+
+## Contributing
+
+Gatekeeper started as a ten-day hackathon project and I'd like to keep it going. Help is welcome, small or large.
+
+- **It missed a malicious package, or flagged a harmless one?** Open an issue with the package name and version. The name is enough, please don't attach the archive.
+- **Want to build something?** Good places to start: static rules for new install-time tricks (`src/gatekeeper/triage/`), `bun.lock` support for `gk audit`, PyPI as a second registry, and running the live monitor again on cheaper infrastructure.
+- **Pull requests:** fork, branch, and make sure `uv sync && uv run pytest` passes (CI runs the same). Keep a PR to one change. For anything bigger, open an issue first so we can agree on the approach.
+
+Two rules that don't bend: nothing in this repo may execute package code, and no malware samples get committed, only package identifiers and scripts to rebuild datasets (see [Safety](#safety)).
+
+Found a security problem in Gatekeeper itself? Please don't open a public issue. Report it privately through the repository's **Security** tab.
